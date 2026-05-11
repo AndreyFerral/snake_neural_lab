@@ -238,7 +238,7 @@ def load_aux_stats_store() -> dict[str, Any]:
 def save_aux_stats_store(store: dict[str, Any]) -> None:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     tmp_path = AUX_STATS_PATH.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(store, ensure_ascii=False, separators(",", ":")), encoding="utf-8")
+    tmp_path.write_text(json.dumps(store, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     tmp_path.replace(AUX_STATS_PATH)
 
 
@@ -733,14 +733,7 @@ class SnakeWebBackend:
                     else:
                         self._perform_parallel_training_step()
 
-            # Троттлинг обновления UI во время обучения для устранения рывков
-            if self.training:
-                self._training_step_counter += 1
-                if self._training_step_counter % 3 == 0:
-                    self._update_frame_cache()
-            else:
-                self._training_step_counter = 0
-                self._update_frame_cache()
+            self._update_frame_cache()
 
             if self._flush_pending_save():
                 did_work = True
@@ -1329,7 +1322,7 @@ class SnakeWebBackend:
         RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
         tmp_path = ACTIVE_CONTEXT_PATH.with_suffix(".tmp")
         tmp_path.write_text(
-            json.dumps(self._active_context_payload(), ensure_ascii=False, separators(",", ":")),
+            json.dumps(self._active_context_payload(), ensure_ascii=False, separators=(",", ":")),
             encoding="utf-8",
         )
         tmp_path.replace(ACTIVE_CONTEXT_PATH)

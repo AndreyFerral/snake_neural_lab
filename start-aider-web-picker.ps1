@@ -201,7 +201,8 @@ $AiderArgs = @(
     "--model", $AiderModel,
     "--input-history-file", "$StateDir\input.history",
     "--chat-history-file", "$StateDir\chat.history.md",
-	"--read", "README.md",   # <--- Файл всегда будет загружен как справочник
+	"--no-auto-commit",
+	"--read", "README.md", 
     "--no-show-model-warnings"
 )
 
