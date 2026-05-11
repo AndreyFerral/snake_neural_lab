@@ -1,0 +1,7 @@
+# Aider / local runtime artifacts
+.aider*
+.web_backend.pid
+__pycache__/
+.runtime/
+.continue/
+*.pyc

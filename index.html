@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Snake Neural Lab</title>
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d1e29'/%3E%3Ccircle cx='20' cy='34' r='8' fill='%235cd6ad'/%3E%3Ccircle cx='32' cy='34' r='8' fill='%235cd6ad'/%3E%3Ccircle cx='44' cy='34' r='8' fill='%23d7fff4'/%3E%3Ccircle cx='46' cy='31' r='1.9' fill='%2308131d'/%3E%3Ccircle cx='46' cy='37' r='1.9' fill='%2308131d'/%3E%3Ccircle cx='47' cy='17' r='7' fill='%23df2338'/%3E%3Cpath d='M46 10c1 1 2 2 2 4' stroke='%236b4728' stroke-width='2.4' stroke-linecap='round' fill='none'/%3E%3Cpath d='M50 10c3 0 5 2 5 4-3 0-5-1-6-3' fill='%235ba93a'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="styles.css" />
+
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Snake + Reinforcement Learning</p>
+          <h1>Змейка с обучением нейросети</h1>
+          <p class="hero-copy">
+            Интерфейс работает в браузере, а сама нейросеть и цикл обучения выполняются в Python backend.
+            Размер входа модели можно переключать отдельно от игрового поля, и для каждого входа хранится своя обученная модель.
+          </p>
+          <div class="hero-actions">
+            <button id="restartBackend">Перезапуск backend</button>
+            <button id="shutdownBackend" class="danger">Выход</button>
+            <label class="smart-model-control" id="smartModelControl" hidden>
+              Файл Zmey-smart
+              <select id="smartModel">
+                <option value="">Нет .h5</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div class="hero-badges">
+          <span id="deviceBadge">CPU</span>
+          <span id="boardSizeBadge">Карта 10x10</span>
+          <span id="inputGridBadge">Вход Без карты + 18 сигналов</span>
+          <span>Hybrid 96-48-3</span>
+          <span>Live-графики</span>
+          <span id="networkSourceBadge">Нейросеть: Python backend</span>
+        </div>
+      </header>
+
+      <main class="dashboard">
+        <section class="panel game-panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Поле</p>
+              <h2>Игровая среда</h2>
+            </div>
+            <div class="panel-actions compact">
+              <label>
+                Вход
+              <select id="inputMode">
+                <option value="signals" selected>Сигналы</option>
+                <option value="map">Карта</option>
+                <option value="hybrid">Карта + сигналы</option>
+              </select>
+              </label>
+              <label class="agent-mode-control">
+                Агент
+              <select id="agentMode">
+                <option value="evolution" selected>Evolution</option>
+                <option value="dqn">DQN</option>
+                <option value="smart">Zmey-smart</option>
+              </select>
+              </label>
+              <label>
+                Размер карты
+              <select id="boardSize">
+                <option value="10" selected>10x10</option>
+                <option value="15">15x15</option>
+                <option value="20">20x20</option>
+                <option value="25">25x25</option>
+                <option value="30">30x30</option>
+                <option value="35">35x35</option>
+              </select>
+              </label>
+              <label>
+                Скорость
+                <input id="speedRange" type="range" min="1" max="16" value="8" />
+              </label>
+            </div>
+          </div>
+
+          <canvas id="gameCanvas" width="720" height="720"></canvas>
+          <div class="legend">
+            <div class="step-review">
+              <div class="step-review-head">
+                <strong>Лог лидера</strong>
+                <div class="step-review-controls">
+                  <span id="stepReviewLabel" class="step-review-label">Нет шагов</span>
+                  <div class="step-review-tabs">
+                    <button id="stepReviewLive" class="step-review-tab is-active" data-step-log="live">Текущий</button>
+                    <button id="stepReviewPrevious" class="step-review-tab" data-step-log="previous" disabled>Прошлый</button>
+                  </div>
+                </div>
+              </div>
+              <div id="stepReviewBody" class="step-review-body">
+                <div class="muted">После первого шага здесь появятся награда и штрафы по ходу эпизода.</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <aside class="panel control-panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Контроль</p>
+              <h2>Режимы и обучение</h2>
+            </div>
+          </div>
+
+          <div class="button-grid">
+            <button id="runToggle" class="primary">Пауза</button>
+            <button id="manualMode">Ручное управление</button>
+            <button id="aiMode">ИИ играет</button>
+            <button id="trainToggle" class="accent">Обучение: выкл</button>
+            <button id="resetAgent" class="danger">Сбросить агента</button>
+          </div>
+
+          <div class="status-callout">
+            <p class="status-label">Текущее решение агента</p>
+            <p id="decisionText">Подключение к Python backend...</p>
+          </div>
+
+          <div class="stats-grid game-stats-grid">
+            <article class="stat-card"><span>Режим</span><strong id="modeStat">Игрок</strong></article>
+            <article class="stat-card"><span>Эпизод</span><strong id="epochStat">0</strong></article>
+            <article class="stat-card"><span>Шагов</span><strong id="stepStat">0</strong></article>
+            <article class="stat-card"><span>Fitness</span><strong id="lossStat">0.000</strong></article>
+            <article class="stat-card stat-wide">
+              <div class="stat-combo">
+                <div><small>Счет</small><b id="scoreStat">0</b></div>
+                <div><small>Лучший</small><b id="bestScoreStat">0</b></div>
+                <div><small>Средний</small><b id="avgScoreStat">0.0</b></div>
+              </div>
+            </article>
+            <article class="stat-card"><span>Мутация</span><strong id="epsilonStat">0.000</strong></article>
+            <article class="stat-card stat-wide">
+              <div class="stat-combo">
+                <div><small>Поколение</small><b id="bufferStat">1</b></div>
+                <div><small>Лидер</small><b id="leaderStat">-</b></div>
+                <div><small>Живых</small><b id="aliveStat">-</b></div>
+              </div>
+            </article>
+          </div>
+
+          <div id="decisionStatsTable" class="decision-stats"></div>
+
+			<table class="chart-note-table reward-table reward-table-horizontal">
+			  <thead>
+			  </thead>
+			  <tbody id="rewardRulesBody">
+				<tr>
+				  <th>Бонусы</th>
+				</tr>
+				<tr>
+				  <td colspan="3">
+					<div class="reward-list">
+					  <span>Яблоко <code>+4.0</code></span>
+					  <span>Победа <code>+10.0</code></span>
+					</div>
+				  </td>
+				</tr>
+				<tr>
+				  <th>Штрафы</th>
+				</tr>
+				<tr>
+				  <td colspan="3">
+					<div class="reward-list">
+					  <span>Смерть <code>-5.0</code></span>
+					  <span>Цикл <code>до -0.35</code></span>
+					</div>
+				  </td>
+				</tr>
+			  </tbody>
+			</table>
+        </aside>
+
+        <section id="networkPanel" class="panel network-panel" hidden>
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Визуализация</p>
+              <h2>Нейросеть и метрики</h2>
+            </div>
+          </div>
+
+          <div class="network-layout">
+            <article id="networkGraphCard" class="viz-card wide">
+              <h3>Граф сети</h3>
+              <canvas id="networkCanvas" width="1060" height="560"></canvas>
+            </article>
+
+            <article id="mapHeatmapCard" class="viz-card wide">
+              <h3>Тепловая карта</h3>
+              <canvas id="mapHeatmapCanvas" width="1060" height="240"></canvas>
+            </article>
+
+            <article class="viz-card">
+              <h3>История обучения</h3>
+              <canvas id="chartCanvas" width="920" height="460"></canvas>
+              <p class="viz-note">График обновляется после каждого завершенного эпизода.</p>
+              <table class="chart-note-table">
+                <tbody>
+                  <tr>
+                    <th>Счет</th>
+                    <td>Сколько яблок взяла змея за эпизод.</td>
+                  </tr>
+                  <tr>
+                    <th>Награда</th>
+                    <td>Суммарная награда за эпизод.</td>
+                  </tr>
+                  <tr>
+                    <th id="chartMetricLabel">Fitness</th>
+                    <td id="chartMetricDescription">Оценка особи для селекции: учитывает счет, выживание, награду, ловушки и причину завершения.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </article>
+
+            <article class="viz-card death-snapshot">
+              <h3>Итог</h3>
+              <canvas id="deathSnapshotCanvas" width="520" height="260"></canvas>
+              <div id="deathStepTimeline" class="viz-note"></div>
+              <p id="deathSnapshotMeta" class="viz-note">Снимок появится после первого эпизода.</p>
+              <div id="deathChoiceMeta" hidden></div>
+              <div id="deathRiskTable"></div>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="app_config.js"></script>
+    <script src="app_utils.js"></script>
+    <script src="snake_lab_app.js"></script>
+  </body>
+</html>
