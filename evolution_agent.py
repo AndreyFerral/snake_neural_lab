@@ -637,38 +637,60 @@ class ParallelEvolutionRunner:
         return float(env.steps_without_food) > hunger_budget
 
     def _apply_hunger_cull(self, env: Any, reward: float, info: dict[str, Any]) -> tuple[float, bool, dict[str, Any]]:
+        # Исправлено: убрано прямое изменение атрибутов env (env.done, env.last_reward и т.д.), 
+        # так как это нарушает инкапсуляцию симулятора и вызывает зависания при следующем шаге.
         reward = min(float(reward), -5.0)
-        env.done = True
-        env.last_reward = reward
-        env.last_reason = EVOLUTION_HUNGER_CULL_REASON
+        
         penalty_reasons = [str(item) for item in info.get("penalty_reasons", [])]
         if EVOLUTION_HUNGER_CULL_REASON not in penalty_reasons:
             penalty_reasons.append(EVOLUTION_HUNGER_CULL_REASON)
-        env.last_penalty_reasons = penalty_reasons
+            
         info = dict(info)
         info["reason"] = EVOLUTION_HUNGER_CULL_REASON
         info["penalty_reasons"] = penalty_reasons
         info["hunger_budget"] = hunger_budget_for(int(env.score), int(env.board_size))
         info["hunger_cull_protected"] = self.hunger_cull_protected_count()
+        
         return reward, True, info
 
     def _display_stale_loop(self, index: int) -> bool:
         env = self.envs[index]
         if self.done[index] or not env.snake:
             return False
-        recent_heads = list(env.recent_heads)[-12:]
+        
+        # Безопасный доступ к recent_heads с защитой от роста без ограничений
+        recent_heads_raw = getattr(env, "recent_heads", None)
+        if isinstance(recent_heads_raw, (list, tuple)):
+            recent_heads = list(recent_heads_raw)[-12:]
+        elif hasattr(recent_heads_raw, '__iter__'):
+            # Для deque или других итерируемых объектов берём последние элементы безопасно
+            from collections import deque
+            recent_heads = list(deque(recent_heads_raw, maxlen=12))[-12:] if isinstance(recent_heads_raw, deque) else []
+        else:
+            recent_heads = []
+            
         unique_recent = len(set(recent_heads))
         small_snake = len(env.snake) <= 5
         long_without_food = env.steps_without_food >= max(18, env.board_size * 2)
         tight_loop = len(recent_heads) >= 10 and unique_recent <= 4
-        repeated_loop_reason = env.last_reason == "looping" and env.steps_without_food >= max(12, env.board_size)
+        repeated_loop_reason = getattr(env, "last_reason", "") == "looping" and env.steps_without_food >= max(12, env.board_size)
         return small_snake and long_without_food and (tight_loop or repeated_loop_reason)
 
     def _leader_value(self, index: int) -> float:
         env = self.envs[index]
         distance = self._manhattan(env.snake[0], env.food) if env.snake else 0
         alive_bonus = 10_000.0 if not self.done[index] else 0.0
-        recent_heads = list(env.recent_heads)[-12:]
+        
+        # Безопасный доступ к recent_heads
+        recent_heads_raw = getattr(env, "recent_heads", None)
+        if isinstance(recent_heads_raw, (list, tuple)):
+            recent_heads = list(recent_heads_raw)[-12:]
+        elif hasattr(recent_heads_raw, '__iter__'):
+            from collections import deque
+            recent_heads = list(deque(recent_heads_raw, maxlen=12))[-12:] if isinstance(recent_heads_raw, deque) else []
+        else:
+            recent_heads = []
+            
         unique_recent = len(set(recent_heads))
         stale_penalty = 35_000.0 if self._display_stale_loop(index) else 0.0
         return (

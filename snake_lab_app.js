@@ -277,12 +277,20 @@ class SnakeLabApp {
   }
 
   pickTopIndices(values, count) {
-    return values
-      .map((value, index) => ({ value: Math.abs(value), index }))
-      .sort((left, right) => right.value - left.value)
-      .slice(0, count)
-      .map((item) => item.index)
-      .sort((left, right) => left - right);
+    const len = values.length;
+    if (len === 0) return [];
+    // Оптимизация: избегаем создания объектов для каждого элемента при больших массивах
+    const indexed = new Array(len);
+    for (let i = 0; i < len; i++) {
+      indexed[i] = [Math.abs(values[i]), i];
+    }
+    indexed.sort((a, b) => b[0] - a[0]);
+    const result = [];
+    for (let i = 0; i < count && i < len; i++) {
+      result.push(indexed[i][1]);
+    }
+    result.sort((a, b) => a - b);
+    return result;
   }
 
   roundedRect(ctx, x, y, width, height, radius) {
@@ -2042,6 +2050,14 @@ class SnakeLabApp {
     const output = network.output ?? [];
     const connections = network.connections ?? {};
     const labels = this.outputLabels();
+
+    // Защита от зависания при визуализации слишком больших сетей (характерно для эволюции)
+    if (hidden1.length > 500 || hidden2.length > 500) {
+      ctx.fillStyle = "#edf6f9";
+      ctx.font = "600 18px Aptos, Trebuchet MS, sans-serif";
+      ctx.fillText("Сеть слишком большая для визуализации", 28, 42);
+      return;
+    }
 
     ctx.clearRect(0, 0, width, height);
     const gradient = ctx.createLinearGradient(0, 0, width, height);
