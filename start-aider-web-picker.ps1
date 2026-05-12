@@ -113,7 +113,7 @@ if (Test-Path "__pycache__") {
 }
 
 # -----------------------------
-# 4. LM Studio + выбор модели
+# 4. LM Studio + выбор моделей (Architect & Editor)
 # -----------------------------
 
 $env:LM_STUDIO_API_KEY = "dummy-api-key"
@@ -127,8 +127,6 @@ Write-Host ""
 
 try {
     $modelsResponse = Invoke-RestMethod "$LmStudioBase/models"
-
-    # ВАЖНО: сортировка моделей по алфавиту
     $models = @(
         $modelsResponse.data |
         ForEach-Object { $_.id } |
@@ -136,8 +134,7 @@ try {
     )
 } catch {
     Write-Host "ОШИБКА: не удалось подключиться к LM Studio."
-    Write-Host "Проверь, что сервер запущен:"
-    Write-Host $LmStudioBase
+    Write-Host "Проверь, что сервер запущен: $LmStudioBase"
     pause
     exit 1
 }
@@ -148,62 +145,61 @@ if (-not $models -or $models.Count -eq 0) {
     exit 1
 }
 
-Write-Host "Доступные модели LM Studio:"
+Write-Host "Доступные модели в LM Studio:"
 Write-Host ""
-
 for ($i = 0; $i -lt $models.Count; $i++) {
     Write-Host "$($i + 1). $($models[$i])"
 }
-
 Write-Host ""
-$modelChoice = Read-Host "Выбери номер модели, Enter = 1"
 
-if ([string]::IsNullOrWhiteSpace($modelChoice)) {
-    $modelChoice = "1"
+# Выбор Архитектора
+$archChoice = Read-Host "Выбери модель для ARCHITECT (Мозг, например qwen3.6-35b-a3b)"
+if ([string]::IsNullOrWhiteSpace($archChoice)) { $archChoice = "1" }
+$archNum = [int]$archChoice
+$ArchitectModel = "lm_studio/" + $models[$archNum - 1]
+
+# Выбор Редактора
+$editChoice = Read-Host "Выбери модель для EDITOR (Правки, например gemma-4-26b-a4b-it)"
+if ([string]::IsNullOrWhiteSpace($editChoice)) { 
+    $EditorModel = $ArchitectModel 
+} else {
+    $editNum = [int]$editChoice
+    $EditorModel = "lm_studio/" + $models[$editNum - 1]
 }
-
-if (-not ($modelChoice -as [int])) {
-    Write-Host "Неверный выбор модели."
-    pause
-    exit 1
-}
-
-$modelNumber = [int]$modelChoice
-
-if ($modelNumber -lt 1 -or $modelNumber -gt $models.Count) {
-    Write-Host "Неверный номер модели."
-    pause
-    exit 1
-}
-
-$SelectedModel = $models[$modelNumber - 1]
-$AiderModel = "lm_studio/$SelectedModel"
 
 # -----------------------------
 # 5. Запуск aider web
 # -----------------------------
 
 Write-Host ""
-Write-Host "Запускаю aider web..."
-Write-Host ""
-Write-Host "Проект:"
-Write-Host $ProjectPath
-Write-Host ""
-Write-Host "Модель:"
-Write-Host $AiderModel
-Write-Host ""
-Write-Host "История aider:"
-Write-Host $StateDir
+Write-Host "=== КОНФИГУРАЦИЯ ЗАПУСКА ==="
+Write-Host "Проект:    $ProjectPath"
+Write-Host "Architect: $ArchitectModel"
+Write-Host "Editor:    $EditorModel"
+Write-Host "============================"
 Write-Host ""
 
 $AiderArgs = @(
     "--browser",
-    "--model", $AiderModel,
+    
+    # Модели
+    "--model", $ArchitectModel,
+    "--architect",
+    "--editor-model", $EditorModel,
+    
+    # Оптимизация для локалок и экономии контекста
+    "--edit-format", "diff",        # Заставляет локальные модели присылать только изменения
+    "--map-tokens", "1024",         # Ограничивает размер "карты проекта", чтобы не жрать контекст
+    "--no-stream",                  # Локальные модели иногда стабильнее работают без стриминга в файлы
+    
+    # История и файлы
     "--input-history-file", "$StateDir\input.history",
     "--chat-history-file", "$StateDir\chat.history.md",
-	"--no-auto-commit",
-	"--read", "README.md", 
+    "--no-auto-commit",
     "--no-show-model-warnings"
 )
+
+# Если вы хотите добавить README.md по умолчанию, раскомментируйте строку ниже
+# $AiderArgs += "--read", "README.md"
 
 & py "-$PythonVersion" -m aider @AiderArgs
