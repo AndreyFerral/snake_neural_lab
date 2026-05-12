@@ -5,10 +5,18 @@ from dataclasses import dataclass
 import random
 import time
 from typing import Any, Callable, Deque
+import gc  # <-- ДОБАВЛЕНО: импортируем сборщик мусора
 
 import numpy as np
 import torch
 from torch import nn
+
+# --- ДОБАВЛЕНО: Оптимизация Garbage Collector ---
+# По умолчанию Python собирает мусор каждые 700 объектов. 
+# Мы увеличиваем лимит до 50 000. Сборка будет происходить реже
+# (в фоне) и паузы по 130-140мс практически исчезнут.
+gc.set_threshold(50000, 50, 50)
+
 try:
     from torch.func import functional_call
 except ImportError:  # pragma: no cover - fallback for older PyTorch builds

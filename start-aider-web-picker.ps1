@@ -1,32 +1,56 @@
 ﻿Add-Type -AssemblyName System.Windows.Forms
 
+# =========================================================
+# AIDER + LM STUDIO WEB LAUNCHER
+# Optimized for large-context local models (132k)
+# =========================================================
+
 $DefaultProjectPath = "C:\Users\Andrey\Documents\Codex\Snake\snake_neural_lab"
+
 $LmStudioBase = "http://localhost:1234/v1"
+
 $PythonVersion = "3.12"
 
+# ---------------------------------------------------------
+# LM Studio / Aider environment
+# ---------------------------------------------------------
+
+$env:LM_STUDIO_API_KEY = "dummy-api-key"
+$env:LM_STUDIO_API_BASE = $LmStudioBase
+
+# Увеличенный timeout для больших diff и длинных ответов
+$env:AIDER_OPENAI_API_TIMEOUT = "600"
+
 Write-Host ""
-Write-Host "=== Aider Web Picker ==="
+Write-Host "================================================="
+Write-Host "              AIDER WEB PICKER"
+Write-Host "================================================="
 Write-Host ""
 
-# -----------------------------
+# =========================================================
 # 1. Выбор папки проекта
-# -----------------------------
+# =========================================================
 
 Write-Host "Папка проекта по умолчанию:"
 Write-Host $DefaultProjectPath
 Write-Host ""
-Write-Host "Enter  = использовать папку по умолчанию"
-Write-Host "b      = выбрать папку через окно"
+
+Write-Host "Enter = использовать папку по умолчанию"
+Write-Host "b     = выбрать папку через окно"
 Write-Host "или вставь путь вручную"
 Write-Host ""
 
 $projectChoice = Read-Host "Папка проекта"
 
 if ([string]::IsNullOrWhiteSpace($projectChoice)) {
+
     $ProjectPath = $DefaultProjectPath
+
 }
 elseif ($projectChoice -eq "b") {
+
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+
     $dialog.Description = "Выбери папку проекта для aider"
     $dialog.ShowNewFolderButton = $true
 
@@ -37,7 +61,10 @@ elseif ($projectChoice -eq "b") {
     $result = $dialog.ShowDialog()
 
     if ($result -ne [System.Windows.Forms.DialogResult]::OK) {
+
+        Write-Host ""
         Write-Host "Папка не выбрана. Выход."
+
         pause
         exit 1
     }
@@ -45,53 +72,72 @@ elseif ($projectChoice -eq "b") {
     $ProjectPath = $dialog.SelectedPath
 }
 else {
+
     $ProjectPath = $projectChoice.Trim('"')
 }
 
 if (-not (Test-Path $ProjectPath)) {
+
     Write-Host ""
     Write-Host "ОШИБКА: папка проекта не найдена:"
     Write-Host $ProjectPath
+
     pause
     exit 1
 }
 
 Set-Location $ProjectPath
 
-# -----------------------------
+# =========================================================
 # 2. Проверка git
-# -----------------------------
+# =========================================================
 
 try {
+
     git --version | Out-Null
-} catch {
-    Write-Host "ОШИБКА: git не найден. Установи Git for Windows."
+
+}
+catch {
+
+    Write-Host ""
+    Write-Host "ОШИБКА: git не найден."
+    Write-Host "Установи Git for Windows."
+
     pause
     exit 1
 }
 
 if (-not (Test-Path ".git")) {
+
     Write-Host ""
     Write-Host "В папке нет git-репозитория."
+
     $initGit = Read-Host "Создать git repo здесь? y/n"
 
     if ($initGit -eq "y") {
+
         git init
-    } else {
-        Write-Host "aider лучше работает внутри git repo. Выход."
+
+    }
+    else {
+
+        Write-Host ""
+        Write-Host "aider лучше работает внутри git repo."
+
         pause
         exit 1
     }
 }
 
-# -----------------------------
-# 3. Папка истории aider вне проекта
-# -----------------------------
+# =========================================================
+# 3. Папка состояния aider
+# =========================================================
 
-$SafeProjectName = Split-Path $ProjectPath -Leaf
 $StateDir = ".aider-state"
+
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 
+# Перенос старых файлов истории
 if (Test-Path ".aider.chat.history.md") {
     Move-Item ".aider.chat.history.md" "$StateDir\chat.history.md" -Force
 }
@@ -104,6 +150,7 @@ if (Test-Path ".aider.llm.history") {
     Move-Item ".aider.llm.history" "$StateDir\llm.history" -Force
 }
 
+# Cleanup
 if (Test-Path ".web_backend.pid") {
     Remove-Item ".web_backend.pid" -Force
 }
@@ -112,94 +159,272 @@ if (Test-Path "__pycache__") {
     Remove-Item "__pycache__" -Recurse -Force
 }
 
-# -----------------------------
-# 4. LM Studio + выбор моделей (Architect & Editor)
-# -----------------------------
+# =========================================================
+# 4. Создание .aiderignore если отсутствует
+# =========================================================
 
-$env:LM_STUDIO_API_KEY = "dummy-api-key"
-$env:LM_STUDIO_API_BASE = $LmStudioBase
+$AiderIgnorePath = ".aiderignore"
+
+if (-not (Test-Path $AiderIgnorePath)) {
+
+@"
+.aider-state/
+venv/
+.venv/
+node_modules/
+dist/
+build/
+coverage/
+__pycache__/
+*.log
+*.tmp
+*.cache
+*.bak
+*.pyc
+"@ | Out-File -Encoding UTF8 $AiderIgnorePath
+
+    Write-Host ""
+    Write-Host ".aiderignore создан."
+}
+
+# =========================================================
+# 5. Проверка LM Studio
+# =========================================================
 
 Write-Host ""
 Write-Host "Проверяю LM Studio..."
-Write-Host "Перед запуском должен быть включён:"
-Write-Host "LM Studio -> Developer -> Start Server"
+Write-Host ""
+Write-Host "LM Studio должен быть запущен:"
+Write-Host "Developer -> Start Server"
 Write-Host ""
 
 try {
+
     $modelsResponse = Invoke-RestMethod "$LmStudioBase/models"
+
     $models = @(
         $modelsResponse.data |
         ForEach-Object { $_.id } |
         Sort-Object
     )
-} catch {
+
+}
+catch {
+
+    Write-Host ""
     Write-Host "ОШИБКА: не удалось подключиться к LM Studio."
-    Write-Host "Проверь, что сервер запущен: $LmStudioBase"
+    Write-Host "Проверь сервер:"
+    Write-Host $LmStudioBase
+
     pause
     exit 1
 }
 
 if (-not $models -or $models.Count -eq 0) {
+
+    Write-Host ""
     Write-Host "ОШИБКА: LM Studio не вернул список моделей."
+
     pause
     exit 1
 }
 
-Write-Host "Доступные модели в LM Studio:"
+# =========================================================
+# 6. Вывод моделей
+# =========================================================
+
 Write-Host ""
+Write-Host "================================================="
+Write-Host "           ДОСТУПНЫЕ МОДЕЛИ"
+Write-Host "================================================="
+Write-Host ""
+
 for ($i = 0; $i -lt $models.Count; $i++) {
+
     Write-Host "$($i + 1). $($models[$i])"
 }
+
 Write-Host ""
 
-# Выбор Архитектора
-$archChoice = Read-Host "Выбери модель для ARCHITECT (Мозг, например qwen3.6-35b-a3b)"
-if ([string]::IsNullOrWhiteSpace($archChoice)) { $archChoice = "1" }
-$archNum = [int]$archChoice
-$ArchitectModel = "lm_studio/" + $models[$archNum - 1]
+# =========================================================
+# 7. Рекомендации
+# =========================================================
 
-# Выбор Редактора
-$editChoice = Read-Host "Выбери модель для EDITOR (Правки, например gemma-4-26b-a4b-it)"
-if ([string]::IsNullOrWhiteSpace($editChoice)) { 
-    $EditorModel = $ArchitectModel 
-} else {
-    $editNum = [int]$editChoice
-    $EditorModel = "lm_studio/" + $models[$editNum - 1]
+Write-Host "================================================="
+Write-Host "РЕКОМЕНДУЕМЫЕ МОДЕЛИ"
+Write-Host "================================================="
+Write-Host ""
+Write-Host "ЛУЧШИЙ ОБЩИЙ ВАРИАНТ: qwen3.6-35b-a3b"
+Write-Host "ЛУЧШИЙ ДЛЯ КОДА: qwen3-coder-30b-a3b-instruct"
+Write-Host "ЛУЧШИЙ БАЛАНС: qwen3.6-27b"
+Write-Host "НЕ РЕКОМЕНДУЕТСЯ как основная aider-модель: gpt-oss-20b"
+Write-Host ""
+
+# =========================================================
+# 8. Выбор режима работы
+# =========================================================
+
+Write-Host "================================================="
+Write-Host "РЕЖИМ РАБОТЫ"
+Write-Host "================================================="
+Write-Host ""
+Write-Host "1 = Single Model (РЕКОМЕНДУЕТСЯ)"
+Write-Host "2 = Architect + Editor"
+Write-Host ""
+
+$ModeChoice = Read-Host "Выбор режима"
+
+if ([string]::IsNullOrWhiteSpace($ModeChoice)) {
+    $ModeChoice = "1"
 }
 
-# -----------------------------
-# 5. Запуск aider web
-# -----------------------------
+# =========================================================
+# 9. Выбор основной модели
+# =========================================================
 
 Write-Host ""
-Write-Host "=== КОНФИГУРАЦИЯ ЗАПУСКА ==="
-Write-Host "Проект:    $ProjectPath"
-Write-Host "Architect: $ArchitectModel"
-Write-Host "Editor:    $EditorModel"
-Write-Host "============================"
+Write-Host "Выбери ОСНОВНУЮ модель:"
 Write-Host ""
+
+$modelChoice = Read-Host "Номер модели"
+
+if ([string]::IsNullOrWhiteSpace($modelChoice)) {
+    $modelChoice = "1"
+}
+
+$modelNum = [int]$modelChoice
+
+if ($modelNum -lt 1 -or $modelNum -gt $models.Count) {
+
+    Write-Host ""
+    Write-Host "Неверный номер модели."
+
+    pause
+    exit 1
+}
+
+$MainModel = "lm_studio/" + $models[$modelNum - 1]
+
+# =========================================================
+# 10. Architect + Editor mode
+# =========================================================
+
+$UseArchitect = $false
+$EditorModel = ""
+
+if ($ModeChoice -eq "2") {
+
+    $UseArchitect = $true
+
+    Write-Host ""
+    Write-Host "Выбери EDITOR модель:"
+    Write-Host ""
+
+    $editChoice = Read-Host "Номер editor модели"
+
+    if ([string]::IsNullOrWhiteSpace($editChoice)) {
+
+        $EditorModel = $MainModel
+    }
+    else {
+
+        $editNum = [int]$editChoice
+
+        if ($editNum -lt 1 -or $editNum -gt $models.Count) {
+
+            Write-Host ""
+            Write-Host "Неверный номер editor модели."
+
+            pause
+            exit 1
+        }
+
+        $EditorModel = "lm_studio/" + $models[$editNum - 1]
+    }
+}
+
+# =========================================================
+# 11. Конфигурация aider
+# =========================================================
 
 $AiderArgs = @(
+
+    # Web UI
     "--browser",
-    
-    # Модели
-    "--model", $ArchitectModel,
-    "--architect",
-    "--editor-model", $EditorModel,
-    
-    # Оптимизация для локалок и экономии контекста
-    "--edit-format", "diff",        # Заставляет локальные модели присылать только изменения
-    "--map-tokens", "1024",         # Ограничивает размер "карты проекта", чтобы не жрать контекст
-    "--no-stream",                  # Локальные модели иногда стабильнее работают без стриминга в файлы
-    
-    # История и файлы
+
+    # Основная модель
+    "--model", $MainModel,
+
+    # Лучший формат для локальных LLM
+    "--edit-format", "diff",
+
+    # Больше map
+    "--map-tokens", "2048",
+
+    # Reuse prompts/context
+    "--cache-prompts",
+
+    # Ограничение по текущему subtree
+    "--subtree-only",
+
+    # Стабильнее для локальных моделей
+    "--no-stream",
+
+    # История
     "--input-history-file", "$StateDir\input.history",
+
     "--chat-history-file", "$StateDir\chat.history.md",
+
+    # Git
     "--no-auto-commit",
+
+    # Меньше мусора
     "--no-show-model-warnings"
 )
 
-# Если вы хотите добавить README.md по умолчанию, раскомментируйте строку ниже
-# $AiderArgs += "--read", "README.md"
+# Architect mode
+if ($UseArchitect) {
+
+    $AiderArgs += "--architect"
+
+    $AiderArgs += "--editor-model"
+    $AiderArgs += $EditorModel
+}
+
+# =========================================================
+# 12. Итоговая конфигурация
+# =========================================================
+
+Write-Host ""
+Write-Host "================================================="
+Write-Host "          КОНФИГУРАЦИЯ ЗАПУСКА"
+Write-Host "================================================="
+Write-Host ""
+
+Write-Host "Проект:"
+Write-Host "  $ProjectPath"
+Write-Host ""
+
+Write-Host "Основная модель:"
+Write-Host "  $MainModel"
+Write-Host ""
+
+if ($UseArchitect) {
+
+    Write-Host "Editor модель:"
+    Write-Host "  $EditorModel"
+    Write-Host ""
+}
+
+Write-Host "Context strategy:"
+Write-Host "  map-tokens = 2048"
+Write-Host ""
+
+Write-Host "================================================="
+Write-Host ""
+
+# =========================================================
+# 13. Запуск aider
+# =========================================================
 
 & py "-$PythonVersion" -m aider @AiderArgs

@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import os
-# Suppress TensorFlow logs and oneDNN messages
+
+# СТАРЫЕ НАСТРОЙКИ
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+# --- НОВЫЕ НАСТРОЙКИ: Жестко глушим потоки C++ библиотек ---
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
 from collections import deque
 from dataclasses import asdict, dataclass
@@ -17,6 +25,10 @@ from typing import Any, Deque
 import numpy as np
 import torch
 from torch import nn
+
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
+
 from backend_config import (
     AGENT_KINDS,
     APPLE_REWARD,
@@ -238,10 +250,17 @@ def load_aux_stats_store() -> dict[str, Any]:
 def save_aux_stats_store(store: dict[str, Any]) -> None:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     tmp_path = AUX_STATS_PATH.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(store, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    tmp_path.replace(AUX_STATS_PATH)
-
-
+    payload = json.dumps(store, ensure_ascii=False, separators=(",", ":"))
+    
+    # Обход блокировок файлов в Windows
+    for attempt in range(5):
+        try:
+            tmp_path.write_text(payload, encoding="utf-8")
+            tmp_path.replace(AUX_STATS_PATH)
+            break
+        except OSError:
+            if attempt < 4:
+                time.sleep(0.05)
 
 def split_input_vector(values: np.ndarray, input_grid: int) -> tuple[np.ndarray, np.ndarray]:
     local_count = local_input_size(input_grid)
@@ -387,7 +406,7 @@ class SnakeWebBackend:
         self.step_review_entries: Deque[dict[str, Any]] = deque(maxlen=120)
         self.last_completed_step_review_entries: list[dict[str, Any]] = []
         self.step_review_history: Deque[dict[str, Any]] = deque(maxlen=1)
-        self.current_episode_transitions: list[tuple[np.ndarray, int, float, np.ndarray, bool, float]] = []
+        self.current_episode_transitions: Deque[tuple[np.ndarray, int, float, np.ndarray, bool, float]] = deque(maxlen=EPISODE_TRANSITION_LIMIT)
         self.training_display_index = 0
         self._training_step_counter = 0
 
@@ -827,10 +846,15 @@ class SnakeWebBackend:
         best_completed = self.training_runner.best_completed
         if isinstance(best_completed, dict):
             self.last_death_snapshot = self._snapshot_for_completed_training(best_completed)
+            
+        # ДОБАВЛЕНО: Профилируем время работы генетического алгоритма
+        evolve_ms = 0.0
         if self.training_runner.all_done():
+            evolve_started_at = time.perf_counter()
             self.agent.evolve_generation()
             self.training_runner.reset_generation(board_size=self.game.board_size)
             self._schedule_save(urgent=True)
+            evolve_ms = (time.perf_counter() - evolve_started_at) * 1000.0
 
         leader_started_at = time.perf_counter()
         self.training_display_index = self.training_runner.update_leader()
@@ -877,11 +901,16 @@ class SnakeWebBackend:
                 infer_ms=runner_profile.get("inference", 0.0),
                 env_ms=runner_profile.get("env_step", 0.0),
                 runner_book_ms=runner_profile.get("bookkeeping", 0.0),
+                evolve_ms=round(evolve_ms, 1),  # <-- ДОБАВЛЕНО в логи!
                 record_ms=round(record_ms, 1),
                 leader_ms=round(display_leader_ms, 1),
                 display_obs_ms=round(display_observation_ms, 1),
                 display_infer_ms=round(display_inference_ms, 1),
             )
+            
+        # ДОБАВЛЕНО: Микро-пауза (0 секунд), которая заставляет Python 
+        # принудительно переключить GIL и дать API ответить быстро, без задержек.
+        time.sleep(0)
 
     def _perform_step(self, training_mode: bool) -> None:
         started_at = time.perf_counter()
@@ -981,8 +1010,6 @@ class SnakeWebBackend:
                     priority_scale,
                 )
             )
-            if len(self.current_episode_transitions) > EPISODE_TRANSITION_LIMIT:
-                del self.current_episode_transitions[: len(self.current_episode_transitions) - EPISODE_TRANSITION_LIMIT]
             if done and self.last_reason in DEATH_REASON_ORDER and self.last_reason != "victory":
                 self._remember_dqn_death_context()
             loss = self.agent.optimize()
@@ -1121,6 +1148,7 @@ class SnakeWebBackend:
         self.last_penalty_reasons = []
         self.recent_step_snapshots.clear()
         self.step_review_entries.clear()
+        self.current_episode_transitions.clear()
         self.last_state = self._current_observation()
         _, self.last_q_values, _, self.last_greedy_action = self._select_current_action(self.last_state, False)
 
@@ -1205,7 +1233,8 @@ class SnakeWebBackend:
     def _remember_dqn_death_context(self) -> None:
         if self.agent_kind != "dqn" or not self.current_episode_transitions:
             return
-        context = self.current_episode_transitions[-(DQN_PRE_DEATH_CONTEXT_REPLAYS + 1):-1]
+        transitions_list = list(self.current_episode_transitions)
+        context = transitions_list[-(DQN_PRE_DEATH_CONTEXT_REPLAYS + 1):-1]
         for state, action, reward, next_state, done, priority_scale in context:
             self.agent.remember(
                 state,
@@ -1218,13 +1247,14 @@ class SnakeWebBackend:
 
     def _compact_elite_transitions(
         self,
-        transitions: list[tuple[np.ndarray, int, float, np.ndarray, bool, float]],
+        transitions: Deque[tuple[np.ndarray, int, float, np.ndarray, bool, float]],
     ) -> list[tuple[np.ndarray, int, float, np.ndarray, bool, float]]:
-        if len(transitions) <= ELITE_EPISODE_MAX_TRANSITIONS:
-            return list(transitions)
-        important = [item for item in transitions if item[4] or item[2] > 0.5 or item[5] > 1.0]
-        stride = max(1, len(transitions) // ELITE_EPISODE_MAX_TRANSITIONS)
-        sampled = list(transitions[::stride])
+        transitions_list = list(transitions)
+        if len(transitions_list) <= ELITE_EPISODE_MAX_TRANSITIONS:
+            return transitions_list
+        important = [item for item in transitions_list if item[4] or item[2] > 0.5 or item[5] > 1.0]
+        stride = max(1, len(transitions_list) // ELITE_EPISODE_MAX_TRANSITIONS)
+        sampled = list(transitions_list[::stride])
         merged: list[tuple[np.ndarray, int, float, np.ndarray, bool, float]] = []
         seen: set[int] = set()
         for item in important + sampled:
@@ -1321,11 +1351,19 @@ class SnakeWebBackend:
             return
         RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
         tmp_path = ACTIVE_CONTEXT_PATH.with_suffix(".tmp")
-        tmp_path.write_text(
-            json.dumps(self._active_context_payload(), ensure_ascii=False, separators=(",", ":")),
-            encoding="utf-8",
-        )
-        tmp_path.replace(ACTIVE_CONTEXT_PATH)
+        payload = json.dumps(self._active_context_payload(), ensure_ascii=False, separators=(",", ":"))
+        
+        # Обход блокировок файлов в Windows (антивирус или чтение другим потоком)
+        for attempt in range(5):
+            try:
+                tmp_path.write_text(payload, encoding="utf-8")
+                tmp_path.replace(ACTIVE_CONTEXT_PATH)
+                break  # Успешно сохранили
+            except OSError:
+                if attempt < 4:
+                    time.sleep(0.05)  # Ждем 50мс и пробуем снова
+                else:
+                    pass # Игнорируем ошибку, чтобы не крашить сервер, сохраним в следующий раз
 
     def _load_active_context(self) -> bool:
         payload = None
@@ -2146,6 +2184,7 @@ class SnakeWebBackend:
                 "running": self.running,
                 "training": self.training,
                 "mode": self.mode,
+                "speed": self.speed,  # <-- ДОБАВЛЕНО: предотвращает сброс ползунка
                 "game": {
                     "size": self.game.board_size,
                     "score": self.game.score,
@@ -2175,6 +2214,8 @@ class SnakeWebBackend:
             "running": self.running,
             "training": self.training,
             "mode": self.mode,
+            "speed": self.speed,  # <-- ДОБАВЛЕНО: предотвращает сброс ползунка
+            "persistence_enabled": self.persistence_enabled,  # <-- ДОБАВЛЕНО
             "agent_kind": self.agent_kind,
             "input_grid": self.input_grid,
             "input_mode": self.input_mode,
@@ -2433,12 +2474,11 @@ class SnakeWebBackend:
                     self.running = False
                     self._sync_board_best_score()
                     self.game = SnakeEnv(board_size=value)
-                    self._reset_training_runner(value)
                     if self.input_mode != "signals":
                         self.input_grid = value
                         self.agent = self._create_native_agent(self.agent_kind)
                         self._store_active_agent_slot()
-                        self._reset_training_runner(value)
+                    self._reset_training_runner(value)
                     self._select_board_best_score(value)
                     self._reset_environment_state()
                     self._save_state()
@@ -2462,12 +2502,11 @@ class SnakeWebBackend:
                 current = BOARD_SIZES.index(self.game.board_size)
                 next_board_size = BOARD_SIZES[(current + 1) % len(BOARD_SIZES)]
                 self.game = SnakeEnv(board_size=next_board_size)
-                self._reset_training_runner(next_board_size)
                 if self.input_mode != "signals":
                     self.input_grid = next_board_size
                     self.agent = self._create_native_agent(self.agent_kind)
                     self._store_active_agent_slot()
-                    self._reset_training_runner(next_board_size)
+                self._reset_training_runner(next_board_size)
                 self._select_board_best_score(next_board_size)
                 self._reset_environment_state()
                 self._save_state()
