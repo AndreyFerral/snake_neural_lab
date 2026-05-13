@@ -151,10 +151,16 @@ if (Test-Path ".aider.llm.history") {
 }
 
 # Cleanup
-if (Test-Path ".web_backend.pid") {
-    Remove-Item ".web_backend.pid" -Force
+$RuntimeDir = ".runtime"
+# Убедимся, что папка существует (на случай, если её ещё нет)
+if (-not (Test-Path $RuntimeDir)) {
+    New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
 }
-
+# Удаляем PID из .runtime
+if (Test-Path "$RuntimeDir/web_backend.pid") {
+    Remove-Item "$RuntimeDir/web_backend.pid" -Force
+}
+# Очистка Python кэша
 if (Test-Path "__pycache__") {
     Remove-Item "__pycache__" -Recurse -Force
 }

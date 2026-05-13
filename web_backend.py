@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import os
-
-# СТАРЫЕ НАСТРОЙКИ
+# Настройки окружения
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-
-# --- НОВЫЕ НАСТРОЙКИ: Жестко глушим потоки C++ библиотек ---
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['OPENBLAS_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
@@ -21,14 +18,13 @@ import re
 import threading
 import time
 from typing import Any, Deque
-
 import numpy as np
 import torch
 from torch import nn
-
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
 
+# Импорты только тех констант, которые реально используются
 from backend_config import (
     AGENT_KINDS,
     APPLE_REWARD,
@@ -37,44 +33,39 @@ from backend_config import (
     DEATH_REASON_ORDER,
     DECISION_STATS_WINDOW,
     DIRECTIONS,
-    DQN_TAIL_PATH_LOST_REPLAY_EXTRA_COPIES,
+    DQN_DEATH_REPLAY_EXTRA_COPIES,
+    DQN_PRE_DEATH_CONTEXT_REPLAYS,
+    ELITE_EPISODE_MAX_TRANSITIONS,
+    EPISODE_TRANSITION_LIMIT,
     GLOBAL_SIGNAL_LABELS,
     HIDDEN_LAYER_1,
     HIDDEN_LAYER_2,
     HISTORY_LIMIT,
-    INPUT_GRID_OPTIONS,
-    INPUT_MODES,
-    LOCAL_BRANCH_HIDDEN,
-    LOCAL_MAP_CHANNEL_LABELS,
     MODEL_ACTION_LABELS,
-    MODEL_SCHEMA_VERSION,
     PERF_LOG_MAX_BYTES,
-    ROUTE_APPLE_LINE_BONUS,
-    ROUTE_DEVIATION_PENALTY,
-    ROUTE_FOLLOW_BONUS,
-    ROUTE_RETURN_AFTER_APPLE_BONUS,
     SAVE_THROTTLE_SECONDS,
     SLOW_API_MS,
     SLOW_NETWORK_MS,
     SLOW_STEP_MS,
     STARTUP_BOARD_SIZE,
-    STARTUP_INPUT_GRID,
-    STARTUP_INPUT_MODE,
     STEP_REASON_ORDER,
     TAIL_PATH_LOST_PENALTY,
     TRAP_AFTER_APPLE_PENALTY,
-    DQN_DEATH_REPLAY_EXTRA_COPIES,
-    DQN_PRE_DEATH_CONTEXT_REPLAYS,
-    ELITE_EPISODE_MAX_TRANSITIONS,
-    EPISODE_TRANSITION_LIMIT,
-    global_signal_count_for_mode,
-    local_input_size,
     hunger_budget_for,
 )
+
 from dqn_agent import DQNAgent
 from evolution_agent import EvolutionAgent, ParallelEvolutionRunner
 from snake_env import SnakeEnv, relative_to_absolute
 from smart_agent import SmartH5Agent, smart_model_candidates
+
+# =========================================================================
+# ЖЁСТКАЯ ФИКСАЦИЯ: ТОЛЬКО СИГНАЛЫ + АВТОПОДПИСЬ АРХИТЕКТУРЫ
+# =========================================================================
+GLOBAL_SIGNAL_COUNT = len(GLOBAL_SIGNAL_LABELS)
+# Подпись меняется автоматически при изменении количества сигналов или размеров слоёв
+ARCH_SIGNATURE = f"sig_{GLOBAL_SIGNAL_COUNT}_{HIDDEN_LAYER_1}_{HIDDEN_LAYER_2}"
+# =========================================================================
 
 STATIC_ROOT = Path(__file__).resolve().parent
 RUNTIME_DIR = STATIC_ROOT / ".runtime"
@@ -85,6 +76,7 @@ RESTART_FLAG_PATH = RUNTIME_DIR / "restart_requested.flag"
 PERF_LOG_PATH = RUNTIME_DIR / "backend_perf.log"
 RESTART_IN_PARENT_ENV = "SNAKE_RESTART_IN_PARENT"
 RESTART_EXIT_CODE = 42
+
 
 def reset_session_perf_log() -> None:
     try:
@@ -105,7 +97,7 @@ def log_perf(event: str, elapsed_ms: float, **fields: Any) -> None:
             PERF_LOG_PATH.replace(PERF_LOG_PATH.with_suffix(".log.1"))
     except OSError:
         pass
-
+    
     suffix = " ".join(f"{key}={value}" for key, value in fields.items())
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {event} {elapsed_ms:.1f}ms"
     if suffix:
@@ -120,9 +112,7 @@ def log_perf(event: str, elapsed_ms: float, **fields: Any) -> None:
 def top_indices(values: np.ndarray, count: int) -> list[int]:
     if values.size == 0:
         return []
-    order = np.argsort(np.abs(values))
-    return order[-count:].tolist()
-
+    return np.argsort(np.abs(values))[-count:].tolist()
 
 
 def list_available_devices() -> list[dict[str, str]]:
@@ -162,28 +152,15 @@ def average_score_window(total: int, available: int) -> int:
     return min(available, max(1, int(round(total * AVERAGE_SCORE_WINDOW_RATIO))))
 
 
-
 def compact_death_snapshot(snapshot: Any) -> dict[str, Any] | None:
     if not isinstance(snapshot, dict):
         return None
+    
     allowed_keys = {
-        "reason",
-        "size",
-        "score",
-        "step_count",
-        "direction",
-        "snake",
-        "food",
-        "eaten_food_trail",
-        "recent_steps",
-        "planned_direction",
-        "planned_target",
-        "action",
-        "action_random",
-        "greedy_action",
-        "move_risks",
-        "outcome_reason",
-        "penalty_reasons",
+        "reason", "size", "score", "step_count", "direction", "snake",
+        "food", "eaten_food_trail", "recent_steps", "planned_direction",
+        "planned_target", "action", "action_random", "greedy_action",
+        "move_risks", "outcome_reason", "penalty_reasons",
     }
     compact = {key: value for key, value in snapshot.items() if key in allowed_keys}
     recent_steps = compact.get("recent_steps")
@@ -196,35 +173,21 @@ def compact_death_snapshot(snapshot: Any) -> dict[str, Any] | None:
     return compact
 
 
-def checkpoint_path_for_input_grid(input_grid: int, input_mode: str = STARTUP_INPUT_MODE) -> Path:
-    return RUNTIME_DIR / f"snake_evolution_{input_grid}_{input_mode}_v{MODEL_SCHEMA_VERSION}.pt"
+def checkpoint_path_for_agent(agent_kind: str) -> Path:
+    # Имя файла без версии, версия проверяется внутри файла по ARCH_SIGNATURE
+    return RUNTIME_DIR / f"snake_{agent_kind}.pt"
 
 
-def checkpoint_path_for_agent(agent_kind: str, input_grid: int, input_mode: str = STARTUP_INPUT_MODE) -> Path:
-    if agent_kind == "evolution":
-        return checkpoint_path_for_input_grid(input_grid, input_mode)
-    return RUNTIME_DIR / f"snake_{agent_kind}_{input_grid}_{input_mode}_v{MODEL_SCHEMA_VERSION}.pt"
+def model_stats_key(agent_kind: str) -> str:
+    return f"snake_{agent_kind}"
 
 
-def model_stats_key(input_grid: int, agent_kind: str = "evolution", input_mode: str = STARTUP_INPUT_MODE) -> str:
-    return f"snake_{agent_kind}_{input_grid}_{input_mode}_v{MODEL_SCHEMA_VERSION}"
-
-
-def compact_model_stats(models: dict[str, Any], checkpoint_key: str, agent_kind: str, input_grid: int, input_mode: str = STARTUP_INPUT_MODE) -> None:
-    prefix = f"snake_{agent_kind}_{input_grid}_{input_mode}_v"
-    legacy_prefix = f"schema_"
-    legacy_suffixes = (
-        f"_input_{input_grid}",
-        f"_input_{input_grid}_{agent_kind}",
-        f"_{agent_kind}_input_{input_grid}_{input_mode}",
-    )
+def compact_model_stats(models: dict[str, Any], checkpoint_key: str, agent_kind: str) -> None:
+    prefix = f"snake_{agent_kind}"
     for key in list(models.keys()):
         if key == checkpoint_key:
             continue
         if key.startswith(prefix):
-            models.pop(key, None)
-            continue
-        if key.startswith(legacy_prefix) and any(key.endswith(suffix) for suffix in legacy_suffixes):
             models.pop(key, None)
 
 
@@ -239,11 +202,9 @@ def load_aux_stats_store() -> dict[str, Any]:
     if not isinstance(payload, dict):
         return default_store
     models = payload.get("models", {})
-    if not isinstance(models, dict):
-        models = {}
     return {
         "schema_version": int(payload.get("schema_version", 1)),
-        "models": models,
+        "models": models if isinstance(models, dict) else {},
     }
 
 
@@ -251,8 +212,6 @@ def save_aux_stats_store(store: dict[str, Any]) -> None:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     tmp_path = AUX_STATS_PATH.with_suffix(".tmp")
     payload = json.dumps(store, ensure_ascii=False, separators=(",", ":"))
-    
-    # Обход блокировок файлов в Windows
     for attempt in range(5):
         try:
             tmp_path.write_text(payload, encoding="utf-8")
@@ -261,10 +220,6 @@ def save_aux_stats_store(store: dict[str, Any]) -> None:
         except OSError:
             if attempt < 4:
                 time.sleep(0.05)
-
-def split_input_vector(values: np.ndarray, input_grid: int) -> tuple[np.ndarray, np.ndarray]:
-    local_count = local_input_size(input_grid)
-    return values[:local_count], values[local_count:]
 
 
 def resolve_device(mode: str) -> tuple[torch.device, str, str]:
@@ -281,40 +236,49 @@ def build_connection_payload(
 ) -> list[dict[str, float | int]]:
     if weights.ndim != 2 or weights.shape[0] < to_values.size or weights.shape[1] < from_values.size:
         return []
+
     important_from = sorted(top_indices(from_values, from_count))
     important_to = sorted(top_indices(to_values, to_count))
-    candidates: list[tuple[float, int, int, float]] = []
 
+    candidates: list[tuple[float, int, int, float]] = []
     for to_index in important_to:
         for from_index in important_from:
             weight = float(weights[to_index, from_index])
             influence = abs(weight * float(from_values[from_index]) * float(to_values[to_index]))
             candidates.append((influence, from_index, to_index, weight))
 
+    if not candidates:
+        return []
+
+    # Фронтенд будет использовать influence как opacity/brightness, поэтому 1.0 → 65%
+    max_influence = max(c[0] for c in candidates)
+    if max_influence > 0.0:
+        candidates = [((inf / max_influence) ** 1.4 * 0.5, fi, ti, w) for inf, fi, ti, w in candidates]
+
     payload: list[dict[str, float | int]] = []
     ranked = sorted(candidates, reverse=True)
     for influence, from_index, to_index, weight in ranked[:limit]:
-        if influence <= 0.001:
+        if influence <= 0.05:  # Порог отсечения слабых связей
             continue
-        payload.append(
-            {
+        payload.append({
+            "from_index": from_index,
+            "to_index": to_index,
+            "weight": weight,
+            "influence": influence,
+        })
+
+    # Фоллбэк: если слой слабый, показываем топ по весу с минимальной видимой яркостью
+    if not payload and ranked:
+        fallback_count = max(6, min(limit, limit // 3))
+        fallback = sorted(ranked, key=lambda item: abs(item[3]), reverse=True)[:fallback_count]
+        for influence, from_index, to_index, weight in fallback:
+            payload.append({
                 "from_index": from_index,
                 "to_index": to_index,
                 "weight": weight,
-                "influence": influence,
-            }
-        )
-    if not payload and ranked:
-        fallback = sorted(ranked, key=lambda item: abs(item[3]), reverse=True)[: max(6, min(limit, limit // 3))]
-        for influence, from_index, to_index, weight in fallback:
-            payload.append(
-                {
-                    "from_index": from_index,
-                    "to_index": to_index,
-                    "weight": weight,
-                    "influence": max(0.001, abs(weight) * 0.01, influence),
-                }
-            )
+                "influence": max(0.05, influence),
+            })
+
     return payload
 
 
@@ -341,22 +305,21 @@ class AgentSlot:
     updated_at: float = 0.0
 
 
-
 class SnakeWebBackend:
     def __init__(self, force_cpu: bool = False) -> None:
         preferred_mode = "cpu"
-        self.input_grid = STARTUP_INPUT_GRID
-        self.input_mode = STARTUP_INPUT_MODE
         self.device_mode = preferred_mode
         self.device, self.device_kind, self.device_details = resolve_device(preferred_mode)
         self.device_label = self.device_kind
         self.network_source = "Python backend"
         self.available_devices = list_available_devices()
+        
         self.lock = threading.RLock()
         self.agent_lock = threading.RLock()
         self.agent_slot_lock = threading.RLock()
-        self.agent_slots: dict[tuple[str, int, str], AgentSlot] = {}
+        self.agent_slots: dict[str, AgentSlot] = {}
         self.stop_event = threading.Event()
+        
         self._pending_save = False
         self._next_save_at = 0.0
         self._last_save_at = 0.0
@@ -372,7 +335,9 @@ class SnakeWebBackend:
 
         self.game = SnakeEnv(board_size=STARTUP_BOARD_SIZE)
         self.agent_kind = "evolution"
-        self.agent = EvolutionAgent(device=self.device, input_grid=self.input_grid)
+        # Создаем агента только с глобальными сигналами (аргументы input_grid/mode удалены)
+        self.agent = EvolutionAgent(device=self.device)
+        
         self.training_runner = ParallelEvolutionRunner(
             self.agent.population_size,
             STARTUP_BOARD_SIZE,
@@ -414,6 +379,7 @@ class SnakeWebBackend:
         self._load_active_context()
         self._load_state(force_cpu=force_cpu)
         self._store_active_agent_slot(loaded_checkpoint=True)
+        
         startup_board_size = int(self.game.board_size)
         self.training_runner = ParallelEvolutionRunner(
             self.agent.population_size,
@@ -434,7 +400,6 @@ class SnakeWebBackend:
     def shutdown(self, *, fast: bool = False) -> None:
         self.stop_event.set()
         self.thread.join(timeout=0.4 if fast else 2.0)
-        self.smart_agent.close()
         payloads = None
         acquired = self.lock.acquire(timeout=0.5 if fast else -1)
         if acquired:
@@ -447,13 +412,14 @@ class SnakeWebBackend:
             self._write_save_payloads(*payloads)
 
     def _current_observation(self) -> np.ndarray:
-        return self.game.get_observation_grid(self.input_grid, self.input_mode)
+        # Всегда возвращает только вектор сигналов
+        return self.game.get_observation_grid()
 
     def _checkpoint_path(self) -> Path:
-        return checkpoint_path_for_agent(self.agent_kind, self.input_grid, self.input_mode)
+        return checkpoint_path_for_agent(self.agent_kind)
 
     def _expected_state_size(self) -> int:
-        return local_input_size(self.input_grid) + global_signal_count_for_mode(self.input_mode)
+        return GLOBAL_SIGNAL_COUNT
 
     def _sync_board_best_score(self) -> None:
         self.board_best_scores[int(self.game.board_size)] = max(
@@ -467,48 +433,27 @@ class SnakeWebBackend:
 
     def _ensure_runtime_consistency(self) -> None:
         expected_state_size = self._expected_state_size()
-        agent_input_grid = int(getattr(self.agent, "input_grid", -1))
         network_input_size = int(getattr(self.agent.online_net, "input_size", -1))
-        agent_input_mode = str(getattr(self.agent, "input_mode", STARTUP_INPUT_MODE))
-        if agent_input_grid != self.input_grid or agent_input_mode != self.input_mode or network_input_size != expected_state_size:
+        
+        # Проверяем только размер входа сети
+        if network_input_size != expected_state_size:
             self.agent = self._create_native_agent(self.agent_kind)
             self._store_active_agent_slot()
             self._reset_training_runner()
             self.fitness_ema = 0.0
             self.current_episode_transitions.clear()
+            
         if int(getattr(self.last_state, "size", 0)) != expected_state_size:
             self.last_state = self._current_observation()
 
-    def _agent_cache_key(self, agent_kind: str, input_grid: int | None = None, input_mode: str | None = None) -> tuple[str, int, str]:
-        return (
-            agent_kind,
-            int(self.input_grid if input_grid is None else input_grid),
-            str(self.input_mode if input_mode is None else input_mode),
-        )
-
-    def _create_native_agent_for(
-        self,
-        agent_kind: str,
-        *,
-        input_grid: int,
-        input_mode: str,
-        device: torch.device,
-    ) -> EvolutionAgent | DQNAgent:
-        global_signal_count = global_signal_count_for_mode(input_mode)
-        if agent_kind == "dqn":
-            agent = DQNAgent(device=device, input_grid=input_grid, global_signal_count=global_signal_count)
-        else:
-            agent = EvolutionAgent(device=device, input_grid=input_grid, global_signal_count=global_signal_count)
-        setattr(agent, "input_mode", input_mode)
-        return agent
+    def _agent_cache_key(self, agent_kind: str) -> str:
+        return agent_kind
 
     def _create_native_agent(self, agent_kind: str) -> EvolutionAgent | DQNAgent:
-        return self._create_native_agent_for(
-            agent_kind,
-            input_grid=self.input_grid,
-            input_mode=self.input_mode,
-            device=self.device,
-        )
+        # Агенты сами вычисляют global_signal_count из констант
+        if agent_kind == "dqn":
+            return DQNAgent(device=self.device)
+        return EvolutionAgent(device=self.device)
 
     def _store_active_agent_slot(self, *, loaded_checkpoint: bool = False) -> None:
         key = self._agent_cache_key(self.agent_kind)
@@ -522,15 +467,8 @@ class SnakeWebBackend:
                 updated_at=time.monotonic(),
             )
 
-    def _load_agent_checkpoint_into(
-        self,
-        agent: EvolutionAgent | DQNAgent,
-        *,
-        agent_kind: str,
-        input_grid: int,
-        input_mode: str,
-    ) -> bool:
-        checkpoint_path = checkpoint_path_for_agent(agent_kind, input_grid, input_mode)
+    def _load_agent_checkpoint_into(self, agent: EvolutionAgent | DQNAgent) -> bool:
+        checkpoint_path = self._checkpoint_path()
         if not checkpoint_path.exists():
             return False
         payload = torch.load(checkpoint_path, map_location="cpu")
@@ -540,30 +478,27 @@ class SnakeWebBackend:
         return False
 
     def _preload_native_agent_slots(self, *, blocking: bool = False) -> None:
-        input_grid = self.input_grid
-        input_mode = self.input_mode
-        device = self.device
         for agent_kind in AGENT_KINDS:
-            key = self._agent_cache_key(agent_kind, input_grid, input_mode)
+            key = self._agent_cache_key(agent_kind)
             with self.agent_slot_lock:
                 slot = self.agent_slots.get(key)
                 if slot and (slot.ready or slot.loading):
                     continue
                 self.agent_slots[key] = AgentSlot(loading=True, updated_at=time.monotonic())
 
-            def preload(kind: str = agent_kind, grid: int = input_grid, mode: str = input_mode, target_device: torch.device = device) -> None:
+            def preload(kind: str = agent_kind) -> None:
                 loaded = False
                 error = ""
-                agent: EvolutionAgent | DQNAgent | None = None
+                agent_obj: EvolutionAgent | DQNAgent | None = None
                 try:
-                    agent = self._create_native_agent_for(kind, input_grid=grid, input_mode=mode, device=target_device)
-                    loaded = self._load_agent_checkpoint_into(agent, agent_kind=kind, input_grid=grid, input_mode=mode)
+                    agent_obj = self._create_native_agent(kind)
+                    loaded = self._load_agent_checkpoint_into(agent_obj)
                 except Exception as exc:
                     error = str(exc)
                 with self.agent_slot_lock:
-                    self.agent_slots[self._agent_cache_key(kind, grid, mode)] = AgentSlot(
-                        agent=agent,
-                        ready=agent is not None,
+                    self.agent_slots[kind] = AgentSlot(
+                        agent=agent_obj,
+                        ready=agent_obj is not None,
                         loading=False,
                         error=error,
                         loaded_checkpoint=loaded,
@@ -600,7 +535,7 @@ class SnakeWebBackend:
         if self.mode == "smart":
             model_name = self.smart_agent.model_path.stem if self.smart_agent.model_path else "none"
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", model_name).strip("_") or "none"
-            return f"snake_smart_{safe_name}_{self.game.board_size}_v{MODEL_SCHEMA_VERSION}"
+            return f"snake_smart_{safe_name}_{self.game.board_size}"
         return self._checkpoint_path().stem
 
     def _load_active_aux_stats(self) -> bool:
@@ -627,20 +562,23 @@ class SnakeWebBackend:
     def _smart_models_payload(self) -> list[dict[str, Any]]:
         active_path = self.smart_agent.model_path.resolve() if self.smart_agent.model_path else None
         now = time.monotonic()
+        
+        # Гарантируем существование папки перед сканированием
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        
         try:
             candidates = smart_model_candidates(RUNTIME_DIR)
-            cache_key = tuple((path.name, path.stat().st_mtime_ns, path.stat().st_size) for path in candidates)
+            cache_key = tuple((p.name, p.stat().st_mtime_ns, p.stat().st_size) for p in candidates)
         except OSError:
             candidates = []
             cache_key = ()
-        if now - self._smart_models_cache_at < 2.0 and cache_key == self._smart_models_cache_key:
+            
+        # Возвращаем кэш только если директория не менялась и кэш валиден
+        if self._smart_models_cache and now - self._smart_models_cache_at < 3.0 and cache_key == self._smart_models_cache_key:
             active_name = active_path.name if active_path else ""
             return [
-                {
-                    **model,
-                    "active": bool(active_name and model.get("name") == active_name),
-                }
-                for model in self._smart_models_cache
+                {**m, "active": bool(active_name and m.get("name") == active_name)}
+                for m in self._smart_models_cache
             ]
 
         models: list[dict[str, Any]] = []
@@ -649,18 +587,19 @@ class SnakeWebBackend:
                 resolved = path.resolve()
             except OSError:
                 resolved = path
+                
             epoch_match = re.search(r"epoch[_-]?(\d+)", path.stem, re.IGNORECASE)
             epoch = int(epoch_match.group(1)) if epoch_match else None
-            models.append(
-                {
-                    "name": path.name,
-                    "path": str(path),
-                    "active": bool(active_path and resolved == active_path),
-                    "size": path.stat().st_size if path.exists() else 0,
-                    "epoch": epoch,
-                    "label": f"epoch {epoch}" if epoch is not None else path.stem,
-                }
-            )
+            
+            models.append({
+                "name": path.name,
+                "path": str(path),
+                "active": bool(active_path and resolved == active_path),
+                "size": path.stat().st_size if path.exists() else 0,
+                "epoch": epoch,
+                "label": f"epoch {epoch}" if epoch is not None else path.stem,
+            })
+            
         self._smart_models_cache = models
         self._smart_models_cache_at = now
         self._smart_models_cache_key = cache_key
@@ -753,7 +692,6 @@ class SnakeWebBackend:
                         self._perform_parallel_training_step()
 
             self._update_frame_cache()
-
             if self._flush_pending_save():
                 did_work = True
 
@@ -766,36 +704,35 @@ class SnakeWebBackend:
         if 0 <= index < len(self.training_runner.step_logs):
             self.last_completed_step_review_entries = list(self.training_runner.step_logs[index])
             if self.last_completed_step_review_entries:
-                self.step_review_history.appendleft(
-                    {
-                        "id": f"training-{self.episode_counter + 1}-{index + 1}-{int(time.time() * 1000)}",
-                        "episode": self.episode_counter + 1,
-                        "score": env.score,
-                        "steps": env.step_count,
-                        "reason": reason,
-                        "entries": list(self.last_completed_step_review_entries),
-                    }
-                )
+                self.step_review_history.appendleft({
+                    "id": f"training-{self.episode_counter + 1}-{index + 1}-{int(time.time() * 1000)}",
+                    "episode": self.episode_counter + 1,
+                    "score": env.score,
+                    "steps": env.step_count,
+                    "reason": reason,
+                    "entries": list(self.last_completed_step_review_entries),
+                })
+        
         self.episode_counter += 1
         self.best_score = max(self.best_score, env.score)
         self._sync_board_best_score()
         if reason in DEATH_REASON_ORDER:
             self._record_decision_stat("deaths", reason)
-        self.history.append(
-            EpisodeStats(
-                episode=self.episode_counter,
-                score=env.score,
-                reward=float(payload.get("reward", 0.0)),
-                mutation=float(getattr(self.agent, "mutation_rate", 0.0)),
-                fitness=float(payload.get("fitness", 0.0)),
-                steps=env.step_count,
-                best_score=self.best_score,
-                reason=reason,
-                loss=float(payload.get("loss", 0.0)),
-            )
-        )
+        
+        self.history.append(EpisodeStats(
+            episode=self.episode_counter,
+            score=env.score,
+            reward=float(payload.get("reward", 0.0)),
+            mutation=float(getattr(self.agent, "mutation_rate", 0.0)),
+            fitness=float(payload.get("fitness", 0.0)),
+            steps=env.step_count,
+            best_score=self.best_score,
+            reason=reason,
+            loss=float(payload.get("loss", 0.0)),
+        ))
         if len(self.history) > HISTORY_LIMIT:
             self.history.pop(0)
+            
         self.last_death_snapshot = {
             "reason": reason,
             "size": env.board_size,
@@ -833,11 +770,8 @@ class SnakeWebBackend:
         started_at = time.perf_counter()
         self._ensure_runtime_consistency()
         alive_before = self.training_runner.alive_count()
-        completed = self.training_runner.step_alive(
-            self.agent,
-            input_grid=self.input_grid,
-            input_mode=self.input_mode,
-        )
+        # Убраны input_grid и input_mode
+        completed = self.training_runner.step_alive(self.agent)
         runner_profile = dict(self.training_runner.last_profile_ms)
         record_started_at = time.perf_counter()
         for item in completed:
@@ -846,8 +780,7 @@ class SnakeWebBackend:
         best_completed = self.training_runner.best_completed
         if isinstance(best_completed, dict):
             self.last_death_snapshot = self._snapshot_for_completed_training(best_completed)
-            
-        # ДОБАВЛЕНО: Профилируем время работы генетического алгоритма
+
         evolve_ms = 0.0
         if self.training_runner.all_done():
             evolve_started_at = time.perf_counter()
@@ -895,21 +828,16 @@ class SnakeWebBackend:
                 board=self.game.board_size,
                 snake=len(self.game.snake),
                 score=self.game.score,
-                input_grid=self.input_grid,
-                input_mode=self.input_mode,
                 obs_ms=runner_profile.get("observation", 0.0),
                 infer_ms=runner_profile.get("inference", 0.0),
                 env_ms=runner_profile.get("env_step", 0.0),
-                runner_book_ms=runner_profile.get("bookkeeping", 0.0),
-                evolve_ms=round(evolve_ms, 1),  # <-- ДОБАВЛЕНО в логи!
+                evolve_ms=round(evolve_ms, 1),
                 record_ms=round(record_ms, 1),
                 leader_ms=round(display_leader_ms, 1),
                 display_obs_ms=round(display_observation_ms, 1),
                 display_infer_ms=round(display_inference_ms, 1),
             )
-            
-        # ДОБАВЛЕНО: Микро-пауза (0 секунд), которая заставляет Python 
-        # принудительно переключить GIL и дать API ответить быстро, без задержек.
+        
         time.sleep(0)
 
     def _perform_step(self, training_mode: bool) -> None:
@@ -958,19 +886,17 @@ class SnakeWebBackend:
         step_number = int(info.get("steps", self.game.step_count))
         if step_number == 1 and self.step_review_entries:
             self.step_review_entries.clear()
-        self.step_review_entries.append(
-            {
-                "step": step_number,
-                "reward": float(reward),
-                "train_reward": float(train_reward),
-                "action": int(visible_action),
-                "action_label": MODEL_ACTION_LABELS[visible_action] if 0 <= visible_action < len(MODEL_ACTION_LABELS) else "-",
-                "reason": self.last_reason,
-                "penalties": list(self.last_penalty_reasons),
-                "random": bool(was_random),
-                "apple_opportunity": info.get("apple_opportunity"),
-            }
-        )
+        self.step_review_entries.append({
+            "step": step_number,
+            "reward": float(reward),
+            "train_reward": float(train_reward),
+            "action": int(visible_action),
+            "action_label": MODEL_ACTION_LABELS[visible_action] if 0 <= visible_action < len(MODEL_ACTION_LABELS) else "-",
+            "reason": self.last_reason,
+            "penalties": list(self.last_penalty_reasons),
+            "random": bool(was_random),
+            "apple_opportunity": info.get("apple_opportunity"),
+        })
         self._record_decision_stat("choices", MODEL_ACTION_LABELS[visible_action])
         self._record_decision_stat("steps", self.last_reason)
         pre_step_snapshot["outcome_reason"] = self.last_reason
@@ -1001,14 +927,7 @@ class SnakeWebBackend:
                     priority_scale=priority_scale,
                 )
             self.current_episode_transitions.append(
-                (
-                    state.copy(),
-                    visible_action,
-                    reward,
-                    next_state.copy(),
-                    done,
-                    priority_scale,
-                )
+                (state.copy(), visible_action, reward, next_state.copy(), done, priority_scale)
             )
             if done and self.last_reason in DEATH_REASON_ORDER and self.last_reason != "victory":
                 self._remember_dqn_death_context()
@@ -1019,7 +938,7 @@ class SnakeWebBackend:
 
         if done:
             self._finish_episode(str(info["reason"]), training_mode=training_mode)
-        
+
         elapsed_ms = (time.perf_counter() - started_at) * 1000.0
         if elapsed_ms >= SLOW_STEP_MS:
             log_perf(
@@ -1029,7 +948,6 @@ class SnakeWebBackend:
                 done=done,
                 reason=reason,
                 snake=len(self.game.snake),
-                input_grid=self.input_grid,
                 mode=self.mode,
             )
 
@@ -1041,16 +959,14 @@ class SnakeWebBackend:
         self.best_score = max(self.best_score, self.game.score)
         self._sync_board_best_score()
         if self.last_completed_step_review_entries:
-            self.step_review_history.appendleft(
-                {
-                    "id": f"episode-{self.episode_counter}-{int(time.time() * 1000)}",
-                    "episode": self.episode_counter,
-                    "score": self.game.score,
-                    "steps": self.game.step_count,
-                    "reason": reason,
-                    "entries": list(self.last_completed_step_review_entries),
-                }
-            )
+            self.step_review_history.appendleft({
+                "id": f"episode-{self.episode_counter}-{int(time.time() * 1000)}",
+                "episode": self.episode_counter,
+                "score": self.game.score,
+                "steps": self.game.step_count,
+                "reason": reason,
+                "entries": list(self.last_completed_step_review_entries),
+            })
         if reason in DEATH_REASON_ORDER:
             self._record_decision_stat("deaths", reason)
         recent_steps = self._recent_unique_death_steps(limit=8)
@@ -1075,22 +991,21 @@ class SnakeWebBackend:
             avoidable_collision_count=self.game.avoidable_collision_count,
             max_steps_without_food=self.game.max_steps_without_food,
         ) if training_mode else float(getattr(self.agent, "last_fitness", 0.0))
+        
         if training_mode:
             self.fitness_ema = fitness if self.fitness_ema == 0 else self.fitness_ema * 0.85 + fitness * 0.15
 
-        self.history.append(
-            EpisodeStats(
-                episode=self.episode_counter,
-                score=self.game.score,
-                reward=self.episode_reward,
-                mutation=float(getattr(self.agent, "epsilon", getattr(self.agent, "mutation_rate", 0.0))),
-                fitness=fitness,
-                steps=self.game.step_count,
-                best_score=self.best_score,
-                reason=reason,
-                loss=float(getattr(self.agent, "last_loss", 0.0)) if self.agent_kind == "dqn" else 0.0,
-            )
-        )
+        self.history.append(EpisodeStats(
+            episode=self.episode_counter,
+            score=self.game.score,
+            reward=self.episode_reward,
+            mutation=float(getattr(self.agent, "epsilon", getattr(self.agent, "mutation_rate", 0.0))),
+            fitness=fitness,
+            steps=self.game.step_count,
+            best_score=self.best_score,
+            reason=reason,
+            loss=float(getattr(self.agent, "last_loss", 0.0)) if self.agent_kind == "dqn" else 0.0,
+        ))
         if len(self.history) > HISTORY_LIMIT:
             self.history.pop(0)
 
@@ -1209,8 +1124,6 @@ class SnakeWebBackend:
     def _training_priority_scale(self, *, done: bool, reason: str, penalty_reasons: list[str]) -> float:
         if reason == "apple":
             return 2.0
-        if reason == "route_dead_end":
-            return 7.0
         if reason == "victory":
             return 6.0
         if done and reason in {"wall_collision", "body_collision"}:
@@ -1224,8 +1137,6 @@ class SnakeWebBackend:
     def _dqn_extra_replay_count(self, *, done: bool, reason: str, penalty_reasons: list[str]) -> int:
         if self.agent_kind != "dqn":
             return 0
-        if reason == "route_dead_end":
-            return DQN_TAIL_PATH_LOST_REPLAY_EXTRA_COPIES
         if done and reason in DEATH_REASON_ORDER and reason != "victory":
             return DQN_DEATH_REPLAY_EXTRA_COPIES
         return 0
@@ -1281,33 +1192,26 @@ class SnakeWebBackend:
         return 0.0
 
     def _reward_rules_payload(self) -> dict[str, Any]:
-        environment_bonuses = [
-            {"label": "Яблоко", "value": f"+{APPLE_REWARD:.1f}", "active": True},
-            {"label": "↻ На маршруте", "value": f"+{ROUTE_FOLLOW_BONUS:.2f}", "active": True},
-            {"label": "🍎 На линии", "value": f"+{ROUTE_APPLE_LINE_BONUS:.2f}", "active": True},
-            {"label": "↻ Возврат", "value": f"+{ROUTE_RETURN_AFTER_APPLE_BONUS:.2f}", "active": True},
-            {"label": "Победа", "value": "+10.0", "active": True},
-        ]
-        environment_penalties = [
-            {"label": "Шаг", "value": "-0.01", "active": True},
-            {"label": "Смерть", "value": "-5.0", "active": True},
-            {"label": "Нет хвоста", "value": f"-{TAIL_PATH_LOST_PENALTY:.1f}", "active": True},
-            {"label": "↻ Сход", "value": f"-{ROUTE_DEVIATION_PENALTY:.2f}", "active": True},
-            {"label": "Цикл", "value": "до -0.35", "active": True},
-            {"label": "Тупик после 🍎", "value": f"-{TRAP_AFTER_APPLE_PENALTY:.1f}", "active": True},
-        ]
+        # Маршруты/линии/возврат удалены
         return {
-            "bonuses": environment_bonuses,
-            "penalties": environment_penalties,
-            "note": "",
+            "bonuses": [
+                {"label": "Яблоко", "value": f"+{APPLE_REWARD:.1f}", "active": True},
+                {"label": "Победа", "value": "+10.0", "active": True},
+            ],
+            "penalties": [
+                {"label": "Шаг", "value": "-0.01", "active": True},
+                {"label": "Смерть", "value": "-5.0", "active": True},
+                {"label": "Нет хвоста", "value": f"-{TAIL_PATH_LOST_PENALTY:.1f}", "active": True},
+                {"label": "Цикл", "value": "до -0.35", "active": True},
+                {"label": "Тупик после 🍎", "value": f"-{TRAP_AFTER_APPLE_PENALTY:.1f}", "active": True},
+            ],
+            "note": " ",
         }
 
     def _agent_metadata(self) -> dict[str, object]:
         return {
-            "schema_version": MODEL_SCHEMA_VERSION,
+            "schema_version": 1,
             "agent_kind": self.agent_kind,
-            "input_grid": self.input_grid,
-            "input_mode": self.input_mode,
             "device_mode": self.device_mode,
             "game": self.game.export_state(),
             "running": self.running,
@@ -1318,9 +1222,9 @@ class SnakeWebBackend:
             "live_reward": self.live_reward,
             "episode_reward": self.episode_reward,
             "fitness_ema": self.fitness_ema,
-            "generation": self.agent.generation,
-            "current_individual": self.agent.current_index + 1,
-            "population_size": self.agent.population_size,
+            "generation": getattr(self.agent, "generation", 0),
+            "current_individual": getattr(self.agent, "current_index", 0) + 1,
+            "population_size": getattr(self.agent, "population_size", 1),
             "victory_archive_size": int(getattr(self.agent, "victory_archive_size", 0)),
             "best_fitness": self.agent.best_fitness,
             "best_score": self.best_score,
@@ -1336,11 +1240,9 @@ class SnakeWebBackend:
 
     def _active_context_payload(self) -> dict[str, object]:
         return {
-            "schema_version": MODEL_SCHEMA_VERSION,
+            "schema_version": 1,
             "agent_kind": self.agent_kind,
             "mode": self.mode,
-            "input_grid": self.input_grid,
-            "input_mode": self.input_mode,
             "board_size": int(self.game.board_size),
             "smart_model": self.smart_agent.model_path.name if self.smart_agent.model_path else "",
             "speed": self.speed,
@@ -1352,18 +1254,14 @@ class SnakeWebBackend:
         RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
         tmp_path = ACTIVE_CONTEXT_PATH.with_suffix(".tmp")
         payload = json.dumps(self._active_context_payload(), ensure_ascii=False, separators=(",", ":"))
-        
-        # Обход блокировок файлов в Windows (антивирус или чтение другим потоком)
         for attempt in range(5):
             try:
                 tmp_path.write_text(payload, encoding="utf-8")
                 tmp_path.replace(ACTIVE_CONTEXT_PATH)
-                break  # Успешно сохранили
+                break
             except OSError:
                 if attempt < 4:
-                    time.sleep(0.05)  # Ждем 50мс и пробуем снова
-                else:
-                    pass # Игнорируем ошибку, чтобы не крашить сервер, сохраним в следующий раз
+                    time.sleep(0.05)
 
     def _load_active_context(self) -> bool:
         payload = None
@@ -1383,17 +1281,6 @@ class SnakeWebBackend:
         agent_kind = str(payload.get("agent_kind", self.agent_kind))
         if agent_kind in AGENT_KINDS:
             self.agent_kind = agent_kind
-
-        input_mode = str(payload.get("input_mode", self.input_mode))
-        if input_mode in INPUT_MODES:
-            self.input_mode = input_mode
-
-        try:
-            input_grid = int(payload.get("input_grid", self.input_grid))
-        except (TypeError, ValueError):
-            input_grid = self.input_grid
-        if input_grid in INPUT_GRID_OPTIONS:
-            self.input_grid = input_grid
 
         try:
             board_size = int(payload.get("board_size", self.game.board_size))
@@ -1472,7 +1359,7 @@ class SnakeWebBackend:
         payload = payload if isinstance(payload, dict) else {}
         game_payload = payload.get("game")
         if isinstance(game_payload, dict):
-            self.last_state = self.game.load_state(game_payload, target_size=self.input_grid)
+            self.last_state = self.game.load_state(game_payload)
             self.last_state = self._current_observation()
         self.running = bool(payload.get("running", self.running))
         self.training = False
@@ -1491,91 +1378,92 @@ class SnakeWebBackend:
         penalty_reasons = payload.get("last_penalty_reasons", [])
         self.last_penalty_reasons = [str(item) for item in penalty_reasons] if isinstance(penalty_reasons, list) else []
 
-    def _aux_stats_payload(self) -> dict[str, object]:
+    # =========================================================================
+    # ОПТИМИЗИРОВАННАЯ СЕРИАЛИЗАЦИЯ СТАТИСТИКИ (КОМПАКТНЫЙ JSON)
+    # =========================================================================
+    def _pack_aux_stats(self) -> dict[str, Any]:
         return {
-            "runtime": self._agent_metadata(),
-            "agent_state": self._agent_state_payload(),
-            "episode_counter": self.episode_counter,
-            "best_score": self.best_score,
-            "board_best_scores": {str(key): int(value) for key, value in self.board_best_scores.items()},
-            "fitness_ema": self.fitness_ema,
-            "history": [asdict(item) for item in self.history],
-            "decision_stats": export_decision_stats(self.decision_stats),
-            "last_death_snapshot": self.last_death_snapshot,
+            "v": 1,
+            "ep": self.episode_counter,
+            "bs": self.best_score,
+            "bbs": {str(k): v for k, v in self.board_best_scores.items()},
+            "fit": self.fitness_ema,
+            "hist": [{"e": i.episode, "s": i.score, "st": i.steps, "r": i.reason, "f": i.fitness} for i in self.history],
+            "ds": {
+                "c": {"a": self.decision_stats["choices"]["all"], "r": list(self.decision_stats["choices"]["recent"])},
+                "s": {"a": self.decision_stats["steps"]["all"], "r": list(self.decision_stats["steps"]["recent"])},
+                "d": {"a": self.decision_stats["deaths"]["all"], "r": list(self.decision_stats["deaths"]["recent"])},
+            }
         }
 
-    def _load_aux_stats_payload(self, payload: dict[str, Any] | None, *, include_runtime: bool = False) -> None:
-        payload = payload if isinstance(payload, dict) else {}
-
+    def _unpack_aux_stats(self, payload: dict[str, Any], *, include_runtime: bool = False) -> None:
+        if not isinstance(payload, dict):
+            return
         if include_runtime:
-            self._load_runtime_payload(payload.get("runtime"))
-        self._load_agent_state_payload(payload.get("agent_state"))
-
-        self.last_death_snapshot = compact_death_snapshot(payload.get("last_death_snapshot"))
-
-        loaded_decision_stats = payload.get("decision_stats", {})
-        self._reset_decision_stats()
-        if isinstance(loaded_decision_stats, dict):
-            for section in ("choices", "steps", "deaths"):
-                section_payload = loaded_decision_stats.get(section, {})
-                if not isinstance(section_payload, dict):
-                    continue
-                bucket = self.decision_stats.setdefault(section, make_decision_stat_bucket(tuple()))
-                all_payload = section_payload.get("all", {})
-                if isinstance(all_payload, dict):
-                    for key, value in all_payload.items():
-                        bucket["all"][str(key)] = int(value)
-                recent_payload = section_payload.get("recent", [])
-                if isinstance(recent_payload, list):
-                    bucket["recent"] = deque((str(item) for item in recent_payload[-DECISION_STATS_WINDOW:]), maxlen=DECISION_STATS_WINDOW)
-
-        self.history.clear()
-        for item in payload.get("history", []):
-            if isinstance(item, dict):
-                try:
-                    if "mutation" not in item and "epsilon" in item:
-                        item = dict(item)
-                        item["mutation"] = float(item.get("epsilon", 0.0))
-                    if "fitness" not in item and "loss" in item:
-                        item = dict(item)
-                        item["fitness"] = float(item.get("loss", 0.0))
-                    if "loss" not in item:
-                        item = dict(item)
-                        item["loss"] = 0.0
-                    self.history.append(EpisodeStats(**item))
-                except TypeError:
-                    continue
-
-        if "episode_counter" in payload:
-            self.episode_counter = int(payload.get("episode_counter", 0))
-        else:
-            self.episode_counter = max((int(item.episode) for item in self.history), default=0)
-
-        loaded_board_best_scores = payload.get("board_best_scores", {})
+            self._load_runtime_payload(payload.get("rt"))
+        self._load_agent_state_payload(payload.get("ag"))
+        
+        self.episode_counter = int(payload.get("ep", 0))
+        self.best_score = int(payload.get("bs", 0))
+        self.fitness_ema = float(payload.get("fit", 0.0))
+        
         self.board_best_scores = {}
-        if isinstance(loaded_board_best_scores, dict):
-            for key, value in loaded_board_best_scores.items():
+        bbs = payload.get("bbs", {})
+        if isinstance(bbs, dict):
+            for key, value in bbs.items():
                 try:
                     board_size = int(key)
                     if board_size in BOARD_SIZES:
                         self.board_best_scores[board_size] = int(value)
                 except (TypeError, ValueError):
                     continue
-
-        if "best_score" in payload:
-            self.best_score = int(payload.get("best_score", 0))
-        else:
-            self.best_score = max((int(item.score) for item in self.history), default=0)
+        
         if not self.board_best_scores:
-            self.board_best_scores[int(self.game.board_size)] = int(self.best_score)
+            self.board_best_scores[int(self.game.board_size)] = self.best_score
         else:
             current_board_size = int(self.game.board_size)
             self.board_best_scores[current_board_size] = max(
-                int(self.board_best_scores.get(current_board_size, 0)),
-                int(self.best_score),
+                int(self.board_best_scores.get(current_board_size, 0)), self.best_score
             )
         self._select_board_best_score()
-        self.fitness_ema = float(payload.get("fitness_ema", 0.0))
+        
+        self.history.clear()
+        for item in payload.get("hist", []):
+            if isinstance(item, dict):
+                try:
+                    self.history.append(EpisodeStats(
+                        episode=item["e"], score=item["s"], reward=0.0, mutation=0.0,
+                        fitness=item["f"], steps=item["st"], best_score=self.best_score,
+                        reason=item["r"], loss=0.0
+                    ))
+                except (KeyError, TypeError):
+                    continue
+
+        ds = payload.get("ds", {})
+        self._reset_decision_stats()
+        if isinstance(ds, dict):
+            for section, code in {"choices": "c", "steps": "s", "deaths": "d"}.items():
+                section_payload = ds.get(code, {})
+                if not isinstance(section_payload, dict):
+                    continue
+                bucket = self.decision_stats[section]
+                all_payload = section_payload.get("a", {})
+                if isinstance(all_payload, dict):
+                    for key, value in all_payload.items():
+                        bucket["all"][str(key)] = int(value)
+                recent_payload = section_payload.get("r", [])
+                if isinstance(recent_payload, list):
+                    bucket["recent"] = deque(
+                        (str(i) for i in recent_payload[-DECISION_STATS_WINDOW:]),
+                        maxlen=DECISION_STATS_WINDOW
+                    )
+
+    def _aux_stats_payload(self) -> dict[str, Any]:
+        return self._pack_aux_stats()
+
+    def _load_aux_stats_payload(self, payload: dict[str, Any] | None, *, include_runtime: bool = False) -> None:
+        self._unpack_aux_stats(payload, include_runtime=include_runtime)
+    # =========================================================================
 
     def _reset_aux_stats(self) -> None:
         self.best_score = 0
@@ -1600,6 +1488,8 @@ class SnakeWebBackend:
             return None
         checkpoint_path = self._checkpoint_path()
         checkpoint_payload = self.agent.export_checkpoint(self._agent_metadata())
+        # Вшиваем подпись архитектуры в чекпоинт
+        checkpoint_payload["arch_signature"] = ARCH_SIGNATURE
         aux_payload = self._aux_stats_payload()
         return checkpoint_path, checkpoint_payload, self._active_aux_stats_key(), aux_payload
 
@@ -1618,7 +1508,7 @@ class SnakeWebBackend:
         models = store.setdefault("models", {})
         if isinstance(models, dict):
             if self.mode != "smart":
-                compact_model_stats(models, checkpoint_key, self.agent_kind, self.input_grid, self.input_mode)
+                compact_model_stats(models, checkpoint_key, self.agent_kind)
             models[checkpoint_key] = aux_payload
         save_aux_stats_store(store)
 
@@ -1634,7 +1524,7 @@ class SnakeWebBackend:
             for key in {
                 self._active_aux_stats_key(),
                 checkpoint_path.stem,
-                model_stats_key(self.input_grid, self.agent_kind, self.input_mode),
+                model_stats_key(self.agent_kind),
             }:
                 models.pop(key, None)
         save_aux_stats_store(store)
@@ -1670,9 +1560,14 @@ class SnakeWebBackend:
 
         try:
             payload = torch.load(checkpoint_path, map_location="cpu")
-            actual_mode = "cpu"
+            
+            # Проверяем совместимость архитектуры по сигнатуре
+            stored_signature = payload.get("arch_signature")
+            if stored_signature != ARCH_SIGNATURE:
+                # Архитектура изменилась, игнорируем старые веса
+                return False
 
-            self._swap_device(actual_mode, payload if isinstance(payload, dict) else None)
+            self._swap_device("cpu", payload)
             stats_store = load_aux_stats_store()
             stats_models = stats_store.get("models", {}) if isinstance(stats_store, dict) else {}
             stats_payload = None
@@ -1681,7 +1576,8 @@ class SnakeWebBackend:
                 if not isinstance(stats_payload, dict):
                     stats_payload = stats_models.get(self._checkpoint_path().stem)
                 if not isinstance(stats_payload, dict):
-                    stats_payload = stats_models.get(model_stats_key(self.input_grid, self.agent_kind, self.input_mode))
+                    stats_payload = stats_models.get(model_stats_key(self.agent_kind))
+            
             if isinstance(stats_payload, dict):
                 self._load_aux_stats_payload(stats_payload, include_runtime=True)
             else:
@@ -1722,7 +1618,6 @@ class SnakeWebBackend:
             return False, "Unknown device mode"
         if mode == self.device_mode:
             return True, "ok"
-
         self._swap_device(mode)
         _, self.last_q_values, _, self.last_greedy_action = self._select_current_action(self.last_state, False)
         return True, "ok"
@@ -1749,7 +1644,6 @@ class SnakeWebBackend:
         current_board_size = self.game.board_size
         self._sync_board_best_score()
         self._store_active_agent_slot()
-
         self.agent_kind = agent_kind
         key = self._agent_cache_key(self.agent_kind)
         loaded = False
@@ -1761,12 +1655,7 @@ class SnakeWebBackend:
             else:
                 self.agent = self._create_native_agent(self.agent_kind)
                 try:
-                    loaded = self._load_agent_checkpoint_into(
-                        self.agent,
-                        agent_kind=self.agent_kind,
-                        input_grid=self.input_grid,
-                        input_mode=self.input_mode,
-                    )
+                    loaded = self._load_agent_checkpoint_into(self.agent)
                     error = ""
                 except Exception as exc:
                     loaded = False
@@ -1783,15 +1672,14 @@ class SnakeWebBackend:
         self._reset_training_runner(current_board_size)
         self.game = SnakeEnv(board_size=current_board_size)
         self._select_board_best_score(current_board_size)
-
         stats_store = load_aux_stats_store()
         stats_models = stats_store.get("models", {}) if isinstance(stats_store, dict) else {}
         stats_payload = None
         if isinstance(stats_models, dict):
-            checkpoint_key = checkpoint_path_for_agent(self.agent_kind, self.input_grid, self.input_mode).stem
+            checkpoint_key = checkpoint_path_for_agent(self.agent_kind).stem
             stats_payload = stats_models.get(checkpoint_key)
             if not isinstance(stats_payload, dict):
-                stats_payload = stats_models.get(model_stats_key(self.input_grid, self.agent_kind, self.input_mode))
+                stats_payload = stats_models.get(model_stats_key(self.agent_kind))
         if isinstance(stats_payload, dict):
             self._load_aux_stats_payload(stats_payload)
         else:
@@ -1806,103 +1694,53 @@ class SnakeWebBackend:
         self._schedule_save(urgent=True)
         return True, "ok"
 
-    def _set_input_grid(self, input_grid: int, *, force_cpu: bool = False) -> tuple[bool, str]:
-        if input_grid not in INPUT_GRID_OPTIONS:
-            return False, "Unknown input grid"
-        if input_grid == self.input_grid:
+    def _set_board_size(self, board_size: int) -> tuple[bool, str]:
+        if board_size not in BOARD_SIZES:
+            return False, "Invalid board size"
+        if board_size == self.game.board_size:
             return True, "ok"
-
-        current_board_size = self.game.board_size
-        current_device_mode = self.device_mode
-        self._sync_board_best_score()
-        self._save_state()
-
-        self.input_grid = input_grid
-        if self.input_grid <= 0 and self.input_mode == "map":
-            self.input_mode = "hybrid"
-        self._reload_after_input_change(current_board_size, current_device_mode, force_cpu=force_cpu)
-        self._finish_input_change()
-        return True, "ok"
-
-    def _set_input_mode(self, input_mode: str, *, force_cpu: bool = False) -> tuple[bool, str]:
-        if input_mode not in INPUT_MODES:
-            return False, "Unknown input mode"
-        if input_mode == self.input_mode:
-            return True, "ok"
-
-        current_board_size = self.game.board_size
-        current_device_mode = self.device_mode
-        self._sync_board_best_score()
-        self._save_state()
-
-        self.input_mode = input_mode
-        self.input_grid = 0 if input_mode == "signals" else int(self.game.board_size)
-        self._reload_after_input_change(current_board_size, current_device_mode, force_cpu=force_cpu)
-        self._finish_input_change()
-        return True, "ok"
-
-    def _reload_after_input_change(self, board_size: int, device_mode: str, *, force_cpu: bool) -> None:
-        loaded = self._load_state(force_cpu=force_cpu, preferred_device_mode=device_mode)
-        if not loaded:
-            self.game = SnakeEnv(board_size=board_size)
-            self.agent = self._create_native_agent(self.agent_kind)
-            self._store_active_agent_slot()
-            self._reset_training_runner(board_size)
-            self.board_best_scores = {board_size: 0}
-            self.training = False
-            self.mode = "manual"
-            self.fitness_ema = 0.0
-            self.best_score = 0
-            self.episode_counter = 0
-            self.history.clear()
-            self._reset_decision_stats()
-            self._reset_environment_state()
-            self.current_episode_transitions.clear()
-            return
-        if self.game.board_size != board_size:
-            self.game = SnakeEnv(board_size=board_size)
-            self._select_board_best_score(board_size)
-            self._reset_environment_state()
-            self.current_episode_transitions.clear()
-        else:
-            self._select_board_best_score(board_size)
-
-    def _finish_input_change(self) -> None:
-        self._reset_death_stats()
-        self.last_outcome_reason = "new_game"
-        self.last_penalty_reasons = []
-        self.last_death_snapshot = None
         self.running = False
-        self._save_state()
-        self._preload_native_agent_slots()
+        self._sync_board_best_score()
+        self.game = SnakeEnv(board_size=board_size)
+        self._reset_training_runner(board_size)
+        self._select_board_best_score(board_size)
+        self._reset_environment_state()
+        self._schedule_save(urgent=True)
+        return True, "ok"
+
+    def _cycle_board_size(self) -> tuple[bool, str]:
+        self.running = False
+        self._sync_board_best_score()
+        current = BOARD_SIZES.index(self.game.board_size)
+        next_board_size = BOARD_SIZES[(current + 1) % len(BOARD_SIZES)]
+        return self._set_board_size(next_board_size)
 
     def _network_payload(self) -> dict[str, Any]:
+        
         started_at = time.perf_counter()
         cache_used = False
-        global_signal_labels = list(GLOBAL_SIGNAL_LABELS) if self.input_mode != "map" else []
+        global_signal_labels = list(GLOBAL_SIGNAL_LABELS)
+        
         self._ensure_runtime_consistency()
         locked = self.agent_lock.acquire(timeout=0.02 if self.running else -1)
         if not locked:
-            local_input_values, global_signal_values = split_input_vector(self.last_state, self.input_grid)
             output_values = np.asarray(self.last_q_values, dtype=np.float32)
             if self._network_payload_cache is not None:
                 cache_used = True
                 cached = dict(self._network_payload_cache)
                 cached["output"] = output_values.tolist()
-                cached["global_signals"] = {
-                    "labels": global_signal_labels,
-                    "values": global_signal_values.tolist(),
-                }
+                cached["global_signals"]["values"] = self.last_state.tolist()
                 elapsed_ms = (time.perf_counter() - started_at) * 1000.0
                 if elapsed_ms >= SLOW_NETWORK_MS:
                     log_perf("slow_network_payload", elapsed_ms, cache=cache_used, locked=False)
                 return cached
+            
             payload = {
-                "local_input": local_input_values.tolist(),
+                "local_input": [],
                 "local_heatmap": [],
                 "global_signals": {
                     "labels": global_signal_labels,
-                    "values": global_signal_values.tolist(),
+                    "values": self.last_state.tolist(),
                 },
                 "hidden1": [0.0] * HIDDEN_LAYER_1,
                 "hidden2": [0.0] * HIDDEN_LAYER_2,
@@ -1920,103 +1758,78 @@ class SnakeWebBackend:
             if elapsed_ms >= SLOW_NETWORK_MS:
                 log_perf("slow_network_payload", elapsed_ms, cache=cache_used, locked=False)
             return payload
+
         try:
             snapshot = self.agent.snapshot(self.last_state)
-            dense_visualization = bool(getattr(self.agent.online_net, "dense_connection_visualization", True))
-            if dense_visualization:
-                layer1 = self.agent.online_net.layer1.weight.detach().cpu().numpy()
-                layer2 = self.agent.online_net.layer2.weight.detach().cpu().numpy()
-                layer3 = self.agent.online_net.output.weight.detach().cpu().numpy()
-                value_layer = np.empty((0, HIDDEN_LAYER_2), dtype=np.float32)
-        finally:
-            self.agent_lock.release()
-        input_values = snapshot["input"]
-        local_input_values, global_signal_values = split_input_vector(input_values, self.input_grid)
-        hidden1_values = snapshot["hidden1"]
-        hidden2_values = snapshot["hidden2"]
-        output_values = snapshot["output"]
-        local_heatmap = np.asarray(snapshot.get("local_heatmap", np.asarray([], dtype=np.float32)), dtype=np.float32).reshape(-1)
-        value_values = np.atleast_1d(snapshot.get("value", np.asarray([], dtype=np.float32))).astype(np.float32)
-        if not dense_visualization:
-            global_hidden1_connections: list[dict[str, float | int]] = []
-            hidden1_hidden2_connections: list[dict[str, float | int]] = []
-            hidden2_output_connections: list[dict[str, float | int]] = []
-            hidden2_value_connections: list[dict[str, float | int]] = []
+            input_values = np.asarray(snapshot.get("input", np.zeros(GLOBAL_SIGNAL_COUNT)), dtype=np.float32)
+            hidden1_values = np.asarray(snapshot.get("hidden1", np.zeros(HIDDEN_LAYER_1)), dtype=np.float32)
+            hidden2_values = np.asarray(snapshot.get("hidden2", np.zeros(HIDDEN_LAYER_2)), dtype=np.float32)
+            output_values = np.asarray(snapshot.get("output", np.zeros(len(MODEL_ACTION_LABELS))), dtype=np.float32)
+            value_values = np.asarray(snapshot.get("value", np.array([], dtype=np.float32)), dtype=np.float32)
+
             net = self.agent.online_net
+            input_hidden1_connections = []
+            hidden1_hidden2_connections = []
+            hidden2_output_connections = []
+            hidden2_value_connections = []
+
             try:
-                global_mlp = getattr(net, "global_mlp", None)
-                if (
-                    global_mlp is not None
-                    and len(global_mlp) >= 3
-                    and isinstance(global_mlp[0], nn.Linear)
-                    and isinstance(global_mlp[2], nn.Linear)
-                    and hasattr(net, "layer1")
-                    and hasattr(net, "layer2")
-                ):
-                    signal_values = np.asarray(global_signal_values, dtype=np.float32)
-                    hidden1_array = np.asarray(hidden1_values, dtype=np.float32)
-                    hidden2_array = np.asarray(hidden2_values, dtype=np.float32)
-
-                    w1 = global_mlp[0].weight.detach().cpu().numpy().astype(np.float32)
-                    b1 = global_mlp[0].bias.detach().cpu().numpy().astype(np.float32)
-                    w2 = global_mlp[2].weight.detach().cpu().numpy().astype(np.float32)
-                    b2 = global_mlp[2].bias.detach().cpu().numpy().astype(np.float32)
-                    layer1_weight = net.layer1.weight.detach().cpu().numpy().astype(np.float32)
-                    layer2_weight = net.layer2.weight.detach().cpu().numpy().astype(np.float32)
-
-                    branch_offset = LOCAL_BRANCH_HIDDEN
-                    layer1_global = layer1_weight[:, branch_offset:]
-
-                    pre1 = w1 @ signal_values + b1
-                    act1 = np.tanh(pre1)
-                    deriv1 = (1.0 - np.square(act1)).astype(np.float32)
-                    pre2 = w2 @ act1 + b2
-                    act2 = np.tanh(pre2)
-                    deriv2 = (1.0 - np.square(act2)).astype(np.float32)
-                    hidden1_deriv = (1.0 - np.square(hidden1_array)).astype(np.float32)
-                    hidden2_deriv = (1.0 - np.square(hidden2_array)).astype(np.float32)
-
-                    effective_global_hidden1 = (hidden1_deriv[:, None] * layer1_global) @ ((deriv2[:, None] * w2) @ (deriv1[:, None] * w1))
-                    effective_hidden1_hidden2 = hidden2_deriv[:, None] * layer2_weight
-
-                    output_head = getattr(net, "output", None) or getattr(net, "advantage_head", None)
-                    if output_head is None or not hasattr(output_head, "weight"):
-                        raise AttributeError("network output head is unavailable")
-                    effective_hidden2_output = output_head.weight.detach().cpu().numpy().astype(np.float32)
-                    effective_hidden2_value = np.empty((0, HIDDEN_LAYER_2), dtype=np.float32)
-
-                    global_hidden1_connections = build_connection_payload(
-                        signal_values,
-                        hidden1_array,
-                        effective_global_hidden1,
-                        len(global_signal_labels),
-                        12,
-                        36,
+                # === ИСПРАВЛЕННЫЙ БЛОК: корректное сопоставление весов и активаций ===
+                
+                # input -> hidden1: промежуточный слой 64 не выводится в UI, поэтому используем
+                # эффективную матрицу W_h1 @ W_in размером (HIDDEN_LAYER_1, input_size)
+                if hasattr(net, 'input_layer') and hasattr(net, 'hidden1_layer'):
+                    w_in = net.input_layer.weight.detach()
+                    w_h1 = net.hidden1_layer.weight.detach()
+                    w_in_h1 = (w_h1 @ w_in).cpu().numpy()
+                    input_hidden1_connections = build_connection_payload(
+                        input_values, hidden1_values, w_in_h1,
+                        len(input_values), len(hidden1_values), 48
                     )
-                    hidden1_hidden2_connections = build_connection_payload(hidden1_array, hidden2_array, effective_hidden1_hidden2, 14, 10, 90)
-                    hidden2_output_connections = build_connection_payload(hidden2_array, output_values, effective_hidden2_output, 10, 3, 30)
-                    if effective_hidden2_value.size:
-                        hidden2_value_connections = build_connection_payload(hidden2_array, value_values, effective_hidden2_value, 10, 1, 16)
-            except Exception:
-                global_hidden1_connections = []
-                hidden1_hidden2_connections = []
-                hidden2_output_connections = []
-                hidden2_value_connections = []
+                
+                # hidden1 -> hidden2: используется вес именно hidden2_layer (H2, H1)
+                if hasattr(net, 'hidden1_layer') and hasattr(net, 'hidden2_layer'):
+                    w_h1_h2 = net.hidden2_layer.weight.detach().cpu().numpy()
+                    hidden1_hidden2_connections = build_connection_payload(
+                        hidden1_values, hidden2_values, w_h1_h2,
+                        len(hidden1_values), len(hidden2_values), 90
+                    )
+                 
+                w_out = None
+                if hasattr(net, 'advantage_head'):
+                    w_out = net.advantage_head.weight.detach().cpu().numpy()
+                elif hasattr(net, 'output'):
+                    w_out = net.output.weight.detach().cpu().numpy()
+                
+                if w_out is not None:
+                    hidden2_output_connections = build_connection_payload(
+                        hidden2_values, output_values, w_out, 
+                        len(hidden2_values), len(output_values), 30
+                    )
+                
+                if hasattr(net, 'value_head'):
+                    w_val = net.value_head.weight.detach().cpu().numpy()
+                    hidden2_value_connections = build_connection_payload(
+                        hidden2_values, value_values, w_val,
+                        len(hidden2_values), len(value_values), 16
+                    )
+            except Exception as e:
+                log_perf("network_payload_weight_error", 0.0, error=str(e))
 
             payload = {
-                "local_input": local_input_values.tolist(),
-                "local_heatmap": local_heatmap.tolist(),
+                "local_input": [],
+                "local_heatmap": [],
                 "global_signals": {
                     "labels": global_signal_labels,
-                    "values": global_signal_values.tolist(),
+                    "values": input_values.tolist(),
                 },
                 "hidden1": hidden1_values.tolist(),
                 "hidden2": hidden2_values.tolist(),
                 "output": output_values.tolist(),
                 "value": value_values.tolist(),
                 "connections": {
-                    "local_input_hidden1": [],
-                    "global_hidden1": global_hidden1_connections,
+                    "local_input_hidden1": input_hidden1_connections,
+                    "global_hidden1": input_hidden1_connections,
                     "hidden1_hidden2": hidden1_hidden2_connections,
                     "hidden2_output": hidden2_output_connections,
                     "hidden2_value": hidden2_value_connections,
@@ -2027,42 +1840,16 @@ class SnakeWebBackend:
             if elapsed_ms >= SLOW_NETWORK_MS:
                 log_perf("slow_network_payload", elapsed_ms, cache=cache_used, locked=True, dense=False)
             return payload
-
-        local_input_count = local_input_size(self.input_grid)
-        local_layer1 = layer1[:, :local_input_count]
-        global_layer1 = layer1[:, local_input_count:]
-
-        payload = {
-            "local_input": local_input_values.tolist(),
-            "local_heatmap": local_heatmap.tolist(),
-            "global_signals": {
-                "labels": global_signal_labels,
-                "values": global_signal_values.tolist(),
-            },
-            "hidden1": hidden1_values.tolist(),
-            "hidden2": hidden2_values.tolist(),
-            "output": output_values.tolist(),
-            "value": value_values.tolist(),
-            "connections": {
-                "local_input_hidden1": build_connection_payload(local_input_values, hidden1_values, local_layer1, 10, 12, 48),
-                "global_hidden1": build_connection_payload(
-                    global_signal_values,
-                    hidden1_values,
-                    global_layer1,
-                    len(global_signal_labels),
-                    12,
-                    32,
-                ),
-                "hidden1_hidden2": build_connection_payload(hidden1_values, hidden2_values, layer2, 14, 10, 90),
-                "hidden2_output": build_connection_payload(hidden2_values, output_values, layer3, 10, 3, 30),
-                "hidden2_value": build_connection_payload(hidden2_values, value_values, value_layer, 10, 1, 16),
-            },
-        }
-        self._network_payload_cache = payload
-        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
-        if elapsed_ms >= SLOW_NETWORK_MS:
-            log_perf("slow_network_payload", elapsed_ms, cache=cache_used, locked=True, dense=True)
-        return payload
+        except Exception as e:
+            log_perf("network_payload_error", 0.0, error=str(e))
+            return {
+                "local_input": [], "local_heatmap": [],
+                "global_signals": {"labels": global_signal_labels, "values": []},
+                "hidden1": [], "hidden2": [], "output": [], "value": [],
+                "connections": {"local_input_hidden1": [], "global_hidden1": [], "hidden1_hidden2": [], "hidden2_output": [], "hidden2_value": []},
+            }
+        finally:
+            self.agent_lock.release()
 
     def _cached_state_snapshot(self, include_network: bool, include_details: bool) -> dict[str, Any] | None:
         cached = self._snapshot_cache.get((include_network, include_details))
@@ -2077,15 +1864,8 @@ class SnakeWebBackend:
             payload["network"] = None
         if not include_details:
             for key in (
-                "reward_rules",
-                "step_review",
-                "step_review_source",
-                "step_review_history",
-                "observation",
-                "global_signals",
-                "last_death_snapshot",
-                "decision_stats",
-                "history",
+                "reward_rules", "step_review", "step_review_source", "step_review_history",
+                "observation", "global_signals", "last_death_snapshot", "decision_stats", "history",
             ):
                 payload.pop(key, None)
         payload["backend_busy"] = True
@@ -2112,17 +1892,17 @@ class SnakeWebBackend:
             "average_score_window": len(recent_scores),
             "reward": self.live_reward,
             "fitness": self.fitness_ema,
-            "mutation": 0.0 if self.mode == "smart" else self.agent.mutation_rate,
+            "mutation": 0.0 if self.mode == "smart" else getattr(self.agent, "mutation_rate", 0.0),
             "hunger_steps": hunger_steps,
             "hunger_budget": hunger_budget,
             "hunger_ratio": hunger_ratio,
             "max_hunger_steps": max(0, int(self.game.max_steps_without_food)),
-            "generation": 0 if self.mode == "smart" else self.agent.generation,
-            "individual": 0 if self.mode == "smart" else self.agent.current_index + 1,
-            "population": 0 if self.mode == "smart" else self.agent.population_size,
+            "generation": 0 if self.mode == "smart" else getattr(self.agent, "generation", 0),
+            "individual": 0 if self.mode == "smart" else getattr(self.agent, "current_index", 0) + 1,
+            "population": 0 if self.mode == "smart" else getattr(self.agent, "population_size", 1),
             "victory_archive": 0 if self.mode == "smart" else int(getattr(self.agent, "victory_archive_size", 0)),
             "best_fitness": best_fitness,
-            "avg_fitness": 0.0 if self.mode == "smart" else self.agent.last_generation_average,
+            "avg_fitness": 0.0 if self.mode == "smart" else getattr(self.agent, "last_generation_average", 0.0),
             "alive": 1 if self.training and is_dqn else (0 if not self.training else self.training_runner.alive_count()),
             "completed": 0 if is_dqn or not self.training else self.training_runner.completed_count,
             "leader": 1 if self.training and is_dqn else (0 if not self.training else self.training_display_index + 1),
@@ -2184,7 +1964,7 @@ class SnakeWebBackend:
                 "running": self.running,
                 "training": self.training,
                 "mode": self.mode,
-                "speed": self.speed,  # <-- ДОБАВЛЕНО: предотвращает сброс ползунка
+                "speed": self.speed,
                 "game": {
                     "size": self.game.board_size,
                     "score": self.game.score,
@@ -2214,11 +1994,9 @@ class SnakeWebBackend:
             "running": self.running,
             "training": self.training,
             "mode": self.mode,
-            "speed": self.speed,  # <-- ДОБАВЛЕНО: предотвращает сброс ползунка
-            "persistence_enabled": self.persistence_enabled,  # <-- ДОБАВЛЕНО
+            "speed": self.speed,
+            "persistence_enabled": self.persistence_enabled,
             "agent_kind": self.agent_kind,
-            "input_grid": self.input_grid,
-            "input_mode": self.input_mode,
             "network_source": self.network_source,
             "game": {
                 "size": self.game.board_size,
@@ -2250,27 +2028,12 @@ class SnakeWebBackend:
                 cache_used = True
                 elapsed_ms = (time.perf_counter() - started_at) * 1000.0
                 if elapsed_ms >= SLOW_API_MS:
-                    log_perf(
-                        "slow_state_snapshot",
-                        elapsed_ms,
-                        cache=cache_used,
-                        network=include_network,
-                        details=include_details,
-                        running=self.running,
-                        training=self.training,
-                    )
+                    log_perf("slow_state_snapshot", elapsed_ms, cache=cache_used, network=include_network, details=include_details, running=self.running, training=self.training)
                 return cached
             if self.running or self.training:
                 elapsed_ms = (time.perf_counter() - started_at) * 1000.0
                 if elapsed_ms >= SLOW_API_MS:
-                    log_perf(
-                        "busy_state_snapshot",
-                        elapsed_ms,
-                        network=include_network,
-                        details=include_details,
-                        running=self.running,
-                        training=self.training,
-                    )
+                    log_perf("busy_state_snapshot", elapsed_ms, network=include_network, details=include_details, running=self.running, training=self.training)
                 return self._busy_state_snapshot()
             self.lock.acquire()
             acquired = True
@@ -2283,11 +2046,6 @@ class SnakeWebBackend:
                 "device_details": self.device_details,
                 "device_mode": self.device_mode,
                 "available_devices": self.available_devices,
-                "input_grid": self.input_grid,
-                "input_mode": self.input_mode,
-                "available_input_modes": list(INPUT_MODES),
-                "local_map_channels": list(LOCAL_MAP_CHANNEL_LABELS),
-                "available_input_grids": list(INPUT_GRID_OPTIONS),
                 "model_input_size": int(self.last_state.size),
                 "agent_kind": self.agent_kind,
                 "available_agent_kinds": list(AGENT_KINDS),
@@ -2329,7 +2087,6 @@ class SnakeWebBackend:
                 "network": self._network_payload() if include_network else None,
             }
             if include_details:
-                local_observation, global_signals = split_input_vector(self.last_state, self.input_grid)
                 terminal_reasons = {"wall_collision", "body_collision", "victory"}
                 terminal_reasons.update(reason for reason in STEP_REASON_ORDER if reason.startswith("starvation"))
                 step_review_source = "current"
@@ -2344,34 +2101,24 @@ class SnakeWebBackend:
                     step_review_source = "last_death"
                     step_review_payload = list(self.last_completed_step_review_entries)
                 step_review_payload = step_review_payload[-100:]
-                payload.update(
-                    {
-                        "reward_rules": self._reward_rules_payload(),
-                        "step_review": step_review_payload,
-                        "step_review_source": step_review_source,
-                        "step_review_history": list(self.step_review_history),
-                        "observation": local_observation.tolist(),
-                        "global_signals": {
-                            "labels": list(GLOBAL_SIGNAL_LABELS) if self.input_mode != "map" else [],
-                            "values": global_signals.tolist(),
-                        },
-                        "last_death_snapshot": self.last_death_snapshot,
-                        "decision_stats": export_decision_stats(self.decision_stats),
-                        "history": [asdict(item) for item in self.history],
-                    }
-                )
+                payload.update({
+                    "reward_rules": self._reward_rules_payload(),
+                    "step_review": step_review_payload,
+                    "step_review_source": step_review_source,
+                    "step_review_history": list(self.step_review_history),
+                    "observation": self.last_state.tolist(),
+                    "global_signals": {
+                        "labels": list(GLOBAL_SIGNAL_LABELS),
+                        "values": self.last_state.tolist(),
+                    },
+                    "last_death_snapshot": self.last_death_snapshot,
+                    "decision_stats": export_decision_stats(self.decision_stats),
+                    "history": [asdict(item) for item in self.history],
+                })
             self._snapshot_cache[(include_network, include_details)] = payload
             elapsed_ms = (time.perf_counter() - started_at) * 1000.0
             if elapsed_ms >= SLOW_API_MS:
-                log_perf(
-                    "slow_state_snapshot",
-                    elapsed_ms,
-                    cache=cache_used,
-                    network=include_network,
-                    details=include_details,
-                    running=self.running,
-                    training=self.training,
-                )
+                log_perf("slow_state_snapshot", elapsed_ms, cache=cache_used, network=include_network, details=include_details, running=self.running, training=self.training)
             return payload
         finally:
             if acquired:
@@ -2381,20 +2128,10 @@ class SnakeWebBackend:
         if command == "manual_action":
             return None
         light_state_commands = {
-            "toggle_running",
-            "toggle_training",
-            "set_agent_kind",
-            "set_mode",
-            "set_smart_model",
-            "set_input_grid",
-            "set_input_mode",
-            "set_board_size",
-            "cycle_board_size",
-            "set_speed",
-            "set_device",
-            "reset_agent",
-            "restart_server",
-            "shutdown_server",
+            "toggle_running", "toggle_training", "set_agent_kind", "set_mode",
+            "set_smart_model", "set_board_size", "cycle_board_size",
+            "set_speed", "set_device", "reset_agent",
+            "restart_server", "shutdown_server",
         }
         if command in light_state_commands:
             return self.frame_snapshot()
@@ -2471,45 +2208,11 @@ class SnakeWebBackend:
                     self.running = True
             elif command == "set_board_size":
                 if isinstance(value, int) and value in BOARD_SIZES:
-                    self.running = False
-                    self._sync_board_best_score()
-                    self.game = SnakeEnv(board_size=value)
-                    if self.input_mode != "signals":
-                        self.input_grid = value
-                        self.agent = self._create_native_agent(self.agent_kind)
-                        self._store_active_agent_slot()
-                    self._reset_training_runner(value)
-                    self._select_board_best_score(value)
-                    self._reset_environment_state()
-                    self._save_state()
-            elif command == "set_input_grid":
-                if not isinstance(value, int):
-                    return {"ok": False, "error": "Invalid input grid value"}
-                self.running = False
-                ok, message = self._set_input_grid(value)
-                if not ok:
-                    return {"ok": False, "error": message}
-            elif command == "set_input_mode":
-                if not isinstance(value, str):
-                    return {"ok": False, "error": "Invalid input mode value"}
-                self.running = False
-                ok, message = self._set_input_mode(value)
-                if not ok:
-                    return {"ok": False, "error": message}
+                    ok, message = self._set_board_size(value)
+                    if not ok:
+                        return {"ok": False, "error": message}
             elif command == "cycle_board_size":
-                self.running = False
-                self._sync_board_best_score()
-                current = BOARD_SIZES.index(self.game.board_size)
-                next_board_size = BOARD_SIZES[(current + 1) % len(BOARD_SIZES)]
-                self.game = SnakeEnv(board_size=next_board_size)
-                if self.input_mode != "signals":
-                    self.input_grid = next_board_size
-                    self.agent = self._create_native_agent(self.agent_kind)
-                    self._store_active_agent_slot()
-                self._reset_training_runner(next_board_size)
-                self._select_board_best_score(next_board_size)
-                self._reset_environment_state()
-                self._save_state()
+                self._cycle_board_size()
             elif command == "set_speed":
                 if isinstance(value, int):
                     self.speed = max(1, min(16, value))
@@ -2557,17 +2260,9 @@ class SnakeWebBackend:
                 return {"ok": False, "error": f"Unknown command: {command}"}
 
             if command in {
-                "set_agent_kind",
-                "set_mode",
-                "set_smart_model",
-                "set_input_grid",
-                "set_input_mode",
-                "set_board_size",
-                "cycle_board_size",
-                "set_speed",
-                "reset_agent",
-                "restart_server",
-                "shutdown_server",
+                "set_agent_kind", "set_mode", "set_smart_model", "set_board_size",
+                "cycle_board_size", "set_speed", "reset_agent",
+                "restart_server", "shutdown_server",
             }:
                 self._save_active_context()
             self._update_frame_cache()
@@ -2582,10 +2277,8 @@ class SnakeWebBackend:
         finally:
             self.lock.release()
 
-
 def main() -> None:
     from web_api import main as api_main
-
     api_main(
         backend_class=SnakeWebBackend,
         static_root=STATIC_ROOT,
@@ -2594,7 +2287,6 @@ def main() -> None:
         reset_perf_log_func=reset_session_perf_log,
         log_perf_func=log_perf,
     )
-
 
 if __name__ == "__main__":
     main()

@@ -6,17 +6,12 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-
 from backend_config import (
-    DEFAULT_INPUT_GRID,
-    HIDDEN_LAYER_2,
     MODEL_ACTION_LABELS,
     CPU_BATCH_SIZE,
     GLOBAL_SIGNAL_LABELS,
-    local_input_size,
 )
-
-from networks import HybridBoardEncoder
+from networks import QNetwork
 
 def move_optimizer_state(optimizer: torch.optim.Optimizer, device: torch.device) -> None:
     for state in optimizer.state.values():
@@ -35,6 +30,7 @@ def load_matching_state(module: nn.Module, saved_state: dict[str, torch.Tensor] 
     current_state.update(matched)
     module.load_state_dict(current_state)
     return len(matched)
+
 
 class ReplayBuffer:
     def __init__(
@@ -84,7 +80,6 @@ class ReplayBuffer:
         else:
             index = self.position
             self.buffer[index] = item
-        # Clip to float32 max to avoid overflow on very large priorities
         safe_priority = min(float(priority), np.finfo(np.float32).max)
         self.priorities[index] = safe_priority
         self.max_priority = max(self.max_priority, float(priority))
@@ -131,51 +126,16 @@ class ReplayBuffer:
             index = int(index)
             if not 0 <= index < size:
                 continue
-            # Clip to float32 max to avoid overflow
             boosted = max(float(priority), self.priority_epsilon) * max(1.0, float(scale))
             self.priorities[index] = min(boosted, np.finfo(np.float32).max)
             self.max_priority = max(self.max_priority, float(boosted))
-
-
-class QNetwork(HybridBoardEncoder):
-    def __init__(
-        self,
-        input_size: int = DEFAULT_INPUT_GRID * DEFAULT_INPUT_GRID,
-        input_grid: int = DEFAULT_INPUT_GRID,
-        global_signal_count: int = len(GLOBAL_SIGNAL_LABELS),
-    ) -> None:
-        super().__init__(input_grid=input_grid, global_signal_count=global_signal_count)
-        self.value_head = nn.Linear(HIDDEN_LAYER_2, 1)
-        self.advantage_head = nn.Linear(HIDDEN_LAYER_2, len(MODEL_ACTION_LABELS))
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        _, _, hidden2, _ = self.merged_hidden(inputs)
-        value = self.value_head(hidden2)
-        advantage = self.advantage_head(hidden2)
-        return value + advantage - advantage.mean(dim=1, keepdim=True)
-
-    def forward_with_activations(self, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
-        inputs, hidden1, hidden2, local_heatmap = self.merged_hidden(inputs)
-        value = self.value_head(hidden2)
-        advantage = self.advantage_head(hidden2)
-        output = value + advantage - advantage.mean(dim=1, keepdim=True)
-        return {
-            "input": inputs.squeeze(0),
-            "hidden1": hidden1.squeeze(0),
-            "hidden2": hidden2.squeeze(0),
-            "output": output.squeeze(0),
-            "value": value.squeeze(0),
-            "local_heatmap": local_heatmap.squeeze(0),
-        }
 
 
 class DQNAgent:
     def __init__(
         self,
         device: torch.device,
-        input_grid: int = DEFAULT_INPUT_GRID,
         *,
-        global_signal_count: int = len(GLOBAL_SIGNAL_LABELS),
         gamma: float = 0.96,
         learning_rate: float = 0.0008,
         batch_size: int = CPU_BATCH_SIZE,
@@ -186,8 +146,7 @@ class DQNAgent:
         target_sync_interval: int = 160,
     ) -> None:
         self.device = device
-        self.input_grid = int(input_grid)
-        self.global_signal_count = int(global_signal_count)
+        self.global_signal_count = len(GLOBAL_SIGNAL_LABELS)
         self.gamma = float(gamma)
         self.batch_size = int(batch_size)
         self.epsilon = float(epsilon_start)
@@ -199,16 +158,14 @@ class DQNAgent:
         self.best_score = 0
         self.best_fitness = float("-inf")
         self.last_fitness = 0.0
-        self.last_generation_average = 0.0
         self.generation = 0
         self.current_index = 0
         self.population_size = 1
         self.mutation_rate = 0.0
         self.victory_archive: list[object] = []
 
-        input_size = local_input_size(input_grid) + global_signal_count
-        self.online_net = QNetwork(input_size=input_size, input_grid=input_grid, global_signal_count=global_signal_count).to(device)
-        self.target_net = QNetwork(input_size=input_size, input_grid=input_grid, global_signal_count=global_signal_count).to(device)
+        self.online_net = QNetwork(input_size=self.global_signal_count).to(device)
+        self.target_net = QNetwork(input_size=self.global_signal_count).to(device)
         self.target_net.load_state_dict(self.online_net.state_dict())
         self.target_net.eval()
 

@@ -1,37 +1,28 @@
 from __future__ import annotations
-
 from collections import deque
 from dataclasses import dataclass
 import random
 import time
 from typing import Any, Callable, Deque
-import gc  # <-- ДОБАВЛЕНО: импортируем сборщик мусора
-
+import gc
 import numpy as np
 import torch
 from torch import nn
 
-# --- ДОБАВЛЕНО: Оптимизация Garbage Collector ---
-# По умолчанию Python собирает мусор каждые 700 объектов. 
-# Мы увеличиваем лимит до 50 000. Сборка будет происходить реже
-# (в фоне) и паузы по 130-140мс практически исчезнут.
 gc.set_threshold(50000, 50, 50)
 
 try:
     from torch.func import functional_call
-except ImportError:  # pragma: no cover - fallback for older PyTorch builds
+except ImportError:
     from torch.nn.utils.stateless import functional_call
 
 from backend_config import (
-    DEFAULT_INPUT_GRID,
-    HIDDEN_LAYER_2,
     MODEL_ACTION_LABELS,
-    local_input_size,
+    GLOBAL_SIGNAL_LABELS,
     hunger_budget_for,
 )
-from networks import HybridBoardEncoder
+from networks import PolicyNetwork
 
-DEFAULT_GLOBAL_SIGNAL_COUNT = 30
 EVOLUTION_HUNGER_CULL_REASON = "evolution_hunger_cut"
 EVOLUTION_HUNGER_CULL_PROTECTED_RATIO = 0.45
 EVOLUTION_HUNGER_CULL_MIN_PROTECTED = 2
@@ -46,28 +37,6 @@ EVOLUTION_VICTORY_SEED_COUNT = 4
 EVOLUTION_VICTORY_MUTATION_RATE_SCALE = 0.55
 EVOLUTION_VICTORY_MUTATION_STRENGTH_SCALE = 0.35
 
-class PolicyNetwork(HybridBoardEncoder):
-    def __init__(self, input_size: int = DEFAULT_INPUT_GRID * DEFAULT_INPUT_GRID, input_grid: int = DEFAULT_INPUT_GRID, global_signal_count: int = DEFAULT_GLOBAL_SIGNAL_COUNT) -> None:
-        super().__init__(input_grid=input_grid, global_signal_count=global_signal_count)
-        self.output = nn.Linear(HIDDEN_LAYER_2, len(MODEL_ACTION_LABELS))
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        _, _, hidden2, _ = self.merged_hidden(inputs)
-        return self.output(hidden2)
-
-    def forward_with_activations(self, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
-        inputs, hidden1, hidden2, local_heatmap = self.merged_hidden(inputs)
-        output = self.output(hidden2)
-        return {
-            "input": inputs.squeeze(0),
-            "hidden1": hidden1.squeeze(0),
-            "hidden2": hidden2.squeeze(0),
-            "output": output.squeeze(0),
-            "value": torch.empty(0, dtype=output.dtype, device=output.device),
-            "local_heatmap": local_heatmap.squeeze(0),
-        }
-
-
 @dataclass
 class EvolutionIndividual:
     genome: dict[str, torch.Tensor]
@@ -77,14 +46,11 @@ class EvolutionIndividual:
     steps: int = 0
     reason: str = "new"
 
-
 class EvolutionAgent:
     def __init__(
         self,
         device: torch.device,
-        input_grid: int = DEFAULT_INPUT_GRID,
         *,
-        global_signal_count: int = DEFAULT_GLOBAL_SIGNAL_COUNT,
         population_size: int = EVOLUTION_POPULATION_SIZE,
         elite_count: int = EVOLUTION_ELITE_COUNT,
         mutation_rate: float = EVOLUTION_MUTATION_RATE,
@@ -93,8 +59,7 @@ class EvolutionAgent:
         random_injection: int = EVOLUTION_RANDOM_INJECTION,
     ) -> None:
         self.device = device
-        self.input_grid = input_grid
-        self.global_signal_count = global_signal_count
+        self.global_signal_count = len(GLOBAL_SIGNAL_LABELS)
         self.population_size = max(4, int(population_size))
         self.elite_count = max(1, min(int(elite_count), self.population_size - 1))
         self.mutation_rate = float(mutation_rate)
@@ -110,12 +75,15 @@ class EvolutionAgent:
         self.last_fitness = 0.0
         self.last_generation_average = 0.0
         self.completed_evaluations = 0
-        input_size = local_input_size(input_grid) + global_signal_count
-        self.online_net = PolicyNetwork(
-            input_size=input_size,
-            input_grid=input_grid,
-            global_signal_count=global_signal_count,
-        ).to(device)
+
+        self.online_net = PolicyNetwork(input_size=self.global_signal_count).to(device)
+
+        # Кэш структуры генома для векторизации (выполняется 1 раз при старте)
+        ref_state = self.online_net.state_dict()
+        self._genome_keys = list(ref_state.keys())
+        self._genome_shapes = {k: v.shape for k, v in ref_state.items()}
+        self._genome_dtypes = {k: v.dtype for k, v in ref_state.items()}
+
         self.population = [EvolutionIndividual(self._fresh_genome()) for _ in range(self.population_size)]
         self._load_current_genome()
 
@@ -154,6 +122,21 @@ class EvolutionAgent:
         self.online_net = self.online_net.to(self.device)
         self.online_net.eval()
 
+    def _pack_genome(self, genome: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Собирает словарь весов в один плоский CPU-вектор."""
+        return torch.cat([genome[k].cpu().flatten() for k in self._genome_keys])
+
+    def _unpack_genome(self, vec: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Восстанавливает словарь весов из плоского вектора."""
+        genome = {}
+        idx = 0
+        for key in self._genome_keys:
+            shape = self._genome_shapes[key]
+            numel = shape.numel()
+            genome[key] = vec[idx : idx + numel].view(shape).to(self._genome_dtypes[key])
+            idx += numel
+        return genome
+
     def select_action(
         self,
         state: np.ndarray,
@@ -162,19 +145,17 @@ class EvolutionAgent:
         snake_length: int = 1,
         endgame: bool = False,
     ) -> tuple[int, np.ndarray, bool, int]:
-        return self._select_action_with_network(state, self.online_net, endgame=endgame)
+        return self._select_action_with_network(state, self.online_net)
 
     def select_best_action(self, state: np.ndarray, *, endgame: bool = False) -> tuple[int, np.ndarray, bool, int]:
         if self.best_genome is None:
             return self.select_action(state, training=False, endgame=endgame)
-        return self._select_action_with_genome(state, self.best_genome, endgame=endgame)
+        return self._select_action_with_genome(state, self.best_genome)
 
     def _select_action_with_network(
         self,
         state: np.ndarray,
-        network: PolicyNetwork,
-        *,
-        endgame: bool = False,
+        network: nn.Module,
     ) -> tuple[int, np.ndarray, bool, int]:
         state_tensor = torch.as_tensor(state, dtype=torch.float32, device=self.device)
         with torch.no_grad():
@@ -186,8 +167,6 @@ class EvolutionAgent:
         self,
         state: np.ndarray,
         genome: dict[str, torch.Tensor],
-        *,
-        endgame: bool = False,
     ) -> tuple[int, np.ndarray, bool, int]:
         state_tensor = torch.as_tensor(state, dtype=torch.float32, device=self.device)
         with torch.no_grad():
@@ -199,7 +178,7 @@ class EvolutionAgent:
         if not self.population:
             return self.select_action(state, training=True, endgame=endgame)
         safe_index = max(0, min(index, len(self.population) - 1))
-        return self._select_action_with_genome(state, self.population[safe_index].genome, endgame=endgame)
+        return self._select_action_with_genome(state, self.population[safe_index].genome)
 
     def finish_episode(
         self,
@@ -364,10 +343,8 @@ class EvolutionAgent:
             efficiency_penalty *= 1.45
         hunger_budget = hunger_budget_for(score, board_size)
         hunger_overage = max(0.0, float(max_steps_without_food) - hunger_budget)
-        # Увеличен коэффициент с 1.6 до 4.0 для соответствия масштабу других штрафов (starvation/collision)
         hunger_penalty = hunger_overage * hunger_overage * 4.0
         if score <= max(3, int(board_cells * 0.12)):
-            # Усилен множитель для ранних стадий с 2.0 до 3.0
             hunger_penalty *= 3.0
         elif score >= int(board_cells * 0.70):
             hunger_penalty *= 0.85
@@ -435,15 +412,12 @@ class EvolutionAgent:
     def _crossover(self, first: dict[str, torch.Tensor], second: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         if random.random() > self.crossover_rate:
             return self._clone_state(first)
-        child: dict[str, torch.Tensor] = {}
-        for key, first_value in first.items():
-            second_value = second.get(key, first_value)
-            if first_value.dtype.is_floating_point:
-                mask = torch.rand_like(first_value.float()) < 0.5
-                child[key] = torch.where(mask, first_value.float(), second_value.float()).to(dtype=first_value.dtype).cpu()
-            else:
-                child[key] = first_value.detach().cpu().clone()
-        return child
+        
+        v1 = self._pack_genome(first)
+        v2 = self._pack_genome(second)
+        mask = torch.rand_like(v1) < 0.5
+        child_vec = torch.where(mask, v1, v2)
+        return self._unpack_genome(child_vec)
 
     def _mutate(
         self,
@@ -452,18 +426,17 @@ class EvolutionAgent:
         mutation_rate_scale: float = 1.0,
         mutation_strength_scale: float = 1.0,
     ) -> dict[str, torch.Tensor]:
-        mutated: dict[str, torch.Tensor] = {}
         mutation_rate = max(0.0, min(1.0, self.mutation_rate * float(mutation_rate_scale)))
         mutation_strength = max(0.0, self.mutation_strength * float(mutation_strength_scale))
-        for key, value in genome.items():
-            tensor = value.detach().cpu().clone()
-            if tensor.dtype.is_floating_point:
-                mask = torch.rand_like(tensor.float()) < mutation_rate
-                noise = torch.randn_like(tensor.float()) * mutation_strength
-                tensor = tensor.float() + mask.float() * noise
-                tensor = tensor.to(dtype=value.dtype)
-            mutated[key] = tensor
-        return mutated
+        
+        if mutation_rate <= 0.0 or mutation_strength <= 0.0:
+            return self._clone_state(genome)
+
+        vec = self._pack_genome(genome)
+        mask = torch.rand_like(vec) < mutation_rate
+        noise = torch.randn_like(vec) * mutation_strength
+        vec = vec + mask * noise
+        return self._unpack_genome(vec)
 
     def _serialized_genome(self, genome: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         return {key: value.detach().cpu().to(dtype=torch.float16) for key, value in genome.items()}
@@ -569,7 +542,6 @@ class EvolutionAgent:
             self.best_genome = best_genome
         self._load_current_genome()
 
-
 class ParallelEvolutionRunner:
     def __init__(
         self,
@@ -645,38 +617,29 @@ class ParallelEvolutionRunner:
         return float(env.steps_without_food) > hunger_budget
 
     def _apply_hunger_cull(self, env: Any, reward: float, info: dict[str, Any]) -> tuple[float, bool, dict[str, Any]]:
-        # Исправлено: убрано прямое изменение атрибутов env (env.done, env.last_reward и т.д.), 
-        # так как это нарушает инкапсуляцию симулятора и вызывает зависания при следующем шаге.
         reward = min(float(reward), -5.0)
-        
         penalty_reasons = [str(item) for item in info.get("penalty_reasons", [])]
         if EVOLUTION_HUNGER_CULL_REASON not in penalty_reasons:
             penalty_reasons.append(EVOLUTION_HUNGER_CULL_REASON)
-            
         info = dict(info)
         info["reason"] = EVOLUTION_HUNGER_CULL_REASON
         info["penalty_reasons"] = penalty_reasons
         info["hunger_budget"] = hunger_budget_for(int(env.score), int(env.board_size))
         info["hunger_cull_protected"] = self.hunger_cull_protected_count()
-        
         return reward, True, info
 
     def _display_stale_loop(self, index: int) -> bool:
         env = self.envs[index]
         if self.done[index] or not env.snake:
             return False
-        
-        # Безопасный доступ к recent_heads с защитой от роста без ограничений
         recent_heads_raw = getattr(env, "recent_heads", None)
         if isinstance(recent_heads_raw, (list, tuple)):
             recent_heads = list(recent_heads_raw)[-12:]
         elif hasattr(recent_heads_raw, '__iter__'):
-            # Для deque или других итерируемых объектов берём последние элементы безопасно
             from collections import deque
             recent_heads = list(deque(recent_heads_raw, maxlen=12))[-12:] if isinstance(recent_heads_raw, deque) else []
         else:
             recent_heads = []
-            
         unique_recent = len(set(recent_heads))
         small_snake = len(env.snake) <= 5
         long_without_food = env.steps_without_food >= max(18, env.board_size * 2)
@@ -688,8 +651,6 @@ class ParallelEvolutionRunner:
         env = self.envs[index]
         distance = self._manhattan(env.snake[0], env.food) if env.snake else 0
         alive_bonus = 10_000.0 if not self.done[index] else 0.0
-        
-        # Безопасный доступ к recent_heads
         recent_heads_raw = getattr(env, "recent_heads", None)
         if isinstance(recent_heads_raw, (list, tuple)):
             recent_heads = list(recent_heads_raw)[-12:]
@@ -698,7 +659,6 @@ class ParallelEvolutionRunner:
             recent_heads = list(deque(recent_heads_raw, maxlen=12))[-12:] if isinstance(recent_heads_raw, deque) else []
         else:
             recent_heads = []
-            
         unique_recent = len(set(recent_heads))
         stale_penalty = 35_000.0 if self._display_stale_loop(index) else 0.0
         return (
@@ -733,13 +693,7 @@ class ParallelEvolutionRunner:
         self.update_leader()
         return self.envs[self.leader_index]
 
-    def step_alive(
-        self,
-        agent: EvolutionAgent,
-        *,
-        input_grid: int,
-        input_mode: str,
-    ) -> list[dict[str, Any]]:
+    def step_alive(self, agent: EvolutionAgent) -> list[dict[str, Any]]:
         completed: list[dict[str, Any]] = []
         observation_ms = 0.0
         inference_ms = 0.0
@@ -813,7 +767,7 @@ class ParallelEvolutionRunner:
                     self.best_completed = dict(item)
                 continue
             part_started_at = time.perf_counter()
-            state = env.get_observation_grid(input_grid, input_mode)
+            state = env.get_observation_grid()
             observation_ms += (time.perf_counter() - part_started_at) * 1000.0
             part_started_at = time.perf_counter()
             action, action_scores, was_random, greedy_action = agent.select_individual_action(index, state, endgame=env._is_endgame())

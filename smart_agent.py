@@ -1,89 +1,22 @@
-from __future__ import annotations
-
+﻿from __future__ import annotations
 import json
 from pathlib import Path
-import subprocess
-import threading
 from typing import Any
-
 import numpy as np
-
 from backend_config import DIRECTIONS, MODEL_ACTION_LABELS
 
 SMART_MODEL_GLOBS = ("*.h5", "*.keras")
 SMART_STATE_SIZE = 40
 SMART_LONG_SNAKE_FILL_THRESHOLD = 0.35
-SMART_H5_WORKER_CODE = r"""
-from __future__ import annotations
-
-import json
-import os
-import sys
-
-import numpy as np
-
-SMART_STATE_SIZE = 40
-SMART_OUTPUT_SIZE = 3
-
-
-def write(payload):
-    print(json.dumps(payload, ensure_ascii=False), flush=True)
-
-
-try:
-    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
-    import tensorflow as tf
-
-    model = None
-
-    def load_model(path):
-        global model
-        next_model = tf.keras.models.load_model(path, compile=False)
-        input_size = int(next_model.input_shape[-1])
-        output_size = int(next_model.output_shape[-1])
-        ok = input_size == SMART_STATE_SIZE and output_size == SMART_OUTPUT_SIZE
-        if ok:
-            model = next_model
-        write({"ok": ok, "input": input_size, "output": output_size})
-        return ok
-
-    if not load_model(sys.argv[1]):
-        raise SystemExit(0)
-
-    for line in sys.stdin:
-        try:
-            payload = json.loads(line)
-            if "load_model" in payload:
-                load_model(str(payload["load_model"]))
-                continue
-            state = np.asarray(payload.get("state", []), dtype=np.float32).reshape(1, -1)
-            if state.shape[-1] != SMART_STATE_SIZE:
-                raise ValueError(f"expected state size {SMART_STATE_SIZE}, got {state.shape[-1]}")
-            if model is None:
-                raise ValueError("model is not loaded")
-            output = model(state, training=False)
-            if hasattr(output, "numpy"):
-                output = output.numpy()
-            q_values = np.asarray(output[0], dtype=np.float32).astype(float).tolist()
-            write({"ok": True, "q": q_values})
-        except Exception as exc:
-            write({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
-except Exception as exc:
-    write({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
-"""
-
 
 def clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
-
 def manhattan(a: tuple[int, int], b: tuple[int, int]) -> int:
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
-
 def normalize_signed(value: float, scale: float) -> float:
     return clamp(float(value) / max(1.0, float(scale)), -1.0, 1.0)
-
 
 def relative_to_absolute(current_direction: int, action: int) -> int:
     if action == 0:
@@ -92,23 +25,22 @@ def relative_to_absolute(current_direction: int, action: int) -> int:
         return (current_direction - 1) % 4
     return (current_direction + 1) % 4
 
-
 def smart_model_candidates(runtime_dir: Path) -> list[Path]:
-    candidates = [path for pattern in SMART_MODEL_GLOBS for path in runtime_dir.glob(pattern)]
-
+    if not runtime_dir.is_dir():
+        return []
+    candidates: list[Path] = []
+    for pattern in SMART_MODEL_GLOBS:
+        candidates.extend(runtime_dir.glob(pattern))
     def modified_at(path: Path) -> float:
         try:
             return path.stat().st_mtime
         except OSError:
             return 0.0
-
     return sorted(candidates, key=modified_at, reverse=True)
-
 
 def latest_smart_model_path(runtime_dir: Path) -> Path | None:
     candidates = smart_model_candidates(runtime_dir)
     return candidates[0] if candidates else None
-
 
 class SmartH5Agent:
     def __init__(self, runtime_dir: Path, static_root: Path, model_path: Path | None = None) -> None:
@@ -116,8 +48,6 @@ class SmartH5Agent:
         self.static_root = static_root
         self.model_path = model_path or latest_smart_model_path(runtime_dir)
         self.model: Any | None = None
-        self.worker: subprocess.Popen[str] | None = None
-        self.worker_lock = threading.Lock()
         self.error: str | None = None
         self.loaded = False
         self.label = "Zmey-smart .h5"
@@ -130,144 +60,40 @@ class SmartH5Agent:
             return
         try:
             import tensorflow as tf  # type: ignore
-
             model = tf.keras.models.load_model(self.model_path, compile=False)
             input_size = int(model.input_shape[-1])
             output_size = int(model.output_shape[-1])
             if input_size != SMART_STATE_SIZE or output_size != len(MODEL_ACTION_LABELS):
-                self.error = f"Ожидалась модель {SMART_STATE_SIZE}->3, получено {input_size}->{output_size}"
+                self.error = f"Ожидалась модель {SMART_STATE_SIZE}->{len(MODEL_ACTION_LABELS)}, получено {input_size}->{output_size}"
                 return
             self.model = model
             self.loaded = True
+            self.error = None
             self.label = f"Zmey-smart: {self.model_path.name}"
         except Exception as exc:
+            self.model = None
+            self.loaded = False
             self.error = f"{type(exc).__name__}: {exc}"
-            self._load_worker()
 
     def set_model_path(self, model_path: Path) -> None:
         try:
             same_model = self.model_path is not None and self.model_path.resolve() == model_path.resolve()
         except OSError:
             same_model = self.model_path == model_path
+            
         if same_model and self.loaded:
             return
 
-        if self.worker is not None:
-            if self._load_worker_model(model_path):
-                return
-            self.close()
-
-        self.close()
         self.model_path = model_path
         self.model = None
-        self.worker = None
         self.error = None
         self.loaded = False
         self.label = "Zmey-smart .h5"
         self.lookahead_counter = 0
         self._load_model()
 
-    def _load_worker_model(self, model_path: Path) -> bool:
-        if self.worker is None or self.worker.stdin is None or self.worker.stdout is None:
-            return False
-        with self.worker_lock:
-            try:
-                self.worker.stdin.write(json.dumps({"load_model": str(model_path)}) + "\n")
-                self.worker.stdin.flush()
-                line = self.worker.stdout.readline()
-            except Exception as exc:
-                self.error = f"{type(exc).__name__}: {exc}"
-                self.loaded = False
-                return False
-        payload = json.loads(line) if line else {"ok": False, "error": "worker did not respond"}
-        if not payload.get("ok"):
-            self.error = str(payload.get("error", "worker model load failed"))
-            self.loaded = False
-            return False
-        input_size = int(payload.get("input", 0))
-        output_size = int(payload.get("output", 0))
-        if input_size != SMART_STATE_SIZE or output_size != len(MODEL_ACTION_LABELS):
-            self.error = f"Ожидалась модель {SMART_STATE_SIZE}->3, получено {input_size}->{output_size}"
-            self.loaded = False
-            return False
-        self.model_path = model_path
-        self.model = None
-        self.loaded = True
-        self.error = None
-        self.label = f"Zmey-smart: {model_path.name}"
-        self.lookahead_counter = 0
-        return True
-
-    def _load_worker(self) -> None:
-        if self.model_path is None:
-            return
-        launchers = [
-            ["python", "-c", SMART_H5_WORKER_CODE, str(self.model_path)],
-            ["py", "-3.10", "-c", SMART_H5_WORKER_CODE, str(self.model_path)],
-            ["py", "-3", "-c", SMART_H5_WORKER_CODE, str(self.model_path)],
-        ]
-        errors: list[str] = []
-        for command in launchers:
-            try:
-                process = subprocess.Popen(
-                    command,
-                    cwd=str(self.static_root),
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                    bufsize=1,
-                )
-                if process.stdout is None:
-                    raise RuntimeError("worker stdout is unavailable")
-                line = process.stdout.readline()
-                payload = json.loads(line) if line else {"ok": False, "error": "worker did not respond"}
-                if not payload.get("ok"):
-                    raise RuntimeError(str(payload.get("error", "worker startup failed")))
-                input_size = int(payload.get("input", 0))
-                output_size = int(payload.get("output", 0))
-                if input_size != SMART_STATE_SIZE or output_size != len(MODEL_ACTION_LABELS):
-                    raise RuntimeError(f"Ожидалась модель {SMART_STATE_SIZE}->3, получено {input_size}->{output_size}")
-                self.worker = process
-                self.loaded = True
-                self.error = None
-                self.label = f"Zmey-smart: {self.model_path.name}"
-                return
-            except Exception as exc:
-                try:
-                    process.terminate()  # type: ignore[possibly-undefined]
-                except Exception:
-                    pass
-                launcher = " ".join(command[:2]) if command[1] != "-c" else command[0]
-                errors.append(f"{launcher}: {type(exc).__name__}: {exc}")
-        self.error = "TensorFlow недоступен в backend и worker не запустился: " + " | ".join(errors)
-
     def close(self) -> None:
-        if self.worker is None:
-            return
-        process = self.worker
-        self.worker = None
-        try:
-            process.terminate()
-            process.wait(timeout=1.0)
-        except Exception:
-            try:
-                process.kill()
-            except Exception:
-                pass
-
-    def _predict_with_worker(self, state: np.ndarray) -> np.ndarray:
-        if self.worker is None or self.worker.stdin is None or self.worker.stdout is None:
-            raise RuntimeError("Zmey-smart worker is not running")
-        request = json.dumps({"state": state.tolist()}, ensure_ascii=False, separators=(",", ":")) + "\n"
-        with self.worker_lock:
-            self.worker.stdin.write(request)
-            self.worker.stdin.flush()
-            line = self.worker.stdout.readline()
-        payload = json.loads(line) if line else {"ok": False, "error": "worker did not respond"}
-        if not payload.get("ok"):
-            raise RuntimeError(str(payload.get("error", "worker prediction failed")))
-        return np.asarray(payload.get("q", []), dtype=np.float32)
+        pass
 
     def _next_head_from(self, head: tuple[int, int], direction: int) -> tuple[int, int]:
         move_x, move_y = DIRECTIONS[direction]
@@ -275,11 +101,9 @@ class SmartH5Agent:
 
     def _will_collide_fast(self, board_size: int, point: tuple[int, int], body: set[tuple[int, int]]) -> bool:
         return (
-            point[0] < 0
-            or point[0] >= board_size
-            or point[1] < 0
-            or point[1] >= board_size
-            or point in body
+            point[0] < 0 or point[0] >= board_size or
+            point[1] < 0 or point[1] >= board_size or
+            point in body
         )
 
     def _free_distance_until_obstacle_fast(self, board_size: int, head: tuple[int, int], direction: int, body: set[tuple[int, int]]) -> int:
@@ -293,10 +117,10 @@ class SmartH5Agent:
                 return distance
             distance += 1
 
-    def _free_distance_until_obstacle(self, game: SnakeEnv, head: tuple[int, int], direction: int, body: set[tuple[int, int]]) -> int:
+    def _free_distance_until_obstacle(self, game: Any, head: tuple[int, int], direction: int, body: set[tuple[int, int]]) -> int:
         return self._free_distance_until_obstacle_fast(game.board_size, head, direction, body)
 
-    def _will_collide(self, game: SnakeEnv, point: tuple[int, int], body: set[tuple[int, int]]) -> bool:
+    def _will_collide(self, game: Any, point: tuple[int, int], body: set[tuple[int, int]]) -> bool:
         return self._will_collide_fast(game.board_size, point, body)
 
     def _quick_local_area_ratio_fast(self, board_size: int, head: tuple[int, int], blocked_cells: set[tuple[int, int]]) -> float:
@@ -308,10 +132,10 @@ class SmartH5Agent:
         )
         return clamp(sum(distances) / max(1.0, 4.0 * board_size), 0.0, 1.0)
 
-    def _quick_local_area_ratio(self, game: SnakeEnv, head: tuple[int, int], blocked_cells: set[tuple[int, int]]) -> float:
+    def _quick_local_area_ratio(self, game: Any, head: tuple[int, int], blocked_cells: set[tuple[int, int]]) -> float:
         return self._quick_local_area_ratio_fast(game.board_size, head, blocked_cells)
 
-    def _should_use_full_floodfill(self, game: SnakeEnv, periodic_tick: int, body: set[tuple[int, int]] | None = None) -> bool:
+    def _should_use_full_floodfill(self, game: Any, periodic_tick: int, body: set[tuple[int, int]] | None = None) -> bool:
         snake = game.snake
         head = snake[0]
         board_size = game.board_size
@@ -325,9 +149,9 @@ class SmartH5Agent:
         left_dir = (direction - 1) % 4
         right_dir = (direction + 1) % 4
         nearby_body_or_wall = (
-            self._will_collide_fast(board_size, self._next_head_from(head, direction), body)
-            or self._will_collide_fast(board_size, self._next_head_from(head, left_dir), body)
-            or self._will_collide_fast(board_size, self._next_head_from(head, right_dir), body)
+            self._will_collide_fast(board_size, self._next_head_from(head, direction), body) or
+            self._will_collide_fast(board_size, self._next_head_from(head, left_dir), body) or
+            self._will_collide_fast(board_size, self._next_head_from(head, right_dir), body)
         )
         if nearby_body_or_wall:
             return True
@@ -343,7 +167,7 @@ class SmartH5Agent:
 
     def _simulate_relative_action_features(
         self,
-        game: SnakeEnv,
+        game: Any,
         action: int,
         use_full: bool,
         *,
@@ -389,7 +213,7 @@ class SmartH5Agent:
             tail_reachable = 1.0 if area_ratio > 0.08 else 0.0
         return [0.0, food_reachable, tail_reachable, area_ratio]
 
-    def build_state(self, game: SnakeEnv) -> np.ndarray:
+    def build_state(self, game: Any) -> np.ndarray:
         snake = game.snake
         head = snake[0]
         body = set(snake[1:])
@@ -446,12 +270,8 @@ class SmartH5Agent:
         offset = 26
         for action in range(len(MODEL_ACTION_LABELS)):
             features = self._simulate_relative_action_features(
-                game,
-                action,
-                use_full_lookahead,
-                snake=snake,
-                body_without_tail=body_without_tail,
-                full_body=full_body,
+                game, action, use_full_lookahead,
+                snake=snake, body_without_tail=body_without_tail, full_body=full_body,
             )
             state[offset : offset + 4] = features
             offset += 4
@@ -459,19 +279,16 @@ class SmartH5Agent:
         state[39] = long_snake_flag
         return state
 
-    def select_action(self, game: SnakeEnv) -> tuple[int, np.ndarray, bool, int]:
-        if not self.loaded:
+    def select_action(self, game: Any) -> tuple[int, np.ndarray, bool, int]:
+        if not self.loaded or self.model is None:
             q_values = np.zeros(len(MODEL_ACTION_LABELS), dtype=np.float32)
             return 0, q_values, False, 0
         state = self.build_state(game)
         try:
-            if self.model is not None:
-                output = self.model(state.reshape(1, -1), training=False)
-                if hasattr(output, "numpy"):
-                    output = output.numpy()
-                q_values = np.asarray(output[0], dtype=np.float32)
-            else:
-                q_values = self._predict_with_worker(state)
+            output = self.model(state.reshape(1, -1), training=False)
+            if hasattr(output, "numpy"):
+                output = output.numpy()
+            q_values = np.asarray(output[0], dtype=np.float32)
         except Exception as exc:
             self.error = f"{type(exc).__name__}: {exc}"
             self.loaded = False
