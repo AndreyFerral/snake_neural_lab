@@ -711,12 +711,6 @@ class SnakeEnv:
                     reward -= min(0.35, loop_penalty)
                     penalty_reasons.append("looping")
 
-                # Логика маршрута (route/line/return) полностью удалена
-
-                if self._tail_path_lost_now():
-                    reward -= TAIL_PATH_LOST_PENALTY
-                    penalty_reasons.append("tail_path_lost")
-
                 # Голодание и тупики
                 starve_limit = max(60, int(self.board_size * self.board_size * 0.8))
                 if self.steps_without_food > starve_limit or self._has_compact_head_loop(next_head):
@@ -724,6 +718,11 @@ class SnakeEnv:
                     reward = -5.0
                     reason = "starvation"
                     penalty_reasons.append(reason)
+                             
+                # Проверка потери пути к хвосту — применяется и при поедании яблока тоже
+                if self._tail_path_lost_now():
+                    reward -= TAIL_PATH_LOST_PENALTY
+                    penalty_reasons.append("tail_path_lost")
 
             self.recent_heads.append(next_head)
 

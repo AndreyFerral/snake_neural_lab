@@ -1,9 +1,8 @@
 __pycache__/
 *.pyc
+*.pid
 
 # Logs and model files
 *.log
 *.pt
 *.json
-
-.gitignore
