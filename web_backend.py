@@ -695,7 +695,8 @@ class SnakeWebBackend:
             if self._flush_pending_save():
                 did_work = True
 
-            time.sleep(0.002 if did_work else 0.01)
+            # Уменьшаем задержку для более плавной отрисовки
+            time.sleep(0.001 if did_work else 0.005)
 
     def _record_training_completion(self, payload: dict[str, Any]) -> None:
         env = payload["env"]
@@ -1914,6 +1915,13 @@ class SnakeWebBackend:
         }
 
     def _frame_payload_unlocked(self) -> dict[str, Any]:
+        # Кэшируем tolist() один раз для q_values
+        q_values_list = self.last_q_values.tolist()
+        # Кэшируем snake как tuple для быстрого копирования
+        snake_tuple = tuple(self.game.snake)
+        food_tuple = self.game.food
+        trail_tuple = tuple(self.game.eaten_food_trail)
+        
         return {
             "device_kind": self.device_kind,
             "device_label": self.device_label,
@@ -1936,13 +1944,13 @@ class SnakeWebBackend:
                 "score": self.game.score,
                 "step_count": self.game.step_count,
                 "direction": self.game.direction,
-                "snake": [{"x": x, "y": y} for x, y in self.game.snake],
-                "food": {"x": self.game.food[0], "y": self.game.food[1]},
-                "eaten_food_trail": [{"x": x, "y": y} for x, y in self.game.eaten_food_trail],
+                "snake": [{"x": x, "y": y} for x, y in snake_tuple],
+                "food": {"x": food_tuple[0], "y": food_tuple[1]},
+                "eaten_food_trail": [{"x": x, "y": y} for x, y in trail_tuple],
             },
             "stats": self._stats_payload(),
-            "action_scores": self.last_q_values.tolist(),
-            "q_values": self.last_q_values.tolist(),
+            "action_scores": q_values_list,
+            "q_values": q_values_list,
         }
 
     def _update_frame_cache(self) -> None:
@@ -2040,7 +2048,7 @@ class SnakeWebBackend:
                     "loaded": self.smart_agent.loaded,
                     "path": str(self.smart_agent.model_path) if self.smart_agent.model_path else "",
                     "name": self.smart_agent.model_path.name if self.smart_agent.model_path else "",
-                    "error": self.smart_agent.error,
+                    "error": self.smart_agent.error or None,
                     "models": self._smart_models_payload(),
                 },
                 "output_labels": list(MODEL_ACTION_LABELS),
