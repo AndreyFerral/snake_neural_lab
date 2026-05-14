@@ -1,4 +1,9 @@
-```
 __pycache__/
 *.pyc
-```
+
+# Logs and model files
+*.log
+*.pt
+*.json
+
+.gitignore
