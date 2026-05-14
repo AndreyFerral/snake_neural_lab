@@ -17,7 +17,7 @@ from pathlib import Path
 import re
 import threading
 import time
-from typing import Any, Deque
+from typing import Any, Deque, Literal, TypedDict
 import numpy as np
 import torch
 from torch import nn

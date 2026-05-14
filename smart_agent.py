@@ -1,9 +1,12 @@
 ﻿from __future__ import annotations
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import numpy as np
 from backend_config import DIRECTIONS, MODEL_ACTION_LABELS
+
+if TYPE_CHECKING:
+    from snake_env import SnakeEnv
 
 SMART_MODEL_GLOBS = ("*.h5", "*.keras")
 SMART_STATE_SIZE = 40
@@ -117,10 +120,10 @@ class SmartH5Agent:
                 return distance
             distance += 1
 
-    def _free_distance_until_obstacle(self, game: Any, head: tuple[int, int], direction: int, body: set[tuple[int, int]]) -> int:
+    def _free_distance_until_obstacle(self, game: "SnakeEnv", head: tuple[int, int], direction: int, body: set[tuple[int, int]]) -> int:
         return self._free_distance_until_obstacle_fast(game.board_size, head, direction, body)
 
-    def _will_collide(self, game: Any, point: tuple[int, int], body: set[tuple[int, int]]) -> bool:
+    def _will_collide(self, game: "SnakeEnv", point: tuple[int, int], body: set[tuple[int, int]]) -> bool:
         return self._will_collide_fast(game.board_size, point, body)
 
     def _quick_local_area_ratio_fast(self, board_size: int, head: tuple[int, int], blocked_cells: set[tuple[int, int]]) -> float:
@@ -132,10 +135,10 @@ class SmartH5Agent:
         )
         return clamp(sum(distances) / max(1.0, 4.0 * board_size), 0.0, 1.0)
 
-    def _quick_local_area_ratio(self, game: Any, head: tuple[int, int], blocked_cells: set[tuple[int, int]]) -> float:
+    def _quick_local_area_ratio(self, game: "SnakeEnv", head: tuple[int, int], blocked_cells: set[tuple[int, int]]) -> float:
         return self._quick_local_area_ratio_fast(game.board_size, head, blocked_cells)
 
-    def _should_use_full_floodfill(self, game: Any, periodic_tick: int, body: set[tuple[int, int]] | None = None) -> bool:
+    def _should_use_full_floodfill(self, game: "SnakeEnv", periodic_tick: int, body: set[tuple[int, int]] | None = None) -> bool:
         snake = game.snake
         head = snake[0]
         board_size = game.board_size
@@ -167,7 +170,7 @@ class SmartH5Agent:
 
     def _simulate_relative_action_features(
         self,
-        game: Any,
+        game: "SnakeEnv",
         action: int,
         use_full: bool,
         *,
@@ -213,7 +216,7 @@ class SmartH5Agent:
             tail_reachable = 1.0 if area_ratio > 0.08 else 0.0
         return [0.0, food_reachable, tail_reachable, area_ratio]
 
-    def build_state(self, game: Any) -> np.ndarray:
+    def build_state(self, game: "SnakeEnv") -> np.ndarray:
         snake = game.snake
         head = snake[0]
         body = set(snake[1:])
@@ -279,7 +282,7 @@ class SmartH5Agent:
         state[39] = long_snake_flag
         return state
 
-    def select_action(self, game: Any) -> tuple[int, np.ndarray, bool, int]:
+    def select_action(self, game: "SnakeEnv") -> tuple[int, np.ndarray, bool, int]:
         if not self.loaded or self.model is None:
             q_values = np.zeros(len(MODEL_ACTION_LABELS), dtype=np.float32)
             return 0, q_values, False, 0
