@@ -141,8 +141,8 @@ class DQNAgent:
         batch_size: int = CPU_BATCH_SIZE,
         buffer_size: int = 20_000,
         epsilon_start: float = 1.0,
-        epsilon_min: float = 0.12,
-        epsilon_decay: float = 0.9999,
+        epsilon_min: float = 0.08,
+        epsilon_decay: float = 0.9997,
         target_sync_interval: int = 160,
     ) -> None:
         self.device = device
@@ -203,7 +203,7 @@ class DQNAgent:
         with torch.inference_mode():
             q_values = self.online_net(state_tensor).squeeze(0)
         greedy_action = int(torch.argmax(q_values).item())
-        length_exploration_factor = max(0.08, 1.0 - max(0, int(snake_length) - 4) * 0.08)
+        length_exploration_factor = max(0.15, 1.0 - max(0, int(snake_length) - 4) * 0.06)
         effective_epsilon = self.epsilon * length_exploration_factor
         was_random = bool(training and random.random() < effective_epsilon)
         action = random.randrange(len(MODEL_ACTION_LABELS)) if was_random else greedy_action

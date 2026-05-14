@@ -92,7 +92,7 @@ class EvolutionAgent:
             self._genome_slices.append((k, slice(idx, idx + numel), self._genome_shapes[k], self._genome_dtypes[k]))
             idx += numel
 
-        self.population = [EvolutionIndividual(self._fresh_genome(bias_straight=True)) for _ in range(self.population_size)]
+        self.population = [EvolutionIndividual(self._fresh_genome(bias_straight=False)) for _ in range(self.population_size)]
         self._load_current_genome()
 
     @property
@@ -301,7 +301,7 @@ class EvolutionAgent:
                 next_population.append(EvolutionIndividual(child_genome))
 
         while len(next_population) < self.population_size:
-            next_population.append(EvolutionIndividual(self._fresh_genome(bias_straight=(self.generation <= 2))))
+            next_population.append(EvolutionIndividual(self._fresh_genome(bias_straight=False)))
 
         self.population = next_population[: self.population_size]
         self.current_index = 0
