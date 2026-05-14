@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 import random
-from typing import Any, Deque
+from typing import Any, Deque, Literal, TypedDict
 import numpy as np
 
 from backend_config import (
@@ -13,6 +13,60 @@ from backend_config import (
     MODEL_ACTION_LABELS,
     TAIL_PATH_LOST_PENALTY,
 )
+
+# Типы для причин завершения игры
+GameEndReason = Literal[
+    "new_game",
+    "wall_collision",
+    "body_collision",
+    "apple",
+    "victory",
+    "starvation",
+    "restart_pending",
+    "shutdown_pending",
+]
+
+PenaltyReason = Literal[
+    "wall_collision",
+    "body_collision",
+    "avoidable_collision",
+    "looping",
+    "tail_path_lost",
+    "starvation",
+]
+
+
+class AppleOpportunitySafe(TypedDict):
+    adjacent: Literal[True]
+    action: int
+    action_label: str
+    safe: bool
+    verdict: Literal["blocked", "no_tail_after_apple", "not_enough_space", "safe"]
+    tail_reachable: float
+    enough_space: float
+    food_tail_safe: float
+
+
+class AppleOpportunityNone(TypedDict):
+    adjacent: Literal[False]
+    action: None
+    safe: Literal[False]
+    verdict: Literal["none"]
+
+
+AppleOpportunity = AppleOpportunitySafe | AppleOpportunityNone
+
+
+class StepInfo(TypedDict):
+    score: int
+    steps: int
+    reason: GameEndReason
+
+
+class StepFullInfo(StepInfo):
+    penalty_reasons: list[PenaltyReason]
+    direction: int
+    apple_opportunity: AppleOpportunity
 
 # Глобальные кэши для оптимизации
 _BOARD_NEIGHBOR_CACHE: dict[int, dict[tuple[int, int], tuple[tuple[int, int], ...]]] = {}
@@ -61,7 +115,7 @@ def absolute_to_relative(previous_direction: int, chosen_direction: int) -> int:
 class SnakeEnv:
     def __init__(self, board_size: int = STARTUP_BOARD_SIZE) -> None:
         self.board_size = board_size
-        self._path_cache: dict[tuple[Any, ...], Any] = {}
+        self._path_cache: dict[tuple[str, ...], Any] = {}
         self._path_cache_max_size = 10000
         self._obs_cache_step: int = -1
         self._obs_cache_vec: np.ndarray | None = None
@@ -142,7 +196,7 @@ class SnakeEnv:
         hits_body = self._would_hit_self(next_head, will_eat)
         return 1.0 if hits_wall or hits_body else 0.0
 
-    def adjacent_apple_opportunity(self) -> dict[str, Any]:
+    def adjacent_apple_opportunity(self) -> AppleOpportunity:
         for relative_action in range(len(MODEL_ACTION_LABELS)):
             absolute_direction = relative_to_absolute(self.direction, relative_action)
             next_head = self._next_head_for_direction(absolute_direction)
@@ -582,13 +636,13 @@ class SnakeEnv:
 
     def step(
         self, direction: int
-    ) -> tuple[np.ndarray, float, bool, dict[str, object]]:
+    ) -> tuple[np.ndarray, float, bool, StepFullInfo]:
         if self.done:
             return (
                 np.empty((0,), dtype=np.float32),
                 self.last_reward,
                 True,
-                {"score": self.score, "steps": self.step_count, "reason": self.last_reason},
+                {"score": self.score, "steps": self.step_count, "reason": self.last_reason},  # type: ignore[typeddict-item]
             )
 
         chosen_direction = self._normalize_direction(direction)
@@ -685,7 +739,7 @@ class SnakeEnv:
             {
                 "score": self.score,
                 "steps": self.step_count,
-                "reason": reason,
+                "reason": reason,  # type: ignore[typeddict-item]
                 "penalty_reasons": list(penalty_reasons),
                 "direction": chosen_direction,
                 "apple_opportunity": apple_opportunity,
