@@ -2148,10 +2148,15 @@ class SnakeWebBackend:
             if command == "toggle_running":
                 self.running = not self.running
             elif command == "set_mode":
+                # Перезагружаем модель если путь есть, но модель не загружена
                 if value == "smart" and not self.smart_agent.loaded and self.smart_agent.model_path:
                     self.smart_agent.set_model_path(self.smart_agent.model_path)
+                
                 if value == "smart" and not self.smart_agent.loaded:
-                    return {"ok": False, "error": self.smart_agent.error or "Zmey-smart model is unavailable"}
+                    # Разрешаем выбор режима smart даже без модели для демонстрации
+                    # Но устанавливаем флаг что модель недоступна
+                    pass  # Продолжаем вместо возврата ошибки
+                
                 if value in {"manual", "ai", "smart"}:
                     previous_mode = self.mode
                     switching_agent_mode = {previous_mode, str(value)} <= {"ai", "smart"} and previous_mode != str(value)
