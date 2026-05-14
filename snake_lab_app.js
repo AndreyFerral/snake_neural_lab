@@ -690,7 +690,9 @@ const actionIndex = Number.isInteger(selectedStep.action) ? selectedStep.action 
 const actionArrow = actionIndex === null ? "-" : this.arrowForAction(actionIndex); const greedyArrow = greedyIndex === null ? "-" : this.arrowForAction(greedyIndex);
 const choiceLine = actionIndex === null ? null : selectedStep.action_random ? `Выбор: случайный ${actionArrow}; сеть выбрала бы ${greedyArrow}` : `Выбранный ход сети: ${actionArrow}`;
 this.setText(this.deathChoiceMeta, choiceLine ?? ""); this.setHidden(this.deathChoiceMeta, !choiceLine);
-this.setText(this.deathSnapshotMeta, [`${stepLabel}`, `Итог: ${formatReason(selectedStep.outcome_reason ?? selectedStep.reason)}`, `Счет: ${selectedStep.score ?? 0} • Шагов: ${selectedStep.step_count ?? 0} • Длина: ${snake.length}`].filter(Boolean).join("\n"));
+const stepsWithoutFood = selectedStep.steps_without_food ?? 0;
+const hungerInfo = (typeof outcomeReason === "string" && outcomeReason.startsWith("starvation")) ? ` | ${stepsWithoutFood} шагов без еды` : "";
+this.setText(this.deathSnapshotMeta, [`${stepLabel}`, `Итог: ${formatReason(outcomeReason)}${hungerInfo}`, `Счет: ${selectedStep.score ?? 0} • Шагов: ${selectedStep.step_count ?? 0} • Длина: ${snake.length}`].filter(Boolean).join("\n"));
 }
 renderRewardRules() {
 if (!this.rewardRulesBody) return;
