@@ -1988,34 +1988,17 @@ class SnakeWebBackend:
                 self.lock.release()
 
     def _busy_state_snapshot(self) -> dict[str, Any]:
+        # Мгновенный возврат последнего кэша без пересборки payload и tolist()
+        base = self._last_frame_payload or self._frame_cache
+        if base is not None:
+            payload = dict(base)
+            payload["backend_busy"] = True
+            return payload
         return {
-            "frame_id": self.frame_id,
-            "backend_busy": True,
-            "running": self.running,
-            "training": self.training,
-            "mode": self.mode,
-            "speed": self.speed,
-            "persistence_enabled": self.persistence_enabled,
-            "agent_kind": self.agent_kind,
-            "network_source": self.network_source,
-            "game": {
-                "size": self.game.board_size,
-                "score": self.game.score,
-                "step_count": self.game.step_count,
-                "direction": self.game.direction,
-                "snake": [{"x": x, "y": y} for x, y in self.game.snake],
-                "food": {"x": self.game.food[0], "y": self.game.food[1]},
-                "eaten_food_trail": [{"x": x, "y": y} for x, y in self.game.eaten_food_trail],
-            },
+            "frame_id": self.frame_id, "backend_busy": True, "running": self.running,
+            "training": self.training, "mode": self.mode, "speed": self.speed,
+            "game": {"size": self.game.board_size, "score": self.game.score, "step_count": self.game.step_count},
             "stats": self._stats_payload(),
-            "action_scores": self.last_q_values.tolist(),
-            "q_values": self.last_q_values.tolist(),
-            "last_action": self.last_action,
-            "last_action_random": self.last_action_random,
-            "last_greedy_action": self.last_greedy_action,
-            "last_reason": self.last_reason,
-            "last_outcome_reason": self.last_outcome_reason,
-            "last_penalty_reasons": list(self.last_penalty_reasons),
         }
 
     def state_snapshot(self, *, include_network: bool = True, include_details: bool = True) -> dict[str, Any]:

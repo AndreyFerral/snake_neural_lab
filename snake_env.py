@@ -63,6 +63,8 @@ class SnakeEnv:
         self.board_size = board_size
         self._path_cache: dict[tuple[Any, ...], Any] = {}
         self._path_cache_max_size = 10000
+        self._obs_cache_step: int = -1
+        self._obs_cache_vec: np.ndarray | None = None
         self.reset()
 
     def _clear_path_cache(self) -> None:
@@ -258,20 +260,39 @@ class SnakeEnv:
         cached = self._path_cache.get(cache_key)
         if cached is not None:
             return int(cached)
-        if start in blocked:
+
+        size = self.board_size
+        start_idx = start[1] * size + start[0]
+        # Быстрая маска блокировок (list[bool] быстрее set[tuple] в цикле)
+        blocked_mask = [False] * (size * size)
+        for x, y in blocked:
+            blocked_mask[y * size + x] = True
+
+        if blocked_mask[start_idx]:
             return 0
 
-        visited: set[tuple[int, int]] = {start}
-        queue: Deque[tuple[int, int]] = deque([start])
-        while queue:
-            cell = queue.popleft()
-            for next_cell in self._neighbors_for(cell):
-                if next_cell not in visited and next_cell not in blocked:
-                    visited.add(next_cell)
-                    queue.append(next_cell)
-        result = len(visited)
-        self._path_cache[cache_key] = result
-        return result
+        visited = [False] * (size * size)
+        visited[start_idx] = True
+        queue = [start_idx]
+        head = 0
+        count = 1
+
+        while head < len(queue):
+            curr = queue[head]
+            head += 1
+            cx, cy = curr % size, curr // size
+            # Инлайн соседей без вызова _neighbors_for
+            for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < size and 0 <= ny < size:
+                    nidx = ny * size + nx
+                    if not visited[nidx] and not blocked_mask[nidx]:
+                        visited[nidx] = True
+                        queue.append(nidx)
+                        count += 1
+
+        self._path_cache[cache_key] = count
+        return count
 
     def _has_path(
         self,
@@ -286,17 +307,38 @@ class SnakeEnv:
         if start == goal:
             return True
 
-        visited: set[tuple[int, int]] = {start}
-        queue: Deque[tuple[int, int]] = deque([start])
-        while queue:
-            cell = queue.popleft()
-            for next_cell in self._neighbors_for(cell):
-                if next_cell == goal:
-                    self._path_cache[cache_key] = True
-                    return True
-                if next_cell not in visited and next_cell not in blocked:
-                    visited.add(next_cell)
-                    queue.append(next_cell)
+        size = self.board_size
+        start_idx = start[1] * size + start[0]
+        goal_idx = goal[1] * size + goal[0]
+
+        blocked_mask = [False] * (size * size)
+        for x, y in blocked:
+            blocked_mask[y * size + x] = True
+
+        if blocked_mask[start_idx] or blocked_mask[goal_idx]:
+            self._path_cache[cache_key] = False
+            return False
+
+        visited = [False] * (size * size)
+        visited[start_idx] = True
+        queue = [start_idx]
+        head = 0
+
+        while head < len(queue):
+            curr = queue[head]
+            head += 1
+            if curr == goal_idx:
+                self._path_cache[cache_key] = True
+                return True
+            cx, cy = curr % size, curr // size
+            for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < size and 0 <= ny < size:
+                    nidx = ny * size + nx
+                    if not visited[nidx] and not blocked_mask[nidx]:
+                        visited[nidx] = True
+                        queue.append(nidx)
+
         self._path_cache[cache_key] = False
         return False
 
@@ -560,6 +602,10 @@ class SnakeEnv:
         next_head = (head[0] + move[0], head[1] + move[1])
         will_eat = next_head == self.food
 
+        # В начале step(), до self.step_count += 1:
+        self._obs_cache_step = -1
+        self._obs_cache_vec = None
+
         reward, reason, penalty_reasons = -0.01, "step", []
         self.step_count += 1
         self.steps_without_food += 1
@@ -647,6 +693,11 @@ class SnakeEnv:
         )
 
     def get_extra_signals(self, target_size: int = STARTUP_BOARD_SIZE) -> np.ndarray:
+        # Кэш на текущий шаг: если фронтенд или логгер вызовут метод повторно,
+        # мы вернём готовый вектор без повторных BFS.
+        if self.step_count == self._obs_cache_step and self._obs_cache_vec is not None:
+            return self._obs_cache_vec
+
         head_x, head_y = self.snake[0]
         food_x, food_y = self.food
         dx, dy = food_x - head_x, food_y - head_y
@@ -674,7 +725,9 @@ class SnakeEnv:
             *self._lookahead_signals_for_relative_action(1)[1:],
             *self._lookahead_signals_for_relative_action(2)[1:],
         ]
-        return np.array(signals, dtype=np.float32)
+        self._obs_cache_step = self.step_count
+        self._obs_cache_vec = np.array(signals, dtype=np.float32)
+        return self._obs_cache_vec
 
     def get_observation_grid(self, target_size: int = STARTUP_BOARD_SIZE) -> np.ndarray:
         # Возвращаем ТОЛЬКО вектор сигналов. Карта и гибридные режимы удалены.

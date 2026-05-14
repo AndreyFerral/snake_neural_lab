@@ -36,8 +36,7 @@
         <div class="hero-badges">
           <span id="deviceBadge">CPU</span>
           <span id="boardSizeBadge">Карта 10x10</span>
-          <span id="inputGridBadge">Вход Без карты + 18 сигналов</span>
-          <span>Hybrid 96-48-3</span>
+          <span id="inputGridBadge">Вход: 9 сигналов</span>
           <span>Live-графики</span>
           <span id="networkSourceBadge">Нейросеть: Python backend</span>
         </div>
@@ -51,12 +50,11 @@
               <h2>Игровая среда</h2>
             </div>
             <div class="panel-actions compact">
-              <label>
+              <!-- Скрытый селект входа, чтобы не сломать JS, который ищет id="inputMode" -->
+              <label hidden>
                 Вход
               <select id="inputMode">
                 <option value="signals" selected>Сигналы</option>
-                <option value="map">Карта</option>
-                <option value="hybrid">Карта + сигналы</option>
               </select>
               </label>
               <label class="agent-mode-control">
@@ -192,11 +190,6 @@
             <article id="networkGraphCard" class="viz-card wide">
               <h3>Граф сети</h3>
               <canvas id="networkCanvas" width="1060" height="560"></canvas>
-            </article>
-
-            <article id="mapHeatmapCard" class="viz-card wide">
-              <h3>Тепловая карта</h3>
-              <canvas id="mapHeatmapCanvas" width="1060" height="240"></canvas>
             </article>
 
             <article class="viz-card">
