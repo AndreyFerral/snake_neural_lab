@@ -3,6 +3,4 @@ __pycache__/
 *.pid
 
 # Logs and model files
-*.log
-*.pt
-*.json
+.runtime/
