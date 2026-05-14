@@ -1,6 +1,0 @@
-__pycache__/
-*.pyc
-*.pid
-
-# Logs and model files
-.runtime/
