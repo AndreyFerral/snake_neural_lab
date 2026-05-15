@@ -139,6 +139,8 @@ class SnakeEnv:
 
     def reset(self) -> np.ndarray:
         self._clear_path_cache()
+        # Безопасно сохраняем значение ДО сброса (0 при первом запуске, реальное число при смерти)
+        self.last_steps_without_food = getattr(self, 'steps_without_food', 0)
         center = self.board_size // 2
         self.direction = 1
         self.score = 0
@@ -660,7 +662,13 @@ class SnakeEnv:
         self._obs_cache_step = -1
         self._obs_cache_vec = None
 
-        reward, reason, penalty_reasons = -0.01, "step", []
+        # Тихий штраф за поворот (не попадает в логи и penalty_reasons)
+        is_turn = chosen_direction != previous_direction
+        TURN_PENALTY = -0.1  # ← настройте под себя: -0.03 / -0.05 / -0.1
+        reward = TURN_PENALTY if is_turn else 0.0
+        reason = "turn"
+        penalty_reasons = []
+
         self.step_count += 1
         self.steps_without_food += 1
         self.max_steps_without_food = max(self.max_steps_without_food, self.steps_without_food)
@@ -793,6 +801,7 @@ class SnakeEnv:
             "score": self.score,
             "step_count": self.step_count,
             "steps_without_food": self.steps_without_food,
+            "last_steps_without_food": getattr(self, 'last_steps_without_food', 0),  # <-- ДОБАВИТЬ ЭТУ СТРОКУ
             "max_steps_without_food": self.max_steps_without_food,
             "done": self.done,
             "last_reward": self.last_reward,

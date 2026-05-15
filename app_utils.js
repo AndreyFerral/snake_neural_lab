@@ -38,6 +38,7 @@ function formatReason(reason) {
   const map = {
     new_game: "Новая игра",
     step: "Шаг",
+	turn: "Поворот",
     apple: "Яблоко",
     victory: "Победа",
     looping:  "Ходит по кругу",
@@ -76,6 +77,7 @@ function formatCompactReason(reason) {
   const map = {
     new_game:  "Старт",
     step:  "Шаг",
+	turn:  "Поворот",
     apple:  "Яблоко",
     victory:  "Победа",
     looping:  "Цикл",

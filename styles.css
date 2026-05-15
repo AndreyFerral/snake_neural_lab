@@ -107,14 +107,17 @@ button.danger { background: rgba(255, 107, 107, 0.13); border-color: rgba(255, 1
 .step-log-line { white-space: nowrap; }
 .step-log-line strong { color: var(--text); white-space: nowrap; }
 .step-sticker { display: inline-flex; align-items: center; justify-content: center; width: 1.25em; height: 1.25em; margin: 0 0.08em; border-radius: 999px; background: rgba(92, 214, 173, 0.14); font-family: "Segoe UI Emoji", "Apple Color Emoji", sans-serif; font-size: 0.95em; line-height: 1; vertical-align: -0.12em; }
-.step-log-line.is-penalty { color: #ffb347; }
-.step-log-line.is-penalty .step-log-apple-note, .step-log-line.is-penalty .step-sticker { color: inherit; }
-.step-log-line.is-penalty .step-sticker { background: rgba(255, 179, 71, 0.14); }
-.step-log-line.is-random { color: #7fd0ff; }
-.step-log-line.is-apple { color: #5cd6ad; font-weight: 700; }
-.step-log-line.is-tail-lost { color: #ff6b6b; font-weight: 700; }
-.step-log-line.is-tail-lost strong, .step-log-line.is-tail-lost .step-log-apple-note, .step-log-line.is-tail-lost .step-sticker { color: inherit; }
-.step-log-line.is-tail-lost .step-sticker { background: rgba(255, 107, 107, 0.16); }
+/* Базовый стиль строки лога */
+.step-log-line { color: var(--muted); }
+.step-log-line strong { color: var(--text); }
+/* Приоритетная цветовая маркировка */
+.step-log-line.log-red { color: #ff4d4d; font-weight: 600; }
+.step-log-line.log-green { color: #4caf50; font-weight: 600; }
+.step-log-line.log-yellow { color: #ffca28; }
+.step-log-line.log-blue { color: #42a5f5; }
+/* Наследование цвета для эмодзи и заметок внутри строки */
+.step-log-line .step-sticker, 
+.step-log-line .step-log-apple-note { color: inherit;  background: transparent; }
 .step-log-apple-note { color: #5cd6ad; font-weight: 700; }
 .step-effect-tail-lost { color: #ff5c5c; font-weight: 800; }
 .death-snapshot { padding: 14px 16px 16px; border-radius: 18px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); }
