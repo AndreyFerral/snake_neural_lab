@@ -1203,7 +1203,7 @@ class SnakeWebBackend:
                 {"label": "Победа", "value": "+10.0", "active": True},
             ],
             "penalties": [
-                {"label": "Шаг", "value": "-0.01", "active": True},
+                {"label": "Поворот", "value": "-0.1", "active": True},
                 {"label": "Смерть", "value": "-5.0", "active": True},
                 {"label": "Нет хвоста", "value": f"-{TAIL_PATH_LOST_PENALTY:.1f}", "active": True},
                 {"label": "Цикл", "value": "до -0.35", "active": True},
