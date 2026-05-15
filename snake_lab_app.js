@@ -2,13 +2,11 @@ class SnakeLabApp {
   constructor() {
     this.gameCanvas = document.getElementById("gameCanvas");
     this.networkCanvas = document.getElementById("networkCanvas");
-    this.mapHeatmapCanvas = document.getElementById("mapHeatmapCanvas");
     this.chartCanvas = document.getElementById("chartCanvas");
     this.deathSnapshotCanvas = document.getElementById("deathSnapshotCanvas");
 
     this.gameCtx = this.getCanvasContext(this.gameCanvas);
     this.networkCtx = this.getCanvasContext(this.networkCanvas);
-    this.mapHeatmapCtx = this.getCanvasContext(this.mapHeatmapCanvas);
     this.chartCtx = this.getCanvasContext(this.chartCanvas);
     this.deathSnapshotCtx = this.getCanvasContext(this.deathSnapshotCanvas);
 
@@ -28,7 +26,6 @@ class SnakeLabApp {
 
     this.networkPanel = document.getElementById("networkPanel");
     this.networkGraphCard = document.getElementById("networkGraphCard");
-    this.mapHeatmapCard = document.getElementById("mapHeatmapCard");
 
     this.deviceBadge = document.getElementById("deviceBadge");
     this.boardSizeBadge = document.getElementById("boardSizeBadge");
@@ -215,10 +212,6 @@ class SnakeLabApp {
 
   shouldShowNetworkGraph() {
     return this.inputMode() !== "map";
-  }
-
-  shouldShowMapHeatmap() {
-    return this.inputMode() !== "map" && this.currentInputGrid() > 0;
   }
 
   shouldUseNetworkVisuals() {
@@ -591,8 +584,6 @@ class SnakeLabApp {
     carryDeferredFields();
     if (previousState.network && !nextState.network) nextState.network = previousState.network;
     else if (nextState.network && previousState.network) {
-      const missingHeatmap = !Array.isArray(nextState.network.local_heatmap) || nextState.network.local_heatmap.length === 0;
-      if (missingHeatmap && Array.isArray(previousState.network.local_heatmap)) nextState.network.local_heatmap = previousState.network.local_heatmap;
       const nextConnections = nextState.network.connections ?? {};
       const previousConnections = previousState.network.connections ?? {};
       const shouldReuseConnections = NETWORK_CONNECTION_KEYS.every((key) => Array.isArray(nextConnections[key]) && nextConnections[key].length === 0) && NETWORK_CONNECTION_KEYS.some((key) => Array.isArray(previousConnections[key]) && previousConnections[key].length > 0);
@@ -736,7 +727,6 @@ class SnakeLabApp {
       if (shouldRenderNetworkVisuals && shouldRenderNetwork) {
         this.lastNetworkRenderAt = now;
         this.queueHeavyRender("networkGraph", () => { if (this.shouldUseNetworkVisuals() && this.shouldShowNetworkGraph()) this.renderNetworkGraph(); });
-        this.queueHeavyRender("mapHeatmap", () => { if (this.shouldUseNetworkVisuals() && this.shouldShowMapHeatmap()) this.renderMapHeatmap(); });
       }
       if (shouldRenderChart) {
         this.lastChartRenderAt = now;
@@ -758,7 +748,6 @@ class SnakeLabApp {
     const showVisuals = this.shouldUseNetworkVisuals();
     this.setHidden(this.networkPanel, false);
     this.setHidden(this.networkGraphCard, !showVisuals || !this.shouldShowNetworkGraph());
-    this.setHidden(this.mapHeatmapCard, !showVisuals || !this.shouldShowMapHeatmap());
   }
 
   syncControlsFromState() {
@@ -1242,57 +1231,6 @@ class SnakeLabApp {
     (connections.hidden2_output ?? []).forEach((connection) => { const from = hidden2Map.get(connection.from_index); const to = outputMap.get(connection.to_index); if (!from || !to) return; const alpha = clamp(connection.influence * 4.6, 0.18, 0.82); ctx.beginPath(); ctx.moveTo(from.x + 12, from.y); ctx.bezierCurveTo(from.x + 46, from.y, to.x - 46, to.y, to.x - 12, to.y); ctx.strokeStyle = connection.weight >= 0 ? `rgba(92, 214, 173, ${alpha})` : `rgba(255, 179, 71, ${alpha})`; ctx.lineWidth = clamp(Math.abs(connection.weight) * 3.2, 1.1, 3.6); ctx.stroke(); });
     this.drawIndexedLayer(ctx, hidden1Indices, hidden1Positions, hidden1, 10, "H1"); this.drawIndexedLayer(ctx, hidden2Indices, hidden2Positions, hidden2, 12, "H2"); this.drawOutputLayer(ctx, outputIndices, outputPositions, output, labels, "q");
     ctx.fillStyle = "#edf6f9"; ctx.font = "600 14px Aptos, Trebuchet MS, sans-serif"; ctx.fillText("Актуальные сигналы", inputX - 2, titleY); ctx.fillText("Активные нейроны H1", hidden1X - 44, titleY); ctx.fillText("Активные нейроны H2", hidden2X - 42, titleY); ctx.fillText("Решения", outputX - 18, titleY);
-  }
-
-  renderMapHeatmap() {
-    if (!this.mapHeatmapCtx || !this.mapHeatmapCanvas) return;
-    const ctx = this.mapHeatmapCtx;
-    const { width, height } = this.resizeCanvas(this.mapHeatmapCanvas, ctx);
-    const rawHeatmap = this.state?.network?.local_heatmap ?? [];
-    const inputGrid = this.currentInputGrid();
-    const expectedHeatmapLength = inputGrid * inputGrid;
-    let heatmap = []; if (Array.isArray(rawHeatmap)) { heatmap = rawHeatmap.length === expectedHeatmapLength || !Array.isArray(rawHeatmap[0]) ? rawHeatmap : rawHeatmap.flat(); }
-    ctx.clearRect(0, 0, width, height); const background = ctx.createLinearGradient(0, 0, width, height); background.addColorStop(0, "#08131d"); background.addColorStop(1, "#102333"); ctx.fillStyle = background; ctx.fillRect(0, 0, width, height);
-    if (!inputGrid || !Array.isArray(heatmap) || heatmap.length !== inputGrid * inputGrid) {
-      ctx.fillStyle = "#edf6f9"; ctx.textAlign = "center"; ctx.font = "600 18px Aptos, Trebuchet MS, sans-serif"; ctx.fillText("Тепловая карта появится вместе с локальной картой", width / 2, height / 2 - 8);
-      ctx.fillStyle = "rgba(180,199,207,0.82)"; ctx.font = "500 13px Aptos, Trebuchet MS, sans-serif"; ctx.fillText("Для режима без карты или при недоступном payload блок остается пустым.", width / 2, height / 2 + 18); ctx.textAlign = "start"; return;
-    }
-    const panelWidth = Math.max(210, Math.min(300, width * 0.34)); const boardSize = Math.min(height - 34, Math.max(120, width - panelWidth - 86)); const boardX = 22; const boardY = Math.round((height - boardSize) / 2); const cell = boardSize / inputGrid;
-    const numericHeatmap = new Array(heatmap.length); let maxValue = 1e-6; let heatmapTotal = 0; let hottestIndex = 0; let hottestValue = -Infinity;
-    for (let index = 0; index < heatmap.length; index += 1) { const value = Number(heatmap[index]) || 0; numericHeatmap[index] = value; heatmapTotal += value; if (value > maxValue) maxValue = value; if (value > hottestValue) { hottestValue = value; hottestIndex = index; } }
-    const averageValue = numericHeatmap.length ? heatmapTotal / numericHeatmap.length : 0; const head = this.state?.game?.snake?.[0] ?? null;
-    const infoX = boardX + boardSize + 34; const infoY = boardY + 6; const infoHeight = boardSize - 12;
-    const hottestLocalX = hottestIndex % inputGrid; const hottestLocalY = Math.floor(hottestIndex / inputGrid); const centerIndex = Math.floor(inputGrid / 2) * inputGrid + Math.floor(inputGrid / 2); const centerValue = numericHeatmap[centerIndex] ?? 0;
-    let localOrigin = null; let foodLocal = null; let headLocal = null;
-    ctx.fillStyle = "rgba(13, 30, 41, 0.96)"; ctx.fillRect(boardX, boardY, boardSize, boardSize); ctx.strokeStyle = "rgba(255,255,255,0.10)"; ctx.lineWidth = 1.2; ctx.strokeRect(boardX + 0.5, boardY + 0.5, boardSize - 1, boardSize - 1);
-    for (let y = 0; y < inputGrid; y += 1) { for (let x = 0; x < inputGrid; x += 1) { const index = y * inputGrid + x; const value = (Number(heatmap[index]) || 0) / maxValue; const alpha = 0.08 + value * 0.82; const hue = 196 - value * 164; ctx.fillStyle = `hsla(${hue}, 88%, ${44 + value * 16}%, ${alpha})`; ctx.fillRect(boardX + x * cell, boardY + y * cell, cell, cell); } }
-    ctx.strokeStyle = "rgba(255,255,255,0.06)"; ctx.lineWidth = 1;
-    for (let i = 1; i < inputGrid; i += 1) { const offset = Math.round(i * cell) + 0.5; ctx.beginPath(); ctx.moveTo(boardX + offset, boardY); ctx.lineTo(boardX + offset, boardY + boardSize); ctx.stroke(); ctx.beginPath(); ctx.moveTo(boardX, boardY + offset); ctx.lineTo(boardX + boardSize, boardY + offset); ctx.stroke(); }
-    if (head && this.state?.game?.size) {
-      const origin = this.getObservationWindowOrigin(head, this.state.game.size, inputGrid); localOrigin = origin; const food = this.state?.game?.food ?? null; const snake = this.state?.game?.snake ?? [];
-      headLocal = { x: head.x - origin.x, y: head.y - origin.y };
-      snake.forEach((segment, index) => { const localX = segment.x - origin.x; const localY = segment.y - origin.y; if (localX < 0 || localX >= inputGrid || localY < 0 || localY >= inputGrid) return; const x = boardX + localX * cell + cell * 0.16; const y = boardY + localY * cell + cell * 0.16; const sizePx = cell * 0.68; this.roundedRect(ctx, x, y, sizePx, sizePx, Math.max(4, cell * 0.22)); ctx.fillStyle = index === 0 ? "rgba(215,255,244,0.98)" : "rgba(92,214,173,0.88)"; ctx.fill(); });
-      if (food) { const foodLocalX = food.x - origin.x; const foodLocalY = food.y - origin.y; foodLocal = { x: foodLocalX, y: foodLocalY }; if (foodLocalX >= 0 && foodLocalX < inputGrid && foodLocalY >= 0 && foodLocalY < inputGrid) { const cx = boardX + foodLocalX * cell + cell / 2; const cy = boardY + foodLocalY * cell + cell / 2; ctx.beginPath(); ctx.fillStyle = "#ff6b6b"; ctx.arc(cx, cy, Math.max(4, cell * 0.18), 0, Math.PI * 2); ctx.fill(); } }
-    }
-    const focusBlockGap = 12; const sidebarInnerX = infoX + 16; const sidebarInnerY = infoY + 16; const sidebarInnerWidth = panelWidth - 32; const badgeWidth = 96; const metricsWidth = 148; const focusWidth = Math.max(142, sidebarInnerWidth - metricsWidth - badgeWidth - focusBlockGap * 2); const focusHeight = Math.min(132, infoHeight); const statsHeight = focusHeight; const statsX = infoX + focusWidth + focusBlockGap + 16; const statsY = infoY; const metricsX = statsX; const badgeX = metricsX + metricsWidth + focusBlockGap; const badgeY = infoY + 20; const badgeHeight = 74; const legendX = sidebarInnerX + 10; const legendY = infoY + 50; const legendHeight = Math.min(70, focusHeight - 50); const legendLabelX = legendX + 30; const legendGradient = ctx.createLinearGradient(0, legendY + legendHeight, 0, legendY); legendGradient.addColorStop(0, "hsla(196, 88%, 44%, 0.18)"); legendGradient.addColorStop(0.5, "hsla(96, 88%, 52%, 0.55)"); legendGradient.addColorStop(1, "hsla(32, 95%, 58%, 0.94)");
-    this.roundedRect(ctx, infoX, infoY, focusWidth + 16, focusHeight, 18); ctx.fillStyle = "rgba(8, 24, 34, 0.92)"; ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1.1; ctx.stroke();
-    this.roundedRect(ctx, metricsX, statsY, metricsWidth, statsHeight, 18); ctx.fillStyle = "rgba(8, 24, 34, 0.92)"; ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1.1; ctx.stroke();
-    this.roundedRect(ctx, badgeX, badgeY, badgeWidth, badgeHeight, 16); ctx.fillStyle = "rgba(8, 24, 34, 0.96)"; ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,0.10)"; ctx.lineWidth = 1; ctx.stroke();
-    ctx.fillStyle = legendGradient; ctx.fillRect(legendX, legendY, 16, legendHeight); ctx.strokeStyle = "rgba(255,255,255,0.12)"; ctx.strokeRect(legendX + 0.5, legendY + 0.5, 15, legendHeight - 1);
-    ctx.fillStyle = "#edf6f9"; ctx.font = "700 14px Aptos, Trebuchet MS, sans-serif"; ctx.fillText("CNN focus", sidebarInnerX, sidebarInnerY);
-    ctx.font = "500 12px Aptos, Trebuchet MS, sans-serif"; ctx.fillStyle = "#b4c7cf"; ctx.fillText("Высокое", legendLabelX, legendY + 12); ctx.fillText("Среднее", legendLabelX, legendY + legendHeight / 2 + 4); ctx.fillText("Низкое", legendLabelX, legendY + legendHeight - 4);
-    ctx.font = "600 12px Aptos, Trebuchet MS, sans-serif"; ctx.fillStyle = "#edf6f9";
-    const hottestWorldText = localOrigin ? `${localOrigin.x + hottestLocalX}:${localOrigin.y + hottestLocalY}` : "-";
-    const headAttention = headLocal && headLocal.x >= 0 && headLocal.x < inputGrid && headLocal.y >= 0 && headLocal.y < inputGrid ? numericHeatmap[headLocal.y * inputGrid + headLocal.x] ?? 0 : null;
-    const foodAttention = foodLocal && foodLocal.x >= 0 && foodLocal.x < inputGrid && foodLocal.y >= 0 && foodLocal.y < inputGrid ? numericHeatmap[foodLocal.y * inputGrid + foodLocal.x] ?? 0 : null;
-    const infoRows = [["Пик", hottestValue.toFixed(2)], ["Клетка", `${hottestLocalX}:${hottestLocalY}`], ["Мир", hottestWorldText], ["Голова", headAttention === null ? "-" : headAttention.toFixed(2)], ["Яблоко", foodAttention === null ? "-" : foodAttention.toFixed(2)], ["Центр", centerValue.toFixed(2)]];
-    const focusHint = hottestValue > averageValue * 2.4 ? "Фокус резкий" : hottestValue > averageValue * 1.6 ? "Фокус умеренный" : "Фокус рассеян";
-    const metricsInnerX = metricsX + 14; const metricsInnerY = statsY + 18; ctx.fillStyle = "#edf6f9"; ctx.font = "700 14px Aptos, Trebuchet MS, sans-serif"; ctx.fillText("Метрики", metricsInnerX, metricsInnerY);
-    const tableTop = metricsInnerY + 20; const labelX = metricsInnerX; const valueX = metricsX + metricsWidth - 14; const rowHeight = 15;
-    ctx.font = "600 11px Aptos, Trebuchet MS, sans-serif"; infoRows.forEach(([label, value], index) => { const rowY = tableTop + index * rowHeight; ctx.fillStyle = "#b4c7cf"; ctx.textAlign = "start"; ctx.fillText(`${label}:`, labelX, rowY); ctx.fillStyle = "#edf6f9"; ctx.textAlign = "right"; ctx.fillText(value, valueX, rowY); });
-    ctx.fillStyle = "#b4c7cf"; ctx.font = "600 11px Aptos, Trebuchet MS, sans-serif"; ctx.textAlign = "center"; ctx.fillText("Фокус", badgeX + badgeWidth / 2, badgeY + 22);
-    ctx.fillStyle = hottestValue > averageValue * 2.4 ? "rgba(255,179,71,0.95)" : hottestValue > averageValue * 1.6 ? "rgba(127,208,255,0.95)" : "rgba(92,214,173,0.95)";
-    ctx.font = "700 12px Aptos, Trebuchet MS, sans-serif"; drawCanvasLines(ctx, focusHint.replace("Фокус   ", "  ").split("   "), badgeX + badgeWidth / 2, badgeY + 44, 15); ctx.textAlign = "start";
   }
 
   createColumnPositions(centerX, centerY, count, spacing) { const positions = []; const startY = centerY - ((count - 1) * spacing) / 2; for (let index = 0; index < count; index += 1) positions.push({ x: centerX, y: startY + index * spacing }); return positions; }

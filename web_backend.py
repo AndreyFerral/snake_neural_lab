@@ -1740,8 +1740,6 @@ class SnakeWebBackend:
                 return cached
             
             payload = {
-                "local_input": [],
-                "local_heatmap": [],
                 "global_signals": {
                     "labels": global_signal_labels,
                     "values": self.last_state.tolist(),
@@ -1751,7 +1749,6 @@ class SnakeWebBackend:
                 "output": output_values.tolist(),
                 "value": [],
                 "connections": {
-                    "local_input_hidden1": [],
                     "global_hidden1": [],
                     "hidden1_hidden2": [],
                     "hidden2_output": [],
@@ -1821,8 +1818,6 @@ class SnakeWebBackend:
                 log_perf("network_payload_weight_error", 0.0, error=str(e))
 
             payload = {
-                "local_input": [],
-                "local_heatmap": [],
                 "global_signals": {
                     "labels": global_signal_labels,
                     "values": input_values.tolist(),
@@ -1832,7 +1827,6 @@ class SnakeWebBackend:
                 "output": output_values.tolist(),
                 "value": value_values.tolist(),
                 "connections": {
-                    "local_input_hidden1": input_hidden1_connections,
                     "global_hidden1": input_hidden1_connections,
                     "hidden1_hidden2": hidden1_hidden2_connections,
                     "hidden2_output": hidden2_output_connections,
@@ -1847,10 +1841,9 @@ class SnakeWebBackend:
         except Exception as e:
             log_perf("network_payload_error", 0.0, error=str(e))
             return {
-                "local_input": [], "local_heatmap": [],
                 "global_signals": {"labels": global_signal_labels, "values": []},
                 "hidden1": [], "hidden2": [], "output": [], "value": [],
-                "connections": {"local_input_hidden1": [], "global_hidden1": [], "hidden1_hidden2": [], "hidden2_output": [], "hidden2_value": []},
+                "connections": {"global_hidden1": [], "hidden1_hidden2": [], "hidden2_output": [], "hidden2_value": []},
             }
         finally:
             self.agent_lock.release()
