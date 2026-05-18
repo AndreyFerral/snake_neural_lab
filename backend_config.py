@@ -42,6 +42,8 @@ SAVE_THROTTLE_SECONDS = 8.0
 APPLE_REWARD = 4.0
 TRAP_AFTER_APPLE_PENALTY = 3.0
 TAIL_PATH_LOST_PENALTY = 7.0
+TURN_PENALTY = 0.1
+DEATH_PENALTY = 5.0
 DQN_TAIL_PATH_LOST_REPLAY_EXTRA_COPIES = 4
 ELITE_EPISODE_MAX_TRANSITIONS = 320
 EPISODE_TRANSITION_LIMIT = 2_000
@@ -79,6 +81,27 @@ PERF_LOG_MAX_BYTES = 512_000
 SLOW_API_MS = 35.0
 SLOW_STEP_MS = 35.0
 SLOW_NETWORK_MS = 35.0
+
+PENALTY_CATALOG = {
+    "turn": {"label": "Поворот", "short_label": "Поворот", "value": -TURN_PENALTY},
+    "wall_collision": {"label": "Смерть: стена", "short_label": "Стена", "value": -DEATH_PENALTY},
+    "body_collision": {"label": "Смерть: тело", "short_label": "Тело", "value": -DEATH_PENALTY},
+    "starvation": {"label": "Голодание", "short_label": "Голод", "value": -DEATH_PENALTY},
+    "tail_path_lost": {"label": "Нет пути к хвосту", "short_label": "Потеря хвоста", "value": -TAIL_PATH_LOST_PENALTY},
+    "looping": {"label": "Цикл", "short_label": "Цикл", "value": "до -0.35"},
+    "avoidable_collision": {
+        "label": "Избежимое столкновение",
+        "short_label": "Избежимое столкновение",
+        "value": "метка",
+        "show_in_ui": False,
+    },
+    "trap_after_apple": {"label": "Тупик после 🍎", "short_label": "Тупик после 🍎", "value": -TRAP_AFTER_APPLE_PENALTY},
+}
+
+REWARD_CATALOG = {
+    "apple": {"label": "Яблоко", "short_label": "Яблоко", "value": APPLE_REWARD},
+    "victory": {"label": "Победа", "short_label": "Победа", "value": 10.0},
+}
 
 def hunger_budget_for(score: int, board_size: int) -> float:
     board_cells = max(1, board_size * board_size)
