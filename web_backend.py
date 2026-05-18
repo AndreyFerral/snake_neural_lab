@@ -2244,7 +2244,10 @@ class SnakeWebBackend:
                         self.running = False
                         self.game = SnakeEnv(board_size=self.game.board_size)
                         if not self._load_active_aux_stats():
-                            self._reset_aux_stats()
+                            # У smart-режима может не быть собственного сохранённого слота статистики.
+                            # В этом случае не обнуляем глобальную историю/счётчики, а очищаем
+                            # только runtime-обзор, чтобы не затирать последние значения в store.
+                            self._clear_runtime_review_state()
                         self.fitness_ema = 0.0
                     elif value == "ai":
                         self.game = SnakeEnv(board_size=self.game.board_size)
