@@ -237,6 +237,10 @@ def save_aux_stats_store(store: dict[str, Any]) -> None:
                 time.sleep(0.05)
 
 
+def clear_aux_stats_store() -> None:
+    save_aux_stats_store({"schema_version": 1, "models": {}})
+
+
 def resolve_device(mode: str) -> tuple[torch.device, str, str]:
     return torch.device("cpu"), "CPU", "CPU"
 
@@ -642,7 +646,7 @@ class SnakeWebBackend:
         self.running = False
         self.game = SnakeEnv(board_size=self.game.board_size)
         if not self._load_active_aux_stats():
-            self._reset_aux_stats()
+            self._clear_runtime_review_state()
         self._reset_environment_state()
         self.last_state = self._current_observation()
         _, self.last_q_values, _, self.last_greedy_action = self._select_current_action(self.last_state, False)
@@ -1553,6 +1557,9 @@ class SnakeWebBackend:
         self._last_save_at = time.perf_counter()
         self._next_save_at = 0.0
 
+    def _clear_aux_stats_json(self) -> None:
+        clear_aux_stats_store()
+
     def _capture_save_payloads(self) -> tuple[Path, dict[str, object], str, dict[str, object]] | None:
         if not self.persistence_enabled:
             return None
@@ -1586,6 +1593,11 @@ class SnakeWebBackend:
                 checkpoint_path.stem,
                 self._active_aux_stats_key(),
             }
+            # Сохраняем слоты статистики для ОБОИХ нативных режимов (evolution + dqn),
+            # чтобы при переключении режима не удалялись данные другого агента.
+            for native_kind in AGENT_KINDS:
+                keep_keys.add(checkpoint_path_for_agent(native_kind).stem)
+                keep_keys.add(model_stats_key(native_kind))
             prune_model_stats_store(models, keep_keys=keep_keys, smart_limit=3)
         save_aux_stats_store(store)
 
@@ -1712,7 +1724,7 @@ class SnakeWebBackend:
                 current_board_size = self.game.board_size
                 self.game = SnakeEnv(board_size=current_board_size)
                 if not self._load_active_aux_stats():
-                    self._reset_aux_stats()
+                    self._clear_runtime_review_state()
                 self.fitness_ema = 0.0
                 self.current_episode_transitions.clear()
                 self._reset_environment_state()
@@ -2244,7 +2256,10 @@ class SnakeWebBackend:
                         self.running = False
                         self.game = SnakeEnv(board_size=self.game.board_size)
                         if not self._load_active_aux_stats():
-                            self._reset_aux_stats()
+                            # У smart-режима может не быть собственного сохранённого слота статистики.
+                            # В этом случае не обнуляем глобальную историю/счётчики, а очищаем
+                            # только runtime-обзор, чтобы не затирать последние значения в store.
+                            self._clear_runtime_review_state()
                         self.fitness_ema = 0.0
                     elif value == "ai":
                         self.game = SnakeEnv(board_size=self.game.board_size)
@@ -2294,7 +2309,17 @@ class SnakeWebBackend:
                     return {"ok": False, "error": message}
             elif command == "reset_agent":
                 if self.mode == "smart":
-                    return {"ok": False, "error": "Reset is unavailable for Zmey-smart"}
+                    self._clear_aux_stats_json()
+                    self._clear_runtime_review_state()
+                    self.fitness_ema = 0.0
+                    self.best_score = 0
+                    self.board_best_scores = {int(self.game.board_size): 0}
+                    self.episode_counter = 0
+                    self.history.clear()
+                    self.training = False
+                    self.running = False
+                    self._save_active_context()
+                    return {"ok": True}
                 board_size = self.game.board_size
                 self._delete_active_model_storage()
                 self.game = SnakeEnv(board_size=board_size)
