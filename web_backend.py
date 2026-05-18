@@ -642,7 +642,7 @@ class SnakeWebBackend:
         self.running = False
         self.game = SnakeEnv(board_size=self.game.board_size)
         if not self._load_active_aux_stats():
-            self._reset_aux_stats()
+            self._clear_runtime_review_state()
         self._reset_environment_state()
         self.last_state = self._current_observation()
         _, self.last_q_values, _, self.last_greedy_action = self._select_current_action(self.last_state, False)
@@ -1586,6 +1586,11 @@ class SnakeWebBackend:
                 checkpoint_path.stem,
                 self._active_aux_stats_key(),
             }
+            # Сохраняем слоты статистики для ОБОИХ нативных режимов (evolution + dqn),
+            # чтобы при переключении режима не удалялись данные другого агента.
+            for native_kind in AGENT_KINDS:
+                keep_keys.add(checkpoint_path_for_agent(native_kind).stem)
+                keep_keys.add(model_stats_key(native_kind))
             prune_model_stats_store(models, keep_keys=keep_keys, smart_limit=3)
         save_aux_stats_store(store)
 
@@ -1712,7 +1717,7 @@ class SnakeWebBackend:
                 current_board_size = self.game.board_size
                 self.game = SnakeEnv(board_size=current_board_size)
                 if not self._load_active_aux_stats():
-                    self._reset_aux_stats()
+                    self._clear_runtime_review_state()
                 self.fitness_ema = 0.0
                 self.current_episode_transitions.clear()
                 self._reset_environment_state()
