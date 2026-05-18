@@ -49,7 +49,10 @@ ELITE_EPISODE_MAX_TRANSITIONS = 320
 EPISODE_TRANSITION_LIMIT = 2_000
 DQN_DEATH_REPLAY_EXTRA_COPIES = 3
 DQN_PRE_DEATH_CONTEXT_REPLAYS = 3
+DQN_STARVATION_PRIORITY_SCALE = 0.35
+DQN_STARVATION_EXTRA_REPLAY_COPIES = 0
 ENDGAME_FILL_RATIO = 0.70
+EVOLUTION_STARVATION_FITNESS_FLOOR = -25_000.0
 
 CPU_BATCH_SIZE = 128
 HIDDEN_LAYER_1 = 96
@@ -84,27 +87,6 @@ SLOW_NETWORK_MS = 35.0
 NETWORK_INPUT_ADAPTER_MODE = "strict"  # strict | trim | pad
 NETWORK_INPUT_WARN_ON_ADAPT = True
 NETWORK_INPUT_PAD_VALUE = 0.0
-
-PENALTY_CATALOG = {
-    "turn": {"label": "Поворот", "short_label": "Поворот", "value": -TURN_PENALTY},
-    "wall_collision": {"label": "Смерть: стена", "short_label": "Стена", "value": -DEATH_PENALTY},
-    "body_collision": {"label": "Смерть: тело", "short_label": "Тело", "value": -DEATH_PENALTY},
-    "starvation": {"label": "Голодание", "short_label": "Голод", "value": -DEATH_PENALTY},
-    "tail_path_lost": {"label": "Нет пути к хвосту", "short_label": "Потеря хвоста", "value": -TAIL_PATH_LOST_PENALTY},
-    "looping": {"label": "Цикл", "short_label": "Цикл", "value": "до -0.35"},
-    "avoidable_collision": {
-        "label": "Избежимое столкновение",
-        "short_label": "Избежимое столкновение",
-        "value": "метка",
-        "show_in_ui": False,
-    },
-    "trap_after_apple": {"label": "Тупик после 🍎", "short_label": "Тупик после 🍎", "value": -TRAP_AFTER_APPLE_PENALTY},
-}
-
-REWARD_CATALOG = {
-    "apple": {"label": "Яблоко", "short_label": "Яблоко", "value": APPLE_REWARD},
-    "victory": {"label": "Победа", "short_label": "Победа", "value": 10.0},
-}
 
 PENALTY_CATALOG = {
     "turn": {"label": "Поворот", "short_label": "Поворот", "value": -TURN_PENALTY},

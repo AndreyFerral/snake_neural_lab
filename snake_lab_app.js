@@ -1129,7 +1129,9 @@ class SnakeLabApp {
 		const logText = headerParts.join(" ") + (extraParts.length ? " • " + extraParts.join(" • ") : "");
 
 		// 5. ПРИОРИТЕТ ЦВЕТОВ (строгий порядок: красный > зелёный > синий > жёлтый)
-		const hasTailLost = penalties.includes("route_dead_end") || penalties.includes("tail_path_lost") || apple?.verdict === "no_tail_after_apple";
+			// Красим в красный только когда штраф реально применён на этом же шаге.
+			// Вердикт apple_opportunity может быть диагностическим и не означать штраф текущего шага.
+			const hasTailLost = penalties.includes("route_dead_end") || penalties.includes("tail_path_lost");
 		const isCollision = penalties.includes("wall_collision") || penalties.includes("body_collision");
 		const tookApple = entry.reason === "apple";
 

@@ -34,6 +34,8 @@ from backend_config import (
     DIRECTIONS,
     DQN_DEATH_REPLAY_EXTRA_COPIES,
     DQN_PRE_DEATH_CONTEXT_REPLAYS,
+    DQN_STARVATION_EXTRA_REPLAY_COPIES,
+    DQN_STARVATION_PRIORITY_SCALE,
     ELITE_EPISODE_MAX_TRANSITIONS,
     EPISODE_TRANSITION_LIMIT,
     GLOBAL_SIGNAL_LABELS,
@@ -1133,7 +1135,7 @@ class SnakeWebBackend:
         if done and reason in {"wall_collision", "body_collision"}:
             return 4.0 if reason == "wall_collision" else 5.0
         if done and reason.startswith("starvation"):
-            return 3.0
+            return DQN_STARVATION_PRIORITY_SCALE
         if "trap_after_apple" in penalty_reasons:
             return 2.5
         return 1.0
@@ -1141,6 +1143,8 @@ class SnakeWebBackend:
     def _dqn_extra_replay_count(self, *, done: bool, reason: str, penalty_reasons: list[str]) -> int:
         if self.agent_kind != "dqn":
             return 0
+        if done and reason.startswith("starvation"):
+            return DQN_STARVATION_EXTRA_REPLAY_COPIES
         if done and reason in DEATH_REASON_ORDER and reason != "victory":
             return DQN_DEATH_REPLAY_EXTRA_COPIES
         return 0
