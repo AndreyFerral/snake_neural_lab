@@ -1415,7 +1415,20 @@ class SnakeWebBackend:
             "bs": self.best_score,
             "bbs": {str(k): v for k, v in self.board_best_scores.items()},
             "fit": self.fitness_ema,
-            "hist": [{"e": i.episode, "s": i.score, "st": i.steps, "r": i.reason, "f": i.fitness} for i in self.history],
+            "hist": [
+                {
+                    "e": i.episode,
+                    "s": i.score,
+                    "st": i.steps,
+                    "r": i.reason,
+                    "f": i.fitness,
+                    "rw": i.reward,
+                    "m": i.mutation,
+                    "l": i.loss,
+                    "b": i.best_score,
+                }
+                for i in self.history
+            ],
             "ds": {
                 "c": {"a": self.decision_stats["choices"]["all"], "r": list(self.decision_stats["choices"]["recent"])},
                 "s": {"a": self.decision_stats["steps"]["all"], "r": list(self.decision_stats["steps"]["recent"])},
@@ -1458,12 +1471,27 @@ class SnakeWebBackend:
         for item in payload.get("hist", []):
             if isinstance(item, dict):
                 try:
+                    episode = int(item.get("e", item.get("episode", 0)))
+                    score = int(item.get("s", item.get("score", 0)))
+                    steps = int(item.get("st", item.get("steps", 0)))
+                    reason = str(item.get("r", item.get("reason", "new_game")))
+                    fitness = float(item.get("f", item.get("fitness", 0.0)))
+                    reward = float(item.get("rw", item.get("reward", 0.0)))
+                    mutation = float(item.get("m", item.get("mutation", 0.0)))
+                    loss = float(item.get("l", item.get("loss", 0.0)))
+                    best_score = int(item.get("b", item.get("best_score", self.best_score)))
                     self.history.append(EpisodeStats(
-                        episode=item["e"], score=item["s"], reward=0.0, mutation=0.0,
-                        fitness=item["f"], steps=item["st"], best_score=self.best_score,
-                        reason=item["r"], loss=0.0
+                        episode=episode,
+                        score=score,
+                        reward=reward,
+                        mutation=mutation,
+                        fitness=fitness,
+                        steps=steps,
+                        best_score=best_score,
+                        reason=reason,
+                        loss=loss,
                     ))
-                except (KeyError, TypeError):
+                except (KeyError, TypeError, ValueError):
                     continue
 
         ds = payload.get("ds", {})
