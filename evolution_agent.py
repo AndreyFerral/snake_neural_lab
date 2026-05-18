@@ -19,6 +19,10 @@ except ImportError:
 from backend_config import (
     MODEL_ACTION_LABELS,
     GLOBAL_SIGNAL_LABELS,
+    EVOLUTION_STARVATION_FITNESS_FLOOR,
+    EVOLUTION_STARVATION_DEATH_MULTIPLIER,
+    EVOLUTION_STARVATION_EFFICIENCY_MULTIPLIER,
+    EVOLUTION_STARVATION_HUNGER_MULTIPLIER,
     hunger_budget_for,
 )
 from networks import PolicyNetwork
@@ -241,20 +245,40 @@ class EvolutionAgent:
         avoidable_collision_penalty = float(max(0, avoidable_collision_count)) * 900.0
         if reason.startswith("starvation") and score > 0:
             death_penalty *= 1.0 if reason in {"starvation_safe_loop", "starvation_food_available"} else max(0.68, 1.0 - min(score, 7) * 0.045)
+        if reason.startswith("starvation") or reason == EVOLUTION_HUNGER_CULL_REASON:
+            death_penalty *= EVOLUTION_STARVATION_DEATH_MULTIPLIER
         efficiency_budget = max(35.0, board_size * 3.0 + float(score) * board_size * 2.5)
         inefficient_steps = max(0.0, float(steps) - efficiency_budget)
         efficiency_penalty = inefficient_steps * (0.9 if reason in {"starvation_safe_loop", "starvation_food_available"} else (0.55 if reason.startswith("starvation") else 0.24))
+        if reason.startswith("starvation") or reason == EVOLUTION_HUNGER_CULL_REASON:
+            efficiency_penalty *= EVOLUTION_STARVATION_EFFICIENCY_MULTIPLIER
         if score == 0:
             efficiency_penalty *= 1.45
         hunger_budget = hunger_budget_for(score, board_size)
         hunger_overage = max(0.0, float(max_steps_without_food) - hunger_budget)
         hunger_penalty = hunger_overage * hunger_overage * 4.0
+        if reason.startswith("starvation") or reason == EVOLUTION_HUNGER_CULL_REASON:
+            hunger_penalty *= EVOLUTION_STARVATION_HUNGER_MULTIPLIER
         if score <= max(3, int(board_cells * 0.12)):
             hunger_penalty *= 3.0
         elif score >= int(board_cells * 0.70):
             hunger_penalty *= 0.85
         victory_bonus = 15000.0 if reason == "victory" else 0.0
-        return apple_value + survival_value + reward_value + victory_bonus - death_penalty - efficiency_penalty - hunger_penalty - trap_after_apple_penalty - avoidable_collision_penalty
+        fitness = (
+            apple_value
+            + survival_value
+            + reward_value
+            + victory_bonus
+            - death_penalty
+            - efficiency_penalty
+            - hunger_penalty
+            - trap_after_apple_penalty
+            - avoidable_collision_penalty
+        )
+        # Не закрепляем поведение "умереть от голода": голодные эпизоды принудительно опускаем.
+        if reason.startswith("starvation") or reason == EVOLUTION_HUNGER_CULL_REASON:
+            fitness = min(fitness, EVOLUTION_STARVATION_FITNESS_FLOOR)
+        return fitness
 
     def evolve_generation(self) -> None:
         evaluated = [ind for ind in self.population if ind.fitness is not None]

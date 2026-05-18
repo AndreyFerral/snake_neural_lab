@@ -27,7 +27,6 @@ torch.set_num_interop_threads(1)
 # Импорты только тех констант, которые реально используются
 from backend_config import (
     AGENT_KINDS,
-    APPLE_REWARD,
     AVERAGE_SCORE_WINDOW_RATIO,
     BOARD_SIZES,
     DEATH_REASON_ORDER,
@@ -35,6 +34,8 @@ from backend_config import (
     DIRECTIONS,
     DQN_DEATH_REPLAY_EXTRA_COPIES,
     DQN_PRE_DEATH_CONTEXT_REPLAYS,
+    DQN_STARVATION_EXTRA_REPLAY_COPIES,
+    DQN_STARVATION_PRIORITY_SCALE,
     ELITE_EPISODE_MAX_TRANSITIONS,
     EPISODE_TRANSITION_LIMIT,
     GLOBAL_SIGNAL_LABELS,
@@ -42,6 +43,7 @@ from backend_config import (
     HIDDEN_LAYER_2,
     HISTORY_LIMIT,
     MODEL_ACTION_LABELS,
+    NETWORK_INPUT_ADAPTER_MODE,
     PERF_LOG_MAX_BYTES,
     SAVE_THROTTLE_SECONDS,
     SLOW_API_MS,
@@ -49,8 +51,8 @@ from backend_config import (
     SLOW_STEP_MS,
     STARTUP_BOARD_SIZE,
     STEP_REASON_ORDER,
-    TAIL_PATH_LOST_PENALTY,
-    TRAP_AFTER_APPLE_PENALTY,
+    PENALTY_CATALOG,
+    REWARD_CATALOG,
     hunger_budget_for,
 )
 
@@ -898,12 +900,16 @@ class SnakeWebBackend:
             "reason": self.last_reason,
             "penalties": list(self.last_penalty_reasons),
             "random": bool(was_random),
+            "steps_without_food": int(self.game.steps_without_food),
+            "max_steps_without_food": int(self.game.max_steps_without_food),
             "apple_opportunity": info.get("apple_opportunity"),
         })
         self._record_decision_stat("choices", MODEL_ACTION_LABELS[visible_action])
         self._record_decision_stat("steps", self.last_reason)
         pre_step_snapshot["outcome_reason"] = self.last_reason
         pre_step_snapshot["penalty_reasons"] = list(self.last_penalty_reasons)
+        pre_step_snapshot["steps_without_food"] = int(self.game.steps_without_food)
+        pre_step_snapshot["max_steps_without_food"] = int(self.game.max_steps_without_food)
         self.recent_step_snapshots.append(pre_step_snapshot)
 
         if training_mode and self.agent_kind == "dqn":
@@ -1133,7 +1139,7 @@ class SnakeWebBackend:
         if done and reason in {"wall_collision", "body_collision"}:
             return 4.0 if reason == "wall_collision" else 5.0
         if done and reason.startswith("starvation"):
-            return 3.0
+            return DQN_STARVATION_PRIORITY_SCALE
         if "trap_after_apple" in penalty_reasons:
             return 2.5
         return 1.0
@@ -1141,6 +1147,8 @@ class SnakeWebBackend:
     def _dqn_extra_replay_count(self, *, done: bool, reason: str, penalty_reasons: list[str]) -> int:
         if self.agent_kind != "dqn":
             return 0
+        if done and reason.startswith("starvation"):
+            return DQN_STARVATION_EXTRA_REPLAY_COPIES
         if done and reason in DEATH_REASON_ORDER and reason != "victory":
             return DQN_DEATH_REPLAY_EXTRA_COPIES
         return 0
@@ -1196,19 +1204,34 @@ class SnakeWebBackend:
         return 0.0
 
     def _reward_rules_payload(self) -> dict[str, Any]:
-        # Маршруты/линии/возврат удалены
+        # Динамический каталог из backend_config.py
+        bonuses: list[dict[str, Any]] = []
+        for reward_id, item in REWARD_CATALOG.items():
+            value = item.get("value")
+            value_text = f"+{value:.1f}" if isinstance(value, (int, float)) else str(value)
+            bonuses.append({
+                "id": reward_id,
+                "label": item.get("label", reward_id),
+                "short_label": item.get("short_label", reward_id),
+                "value": value_text,
+                "active": True,
+            })
+        penalties: list[dict[str, Any]] = []
+        for penalty_id, item in PENALTY_CATALOG.items():
+            if item.get("show_in_ui", True) is False:
+                continue
+            value = item.get("value")
+            value_text = f"{value:.1f}" if isinstance(value, (int, float)) else str(value)
+            penalties.append({
+                "id": penalty_id,
+                "label": item.get("label", penalty_id),
+                "short_label": item.get("short_label", penalty_id),
+                "value": value_text,
+                "active": True,
+            })
         return {
-            "bonuses": [
-                {"label": "Яблоко", "value": f"+{APPLE_REWARD:.1f}", "active": True},
-                {"label": "Победа", "value": "+10.0", "active": True},
-            ],
-            "penalties": [
-                {"label": "Поворот", "value": "-0.1", "active": True},
-                {"label": "Смерть", "value": "-5.0", "active": True},
-                {"label": "Нет хвоста", "value": f"-{TAIL_PATH_LOST_PENALTY:.1f}", "active": True},
-                {"label": "Цикл", "value": "до -0.35", "active": True},
-                {"label": "Тупик после 🍎", "value": f"-{TRAP_AFTER_APPLE_PENALTY:.1f}", "active": True},
-            ],
+            "bonuses": bonuses,
+            "penalties": penalties,
             "note": " ",
         }
 
@@ -1392,7 +1415,20 @@ class SnakeWebBackend:
             "bs": self.best_score,
             "bbs": {str(k): v for k, v in self.board_best_scores.items()},
             "fit": self.fitness_ema,
-            "hist": [{"e": i.episode, "s": i.score, "st": i.steps, "r": i.reason, "f": i.fitness} for i in self.history],
+            "hist": [
+                {
+                    "e": i.episode,
+                    "s": i.score,
+                    "st": i.steps,
+                    "r": i.reason,
+                    "f": i.fitness,
+                    "rw": i.reward,
+                    "m": i.mutation,
+                    "l": i.loss,
+                    "b": i.best_score,
+                }
+                for i in self.history
+            ],
             "ds": {
                 "c": {"a": self.decision_stats["choices"]["all"], "r": list(self.decision_stats["choices"]["recent"])},
                 "s": {"a": self.decision_stats["steps"]["all"], "r": list(self.decision_stats["steps"]["recent"])},
@@ -1435,12 +1471,27 @@ class SnakeWebBackend:
         for item in payload.get("hist", []):
             if isinstance(item, dict):
                 try:
+                    episode = int(item.get("e", item.get("episode", 0)))
+                    score = int(item.get("s", item.get("score", 0)))
+                    steps = int(item.get("st", item.get("steps", 0)))
+                    reason = str(item.get("r", item.get("reason", "new_game")))
+                    fitness = float(item.get("f", item.get("fitness", 0.0)))
+                    reward = float(item.get("rw", item.get("reward", 0.0)))
+                    mutation = float(item.get("m", item.get("mutation", 0.0)))
+                    loss = float(item.get("l", item.get("loss", 0.0)))
+                    best_score = int(item.get("b", item.get("best_score", self.best_score)))
                     self.history.append(EpisodeStats(
-                        episode=item["e"], score=item["s"], reward=0.0, mutation=0.0,
-                        fitness=item["f"], steps=item["st"], best_score=self.best_score,
-                        reason=item["r"], loss=0.0
+                        episode=episode,
+                        score=score,
+                        reward=reward,
+                        mutation=mutation,
+                        fitness=fitness,
+                        steps=steps,
+                        best_score=best_score,
+                        reason=reason,
+                        loss=loss,
                     ))
-                except (KeyError, TypeError):
+                except (KeyError, TypeError, ValueError):
                     continue
 
         ds = payload.get("ds", {})
@@ -2034,6 +2085,7 @@ class SnakeWebBackend:
                 "device_mode": self.device_mode,
                 "available_devices": self.available_devices,
                 "model_input_size": int(self.last_state.size),
+                "network_input_adapter_mode": NETWORK_INPUT_ADAPTER_MODE,
                 "agent_kind": self.agent_kind,
                 "available_agent_kinds": list(AGENT_KINDS),
                 "agent_slots": self._agent_slots_payload(),
