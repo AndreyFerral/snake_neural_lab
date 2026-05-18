@@ -823,7 +823,7 @@ class SnakeLabApp {
   buildDecisionText() {
     if (this.state?.restart_pending || Date.now() < this.restartPendingUntil) return ["Backend перезапускается.", "Состояние сохранено.", "Связь может пропасть на несколько секунд."].join("\n");
     const qValues = this.formatOrderedQValues();
-    const penaltyReasons = Array.isArray(this.state.last_penalty_reasons) ? this.state.last_penalty_reasons.map((reason) => formatCompactReason(reason)).join(", ") : "";
+    const penaltyReasons = Array.isArray(this.state.last_penalty_reasons) ? this.state.last_penalty_reasons.map((reason) => this.penaltyShortLabel(reason)).join(", ") : "";
     const networkChoice = Number.isInteger(this.state.last_greedy_action) ? `${this.arrowForAction(this.state.last_greedy_action)} ${this.outputLabels()[this.state.last_greedy_action] ?? ""}`.trim() : "-";
     const reward = Number.isFinite(this.state.stats?.reward) ? this.state.stats.reward : 0;
     const rewardValue = reward.toFixed(3);
@@ -842,6 +842,26 @@ class SnakeLabApp {
     else if (agentKind === "dqn") actionHeader = "Q-values (↑ / ← / →): ";
     const lines = [`${actionHeader}${qValues || "-"}`, `Выбор сети: ${networkChoice}`, `Награда: ${rewardReason} (${rewardValue})`, `Штрафы: ${penaltyReasons || "-"}`];
     return lines.join("\n");
+  }
+
+  penaltyCatalogById() {
+    const frameId = this.state?.frame_id ?? "";
+    if (this._penaltyCatalogCacheFrameId === frameId && this._penaltyCatalogCacheMap) return this._penaltyCatalogCacheMap;
+    const rules = this.state?.reward_rules ?? {};
+    const penalties = Array.isArray(rules.penalties) ? rules.penalties : [];
+    this._penaltyCatalogCacheMap = new Map(penalties.map((item) => [String(item.id ?? ""), item]));
+    this._penaltyCatalogCacheFrameId = frameId;
+    return this._penaltyCatalogCacheMap;
+  }
+
+  penaltyShortLabel(reason) {
+    const item = this.penaltyCatalogById().get(String(reason));
+    return String(item?.short_label ?? item?.label ?? formatReason(reason));
+  }
+
+  penaltyEffectTag(reason) {
+    const item = this.penaltyCatalogById().get(String(reason));
+    return String(item?.short_label ?? item?.label ?? formatReason(reason)).toLowerCase();
   }
 
   getDeathSteps(snapshot) {
@@ -1081,7 +1101,7 @@ class SnakeLabApp {
 
 		// 1. Собираем теги штрафов и причин
 		const penalties = Array.isArray(entry.penalties) ? entry.penalties : [];
-		const effectTags = penalties.map((reason) => formatStepEffectTag(reason)).filter(Boolean);
+		const effectTags = penalties.map((reason) => this.penaltyEffectTag(reason)).filter(Boolean);
 		const reasonTag = stepReasonLabel(entry.reason);
 		if (reasonTag && reasonTag.trim() && !effectTags.includes(reasonTag)) {
 			effectTags.unshift(reasonTag);
