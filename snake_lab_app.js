@@ -823,7 +823,7 @@ class SnakeLabApp {
   buildDecisionText() {
     if (this.state?.restart_pending || Date.now() < this.restartPendingUntil) return ["Backend перезапускается.", "Состояние сохранено.", "Связь может пропасть на несколько секунд."].join("\n");
     const qValues = this.formatOrderedQValues();
-    const penaltyReasons = Array.isArray(this.state.last_penalty_reasons) ? this.state.last_penalty_reasons.map((reason) => formatCompactReason(reason)).join(", ") : "";
+    const penaltyReasons = Array.isArray(this.state.last_penalty_reasons) ? this.state.last_penalty_reasons.map((reason) => this.penaltyShortLabel(reason)).join(", ") : "";
     const networkChoice = Number.isInteger(this.state.last_greedy_action) ? `${this.arrowForAction(this.state.last_greedy_action)} ${this.outputLabels()[this.state.last_greedy_action] ?? ""}`.trim() : "-";
     const reward = Number.isFinite(this.state.stats?.reward) ? this.state.stats.reward : 0;
     const rewardValue = reward.toFixed(3);
@@ -842,6 +842,26 @@ class SnakeLabApp {
     else if (agentKind === "dqn") actionHeader = "Q-values (↑ / ← / →): ";
     const lines = [`${actionHeader}${qValues || "-"}`, `Выбор сети: ${networkChoice}`, `Награда: ${rewardReason} (${rewardValue})`, `Штрафы: ${penaltyReasons || "-"}`];
     return lines.join("\n");
+  }
+
+  penaltyCatalogById() {
+    const frameId = this.state?.frame_id ?? "";
+    if (this._penaltyCatalogCacheFrameId === frameId && this._penaltyCatalogCacheMap) return this._penaltyCatalogCacheMap;
+    const rules = this.state?.reward_rules ?? {};
+    const penalties = Array.isArray(rules.penalties) ? rules.penalties : [];
+    this._penaltyCatalogCacheMap = new Map(penalties.map((item) => [String(item.id ?? ""), item]));
+    this._penaltyCatalogCacheFrameId = frameId;
+    return this._penaltyCatalogCacheMap;
+  }
+
+  penaltyShortLabel(reason) {
+    const item = this.penaltyCatalogById().get(String(reason));
+    return String(item?.short_label ?? item?.label ?? formatReason(reason));
+  }
+
+  penaltyEffectTag(reason) {
+    const item = this.penaltyCatalogById().get(String(reason));
+    return String(item?.short_label ?? item?.label ?? formatReason(reason)).toLowerCase();
   }
 
   getDeathSteps(snapshot) {
@@ -988,7 +1008,8 @@ class SnakeLabApp {
     this.setHidden(this.deathChoiceMeta, !choiceLine);
 
     // === ИЗМЕНЕНИЕ: Формат голода и фикс 0 шагов ===
-    const stepsWithoutFood = selectedStep.steps_without_food ?? selectedStep.last_steps_without_food ?? 0;
+    const fallbackHungerSteps = Number(this.state?.stats?.hunger_steps ?? this.state?.game?.steps_without_food ?? 0);
+    const stepsWithoutFood = Number(selectedStep.steps_without_food ?? selectedStep.last_steps_without_food ?? fallbackHungerSteps);
     const hungerInfo = (typeof outcomeReason === "string" && outcomeReason.startsWith("starvation")) ? `• ${stepsWithoutFood} шагов` : "";
     this.setText(this.deathSnapshotMeta, [`${stepLabel}`, `Итог: ${formatReason(outcomeReason)}${hungerInfo}`, `Счет: ${selectedStep.score ?? 0} • Шагов: ${selectedStep.step_count ?? 0} • Длина: ${snake.length}`].filter(Boolean).join("\n"));
   }
@@ -1081,7 +1102,7 @@ class SnakeLabApp {
 
 		// 1. Собираем теги штрафов и причин
 		const penalties = Array.isArray(entry.penalties) ? entry.penalties : [];
-		const effectTags = penalties.map((reason) => formatStepEffectTag(reason)).filter(Boolean);
+		const effectTags = penalties.map((reason) => this.penaltyEffectTag(reason)).filter(Boolean);
 		const reasonTag = stepReasonLabel(entry.reason);
 		if (reasonTag && reasonTag.trim() && !effectTags.includes(reasonTag)) {
 			effectTags.unshift(reasonTag);
@@ -1109,7 +1130,9 @@ class SnakeLabApp {
 		const logText = headerParts.join(" ") + (extraParts.length ? " • " + extraParts.join(" • ") : "");
 
 		// 5. ПРИОРИТЕТ ЦВЕТОВ (строгий порядок: красный > зелёный > синий > жёлтый)
-		const hasTailLost = penalties.includes("route_dead_end") || penalties.includes("tail_path_lost") || apple?.verdict === "no_tail_after_apple";
+			// Красим в красный только когда штраф реально применён на этом же шаге.
+			// Вердикт apple_opportunity может быть диагностическим и не означать штраф текущего шага.
+			const hasTailLost = penalties.includes("route_dead_end") || penalties.includes("tail_path_lost");
 		const isCollision = penalties.includes("wall_collision") || penalties.includes("body_collision");
 		const tookApple = entry.reason === "apple";
 
