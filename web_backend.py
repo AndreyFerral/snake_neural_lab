@@ -193,6 +193,19 @@ def compact_model_stats(models: dict[str, Any], checkpoint_key: str, agent_kind:
             models.pop(key, None)
 
 
+def prune_model_stats_store(models: dict[str, Any], *, keep_keys: set[str], smart_limit: int = 3) -> None:
+    smart_keys = [key for key in models.keys() if key.startswith("snake_smart_")]
+    if len(smart_keys) > smart_limit:
+        for key in sorted(smart_keys)[:-smart_limit]:
+            if key not in keep_keys:
+                models.pop(key, None)
+    for key in list(models.keys()):
+        if key in keep_keys:
+            continue
+        if key.startswith("snake_dqn") or key.startswith("snake_evolution"):
+            models.pop(key, None)
+
+
 def load_aux_stats_store() -> dict[str, Any]:
     default_store: dict[str, Any] = {"schema_version": 1, "models": {}}
     if not AUX_STATS_PATH.exists():
@@ -1567,6 +1580,13 @@ class SnakeWebBackend:
             if self.mode != "smart":
                 compact_model_stats(models, checkpoint_key, self.agent_kind)
             models[checkpoint_key] = aux_payload
+            keep_keys = {
+                checkpoint_key,
+                model_stats_key(self.agent_kind),
+                checkpoint_path.stem,
+                self._active_aux_stats_key(),
+            }
+            prune_model_stats_store(models, keep_keys=keep_keys, smart_limit=3)
         save_aux_stats_store(store)
 
     def _delete_active_model_storage(self) -> None:
