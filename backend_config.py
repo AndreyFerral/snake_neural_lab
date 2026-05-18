@@ -35,7 +35,8 @@ DIRECTIONS = (
     (0, 1),
     (-1, 0),
 )
-HISTORY_LIMIT = 2000
+# Ограничение длины "Истории обучения" (для UI и snake_model_stats.json)
+HISTORY_LIMIT = 100
 DECISION_STATS_WINDOW = 100
 AVERAGE_SCORE_WINDOW_RATIO = 0.25
 SAVE_THROTTLE_SECONDS = 8.0
