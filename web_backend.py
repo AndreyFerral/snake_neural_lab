@@ -27,7 +27,6 @@ torch.set_num_interop_threads(1)
 # Импорты только тех констант, которые реально используются
 from backend_config import (
     AGENT_KINDS,
-    APPLE_REWARD,
     AVERAGE_SCORE_WINDOW_RATIO,
     BOARD_SIZES,
     DEATH_REASON_ORDER,
@@ -49,8 +48,8 @@ from backend_config import (
     SLOW_STEP_MS,
     STARTUP_BOARD_SIZE,
     STEP_REASON_ORDER,
-    TAIL_PATH_LOST_PENALTY,
-    TRAP_AFTER_APPLE_PENALTY,
+    PENALTY_CATALOG,
+    REWARD_CATALOG,
     hunger_budget_for,
 )
 
@@ -1196,19 +1195,32 @@ class SnakeWebBackend:
         return 0.0
 
     def _reward_rules_payload(self) -> dict[str, Any]:
-        # Маршруты/линии/возврат удалены
+        # Динамический каталог из backend_config.py
+        bonuses: list[dict[str, Any]] = []
+        for reward_id, item in REWARD_CATALOG.items():
+            value = item.get("value")
+            value_text = f"+{value:.1f}" if isinstance(value, (int, float)) else str(value)
+            bonuses.append({
+                "id": reward_id,
+                "label": item.get("label", reward_id),
+                "short_label": item.get("short_label", reward_id),
+                "value": value_text,
+                "active": True,
+            })
+        penalties: list[dict[str, Any]] = []
+        for penalty_id, item in PENALTY_CATALOG.items():
+            value = item.get("value")
+            value_text = f"{value:.1f}" if isinstance(value, (int, float)) else str(value)
+            penalties.append({
+                "id": penalty_id,
+                "label": item.get("label", penalty_id),
+                "short_label": item.get("short_label", penalty_id),
+                "value": value_text,
+                "active": True,
+            })
         return {
-            "bonuses": [
-                {"label": "Яблоко", "value": f"+{APPLE_REWARD:.1f}", "active": True},
-                {"label": "Победа", "value": "+10.0", "active": True},
-            ],
-            "penalties": [
-                {"label": "Поворот", "value": "-0.1", "active": True},
-                {"label": "Смерть", "value": "-5.0", "active": True},
-                {"label": "Нет хвоста", "value": f"-{TAIL_PATH_LOST_PENALTY:.1f}", "active": True},
-                {"label": "Цикл", "value": "до -0.35", "active": True},
-                {"label": "Тупик после 🍎", "value": f"-{TRAP_AFTER_APPLE_PENALTY:.1f}", "active": True},
-            ],
+            "bonuses": bonuses,
+            "penalties": penalties,
             "note": " ",
         }
 
