@@ -550,6 +550,7 @@ class SnakeLabApp {
         this.safeRenderAll();
         if (forcePanelRefresh) window.setTimeout(() => this.refreshState({ forceDetails: true, forceNetwork: this.shouldUseNetworkVisuals() }), 80);
         else if (type === "set_smart_model") window.setTimeout(() => this.refreshState({ forceDetails: true }), 60);
+        else if (type === "set_mode" && value === "smart") window.setTimeout(() => this.refreshState({ forceDetails: true }), 60);
       } else if (type !== "manual_action") {
         await this.refreshState({ forceDetails: forcePanelRefresh });
       }
@@ -775,7 +776,7 @@ class SnakeLabApp {
     this.setText(this.runToggle, this.state.running ? "Пауза" : "Старт");
     this.setText(this.trainToggle, this.state.training ? "Обучение: вкл" : "Обучение: выкл");
     if (this.trainToggle) { this.trainToggle.disabled = isSmartMode; this.trainToggle.title = isSmartMode ? "Zmey-smart не обучается в этом режиме" : ""; }
-    if (this.resetAgentButton) { this.resetAgentButton.disabled = isSmartMode; this.resetAgentButton.title = isSmartMode ? "Сброс агента доступен только для DQN и эволюции" : ""; }
+    if (this.resetAgentButton) { this.resetAgentButton.disabled = false; this.resetAgentButton.title = isSmartMode ? "Сброс очистит JSON-статистику Zmey-smart" : ""; }
     this.toggleClass(this.manualModeButton, "is-active", this.state.mode === "manual" && !this.state.training);
     this.toggleClass(this.aiModeButton, "is-active", ["ai", "smart"].includes(this.state.mode) && !this.state.training);
     this.toggleClass(this.trainToggle, "is-active", this.state.training);

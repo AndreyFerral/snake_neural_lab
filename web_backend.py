@@ -237,6 +237,10 @@ def save_aux_stats_store(store: dict[str, Any]) -> None:
                 time.sleep(0.05)
 
 
+def clear_aux_stats_store() -> None:
+    save_aux_stats_store({"schema_version": 1, "models": {}})
+
+
 def resolve_device(mode: str) -> tuple[torch.device, str, str]:
     return torch.device("cpu"), "CPU", "CPU"
 
@@ -1553,6 +1557,9 @@ class SnakeWebBackend:
         self._last_save_at = time.perf_counter()
         self._next_save_at = 0.0
 
+    def _clear_aux_stats_json(self) -> None:
+        clear_aux_stats_store()
+
     def _capture_save_payloads(self) -> tuple[Path, dict[str, object], str, dict[str, object]] | None:
         if not self.persistence_enabled:
             return None
@@ -2302,7 +2309,17 @@ class SnakeWebBackend:
                     return {"ok": False, "error": message}
             elif command == "reset_agent":
                 if self.mode == "smart":
-                    return {"ok": False, "error": "Reset is unavailable for Zmey-smart"}
+                    self._clear_aux_stats_json()
+                    self._clear_runtime_review_state()
+                    self.fitness_ema = 0.0
+                    self.best_score = 0
+                    self.board_best_scores = {int(self.game.board_size): 0}
+                    self.episode_counter = 0
+                    self.history.clear()
+                    self.training = False
+                    self.running = False
+                    self._save_active_context()
+                    return {"ok": True}
                 board_size = self.game.board_size
                 self._delete_active_model_storage()
                 self.game = SnakeEnv(board_size=board_size)
