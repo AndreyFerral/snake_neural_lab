@@ -1493,6 +1493,8 @@ class SnakeWebBackend:
                     ))
                 except (KeyError, TypeError, ValueError):
                     continue
+        if len(self.history) > HISTORY_LIMIT:
+            self.history = self.history[-HISTORY_LIMIT:]
 
         ds = payload.get("ds", {})
         self._reset_decision_stats()
