@@ -89,7 +89,12 @@ PENALTY_CATALOG = {
     "starvation": {"label": "Голодание", "short_label": "Голод", "value": -DEATH_PENALTY},
     "tail_path_lost": {"label": "Нет пути к хвосту", "short_label": "Потеря хвоста", "value": -TAIL_PATH_LOST_PENALTY},
     "looping": {"label": "Цикл", "short_label": "Цикл", "value": "до -0.35"},
-    "avoidable_collision": {"label": "Избежимое столкновение", "short_label": "Избежимое столкновение", "value": "метка"},
+    "avoidable_collision": {
+        "label": "Избежимое столкновение",
+        "short_label": "Избежимое столкновение",
+        "value": "метка",
+        "show_in_ui": False,
+    },
     "trap_after_apple": {"label": "Тупик после 🍎", "short_label": "Тупик после 🍎", "value": -TRAP_AFTER_APPLE_PENALTY},
 }
 

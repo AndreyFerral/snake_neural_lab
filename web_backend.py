@@ -1209,6 +1209,8 @@ class SnakeWebBackend:
             })
         penalties: list[dict[str, Any]] = []
         for penalty_id, item in PENALTY_CATALOG.items():
+            if item.get("show_in_ui", True) is False:
+                continue
             value = item.get("value")
             value_text = f"{value:.1f}" if isinstance(value, (int, float)) else str(value)
             penalties.append({
