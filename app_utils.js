@@ -73,72 +73,8 @@ function formatReason(reason) {
   });
   return map[reason] ?? reason ?? "Ожидание";
 }
-function formatCompactReason(reason) {
-  const map = {
-    new_game:  "Старт",
-    step:  "Шаг",
-	turn:  "Поворот",
-    apple:  "Яблоко",
-    victory:  "Победа",
-    looping:  "Цикл",
-    missed_safe_adjacent_apple:  "Пропуск яблока",
-    available_food_ignored:  "Еда игнор",
-    trap_after_apple:  "Тупик после яблока",
-    route_dead_end:  "Нет хвоста",
-    tail_path_lost:  "Потеря хвоста",
-    endgame_space_efficient:  "Экономно",
-    endgame_space_cut:  "Срез места",
-    endgame_pocket_fill:  "Карман",
-    endgame_pocket_skip:  "Пропуск кармана",
-    avoidable_collision:  "Избежимое столкновение",
-    wall_collision:  "Стена",
-    body_collision:  "Тело",
-    starvation:  "Голод",
-    starvation_food_unreachable:  "Еда недоступна",
-    starvation_no_relayout_path:  "Нет перестройки",
-    starvation_food_available:  "Еда доступна",
-    starvation_safe_loop:  "Петля",
-    starvation_endgame_trap:  "Ловушка",
-    evolution_hunger_cut:  "Отсев",
-  };
-  Object.assign(map, {
-    route_follow:  "Маршрут",
-    route_deviation:  "Сход",
-  });
-  return map[reason] ?? formatReason(reason);
-}
 function appleSticker() {
   return '<span class="step-sticker" title="яблоко">🍎</span>';
-}
-function formatStepEffectTag(reason) {
-  const apple = appleSticker();
-  const map = {
-    looping:  "цикл",
-    missed_safe_adjacent_apple:  `пропуск ${apple}`,
-    available_food_ignored:  `${apple} не взята`,
-    trap_after_apple:  `тупик после ${apple}`,
-    route_dead_end:  "нет хвоста",
-    tail_path_lost:  "потеря хвоста",
-    evolution_hunger_cut:  "отсев: голод",
-    endgame_space_efficient:  "экономно",
-    endgame_space_cut:  "срез места",
-    endgame_pocket_fill:  "карман",
-    endgame_pocket_skip:  "пропуск кармана",
-    avoidable_collision:  "избежимая смерть",
-    wall_collision:  "стена",
-    body_collision:  "тело",
-    starvation:  "голод",
-    starvation_food_unreachable:  "еда недоступна",
-    starvation_no_relayout_path:  "нет перестройки",
-    starvation_food_available:  "еда доступна",
-    starvation_safe_loop:  "петля",
-    starvation_endgame_trap:  "ловушка",
-  };
-  Object.assign(map, {
-    route_follow:  "маршрут",
-    route_deviation:  "сход",
-  });
-  return map[reason] ?? formatCompactReason(reason);
 }
 function formatAppleVerdictTag(verdict) {
   const map = {
@@ -148,7 +84,7 @@ function formatAppleVerdictTag(verdict) {
     not_enough_space: "мало места",
     none: "-",
   };
-  return map[verdict] ?? formatStepEffectTag(verdict);
+  return map[verdict] ?? formatReason(verdict);
 }
 function formatSignalLabel(label) {
   const labels = {
