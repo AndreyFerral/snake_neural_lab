@@ -845,9 +845,13 @@ class SnakeLabApp {
   }
 
   penaltyCatalogById() {
+    const frameId = this.state?.frame_id ?? "";
+    if (this._penaltyCatalogCacheFrameId === frameId && this._penaltyCatalogCacheMap) return this._penaltyCatalogCacheMap;
     const rules = this.state?.reward_rules ?? {};
     const penalties = Array.isArray(rules.penalties) ? rules.penalties : [];
-    return new Map(penalties.map((item) => [String(item.id ?? ""), item]));
+    this._penaltyCatalogCacheMap = new Map(penalties.map((item) => [String(item.id ?? ""), item]));
+    this._penaltyCatalogCacheFrameId = frameId;
+    return this._penaltyCatalogCacheMap;
   }
 
   penaltyShortLabel(reason) {
