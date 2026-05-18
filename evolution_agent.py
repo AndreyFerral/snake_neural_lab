@@ -19,6 +19,7 @@ except ImportError:
 from backend_config import (
     MODEL_ACTION_LABELS,
     GLOBAL_SIGNAL_LABELS,
+    EVOLUTION_STARVATION_FITNESS_FLOOR,
     hunger_budget_for,
 )
 from networks import PolicyNetwork
@@ -254,7 +255,21 @@ class EvolutionAgent:
         elif score >= int(board_cells * 0.70):
             hunger_penalty *= 0.85
         victory_bonus = 15000.0 if reason == "victory" else 0.0
-        return apple_value + survival_value + reward_value + victory_bonus - death_penalty - efficiency_penalty - hunger_penalty - trap_after_apple_penalty - avoidable_collision_penalty
+        fitness = (
+            apple_value
+            + survival_value
+            + reward_value
+            + victory_bonus
+            - death_penalty
+            - efficiency_penalty
+            - hunger_penalty
+            - trap_after_apple_penalty
+            - avoidable_collision_penalty
+        )
+        # Не закрепляем поведение "умереть от голода": голодные эпизоды принудительно опускаем.
+        if reason.startswith("starvation") or reason == EVOLUTION_HUNGER_CULL_REASON:
+            fitness = min(fitness, EVOLUTION_STARVATION_FITNESS_FLOOR)
+        return fitness
 
     def evolve_generation(self) -> None:
         evaluated = [ind for ind in self.population if ind.fitness is not None]

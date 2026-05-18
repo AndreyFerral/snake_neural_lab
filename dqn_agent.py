@@ -10,6 +10,7 @@ from backend_config import (
     MODEL_ACTION_LABELS,
     CPU_BATCH_SIZE,
     GLOBAL_SIGNAL_LABELS,
+    NETWORK_INPUT_ADAPTER_MODE,
 )
 from networks import QNetwork
 
@@ -164,8 +165,14 @@ class DQNAgent:
         self.mutation_rate = 0.0
         self.victory_archive: list[object] = []
 
-        self.online_net = QNetwork(input_size=self.global_signal_count).to(device)
-        self.target_net = QNetwork(input_size=self.global_signal_count).to(device)
+        self.online_net = QNetwork(
+            input_size=self.global_signal_count,
+            input_adapter_mode=NETWORK_INPUT_ADAPTER_MODE,
+        ).to(device)
+        self.target_net = QNetwork(
+            input_size=self.global_signal_count,
+            input_adapter_mode=NETWORK_INPUT_ADAPTER_MODE,
+        ).to(device)
         self.target_net.load_state_dict(self.online_net.state_dict())
         self.target_net.eval()
 
