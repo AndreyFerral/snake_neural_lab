@@ -900,12 +900,16 @@ class SnakeWebBackend:
             "reason": self.last_reason,
             "penalties": list(self.last_penalty_reasons),
             "random": bool(was_random),
+            "steps_without_food": int(self.game.steps_without_food),
+            "max_steps_without_food": int(self.game.max_steps_without_food),
             "apple_opportunity": info.get("apple_opportunity"),
         })
         self._record_decision_stat("choices", MODEL_ACTION_LABELS[visible_action])
         self._record_decision_stat("steps", self.last_reason)
         pre_step_snapshot["outcome_reason"] = self.last_reason
         pre_step_snapshot["penalty_reasons"] = list(self.last_penalty_reasons)
+        pre_step_snapshot["steps_without_food"] = int(self.game.steps_without_food)
+        pre_step_snapshot["max_steps_without_food"] = int(self.game.max_steps_without_food)
         self.recent_step_snapshots.append(pre_step_snapshot)
 
         if training_mode and self.agent_kind == "dqn":

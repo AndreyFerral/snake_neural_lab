@@ -1008,7 +1008,8 @@ class SnakeLabApp {
     this.setHidden(this.deathChoiceMeta, !choiceLine);
 
     // === ИЗМЕНЕНИЕ: Формат голода и фикс 0 шагов ===
-    const stepsWithoutFood = selectedStep.steps_without_food ?? selectedStep.last_steps_without_food ?? 0;
+    const fallbackHungerSteps = Number(this.state?.stats?.hunger_steps ?? this.state?.game?.steps_without_food ?? 0);
+    const stepsWithoutFood = Number(selectedStep.steps_without_food ?? selectedStep.last_steps_without_food ?? fallbackHungerSteps);
     const hungerInfo = (typeof outcomeReason === "string" && outcomeReason.startsWith("starvation")) ? `• ${stepsWithoutFood} шагов` : "";
     this.setText(this.deathSnapshotMeta, [`${stepLabel}`, `Итог: ${formatReason(outcomeReason)}${hungerInfo}`, `Счет: ${selectedStep.score ?? 0} • Шагов: ${selectedStep.step_count ?? 0} • Длина: ${snake.length}`].filter(Boolean).join("\n"));
   }
