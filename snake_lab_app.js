@@ -823,7 +823,7 @@ class SnakeLabApp {
   buildDecisionText() {
     if (this.state?.restart_pending || Date.now() < this.restartPendingUntil) return ["Backend перезапускается.", "Состояние сохранено.", "Связь может пропасть на несколько секунд."].join("\n");
     const qValues = this.formatOrderedQValues();
-    const penaltyReasons = Array.isArray(this.state.last_penalty_reasons) ? this.state.last_penalty_reasons.map((reason) => formatCompactReason(reason)).join(", ") : "";
+    const penaltyReasons = Array.isArray(this.state.last_penalty_reasons) ? this.state.last_penalty_reasons.map((reason) => this.penaltyShortLabel(reason)).join(", ") : "";
     const networkChoice = Number.isInteger(this.state.last_greedy_action) ? `${this.arrowForAction(this.state.last_greedy_action)} ${this.outputLabels()[this.state.last_greedy_action] ?? ""}`.trim() : "-";
     const reward = Number.isFinite(this.state.stats?.reward) ? this.state.stats.reward : 0;
     const rewardValue = reward.toFixed(3);
@@ -842,6 +842,26 @@ class SnakeLabApp {
     else if (agentKind === "dqn") actionHeader = "Q-values (↑ / ← / →): ";
     const lines = [`${actionHeader}${qValues || "-"}`, `Выбор сети: ${networkChoice}`, `Награда: ${rewardReason} (${rewardValue})`, `Штрафы: ${penaltyReasons || "-"}`];
     return lines.join("\n");
+  }
+
+  penaltyCatalogById() {
+    const frameId = this.state?.frame_id ?? "";
+    if (this._penaltyCatalogCacheFrameId === frameId && this._penaltyCatalogCacheMap) return this._penaltyCatalogCacheMap;
+    const rules = this.state?.reward_rules ?? {};
+    const penalties = Array.isArray(rules.penalties) ? rules.penalties : [];
+    this._penaltyCatalogCacheMap = new Map(penalties.map((item) => [String(item.id ?? ""), item]));
+    this._penaltyCatalogCacheFrameId = frameId;
+    return this._penaltyCatalogCacheMap;
+  }
+
+  penaltyShortLabel(reason) {
+    const item = this.penaltyCatalogById().get(String(reason));
+    return String(item?.short_label ?? item?.label ?? formatReason(reason));
+  }
+
+  penaltyEffectTag(reason) {
+    const item = this.penaltyCatalogById().get(String(reason));
+    return String(item?.short_label ?? item?.label ?? formatReason(reason)).toLowerCase();
   }
 
   getDeathSteps(snapshot) {
@@ -988,7 +1008,8 @@ class SnakeLabApp {
     this.setHidden(this.deathChoiceMeta, !choiceLine);
 
     // === ИЗМЕНЕНИЕ: Формат голода и фикс 0 шагов ===
-    const stepsWithoutFood = selectedStep.steps_without_food ?? selectedStep.last_steps_without_food ?? 0;
+    const fallbackHungerSteps = Number(this.state?.stats?.hunger_steps ?? this.state?.game?.steps_without_food ?? 0);
+    const stepsWithoutFood = Number(selectedStep.steps_without_food ?? selectedStep.last_steps_without_food ?? fallbackHungerSteps);
     const hungerInfo = (typeof outcomeReason === "string" && outcomeReason.startsWith("starvation")) ? `• ${stepsWithoutFood} шагов` : "";
     this.setText(this.deathSnapshotMeta, [`${stepLabel}`, `Итог: ${formatReason(outcomeReason)}${hungerInfo}`, `Счет: ${selectedStep.score ?? 0} • Шагов: ${selectedStep.step_count ?? 0} • Длина: ${snake.length}`].filter(Boolean).join("\n"));
   }
@@ -1081,7 +1102,7 @@ class SnakeLabApp {
 
 		// 1. Собираем теги штрафов и причин
 		const penalties = Array.isArray(entry.penalties) ? entry.penalties : [];
-		const effectTags = penalties.map((reason) => formatStepEffectTag(reason)).filter(Boolean);
+		const effectTags = penalties.map((reason) => this.penaltyEffectTag(reason)).filter(Boolean);
 		const reasonTag = stepReasonLabel(entry.reason);
 		if (reasonTag && reasonTag.trim() && !effectTags.includes(reasonTag)) {
 			effectTags.unshift(reasonTag);
@@ -1109,7 +1130,9 @@ class SnakeLabApp {
 		const logText = headerParts.join(" ") + (extraParts.length ? " • " + extraParts.join(" • ") : "");
 
 		// 5. ПРИОРИТЕТ ЦВЕТОВ (строгий порядок: красный > зелёный > синий > жёлтый)
-		const hasTailLost = penalties.includes("route_dead_end") || penalties.includes("tail_path_lost") || apple?.verdict === "no_tail_after_apple";
+			// Красим в красный только когда штраф реально применён на этом же шаге.
+			// Вердикт apple_opportunity может быть диагностическим и не означать штраф текущего шага.
+			const hasTailLost = penalties.includes("route_dead_end") || penalties.includes("tail_path_lost");
 		const isCollision = penalties.includes("wall_collision") || penalties.includes("body_collision");
 		const tookApple = entry.reason === "apple";
 
@@ -1255,11 +1278,18 @@ class SnakeLabApp {
     const padLeft = 56; const padRight = 52; const padTop = 38; const padBottom = 34; const chartWidth = width - padLeft - padRight; const chartHeight = height - padTop - padBottom;
     const mapMainY = (value) => padTop + chartHeight - ((value - mainMin) / mainRange) * chartHeight;
     const mapFitnessY = (value) => { const clipped = clamp(value, fitnessMin, fitnessMax); return padTop + chartHeight - ((clipped - fitnessMin) / fitnessRange) * chartHeight; };
-    const mapX = (index, total) => padLeft + (index / Math.max(1, total - 1)) * chartWidth;
+    const episodeSeries = points.map((point, index) => {
+      const value = Number(point?.episode);
+      return Number.isFinite(value) ? value : (index + 1);
+    });
+    const minEpisode = Math.min(...episodeSeries);
+    const maxEpisode = Math.max(...episodeSeries);
+    const episodeRange = Math.max(1, maxEpisode - minEpisode);
+    const mapX = (episodeValue) => padLeft + ((episodeValue - minEpisode) / episodeRange) * chartWidth;
     for (let index = 0; index <= 4; index += 1) { const value = mainMin + (mainRange / 4) * index; const y = mapMainY(value); ctx.beginPath(); ctx.moveTo(padLeft, y); ctx.lineTo(width - padRight, y); ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1; ctx.stroke(); ctx.fillStyle = "rgba(180,199,207,0.75)"; ctx.font = "11px Aptos, Trebuchet MS, sans-serif"; ctx.fillText(value.toFixed(1), 12, y + 4); }
     for (let index = 0; index <= 4; index += 1) { const value = fitnessMin + (fitnessRange / 4) * index; const y = mapFitnessY(value); ctx.fillStyle = "rgba(127,208,255,0.78)"; ctx.font = "11px Aptos, Trebuchet MS, sans-serif"; ctx.fillText(value.toFixed(2), width - padRight + 8, y + 4); }
-    const drawSeries = (series, stroke, fillAlpha, mapY) => { const points2d = series.map((value, index) => ({ x: mapX(index, series.length), y: mapY(value) })); ctx.beginPath(); ctx.moveTo(points2d[0].x, points2d[0].y); for (let index = 1; index < points2d.length; index += 1) { const prev = points2d[index - 1]; const current = points2d[index]; const controlX = (prev.x + current.x) / 2; ctx.quadraticCurveTo(controlX, prev.y, current.x, current.y); } ctx.strokeStyle = stroke; ctx.lineWidth = 2.4; ctx.stroke(); ctx.beginPath(); ctx.moveTo(points2d[0].x, chartHeight + padTop); ctx.lineTo(points2d[0].x, points2d[0].y); for (let index = 1; index < points2d.length; index += 1) { const prev = points2d[index - 1]; const current = points2d[index]; const controlX = (prev.x + current.x) / 2; ctx.quadraticCurveTo(controlX, prev.y, current.x, current.y); } ctx.lineTo(points2d[points2d.length - 1].x, chartHeight + padTop); ctx.closePath(); ctx.fillStyle = `${stroke}${fillAlpha}`; ctx.fill(); };
-    const drawLineSeries = (series, stroke, mapY, lineWidth = 3.2) => { const points2d = series.map((value, index) => ({ x: mapX(index, series.length), y: mapY(value) })); ctx.save(); ctx.beginPath(); ctx.moveTo(points2d[0].x, points2d[0].y); for (let index = 1; index < points2d.length; index += 1) { const prev = points2d[index - 1]; const current = points2d[index]; const controlX = (prev.x + current.x) / 2; ctx.quadraticCurveTo(controlX, prev.y, current.x, current.y); } ctx.strokeStyle = stroke; ctx.lineWidth = lineWidth; ctx.lineCap = "round"; ctx.shadowColor = "rgba(237, 246, 249, 0.42)"; ctx.shadowBlur = 8; ctx.stroke(); ctx.restore(); };
+    const drawSeries = (series, stroke, fillAlpha, mapY) => { const points2d = series.map((value, index) => ({ x: mapX(episodeSeries[index]), y: mapY(value) })); ctx.beginPath(); ctx.moveTo(points2d[0].x, points2d[0].y); for (let index = 1; index < points2d.length; index += 1) { const prev = points2d[index - 1]; const current = points2d[index]; const controlX = (prev.x + current.x) / 2; ctx.quadraticCurveTo(controlX, prev.y, current.x, current.y); } ctx.strokeStyle = stroke; ctx.lineWidth = 2.4; ctx.stroke(); ctx.beginPath(); ctx.moveTo(points2d[0].x, chartHeight + padTop); ctx.lineTo(points2d[0].x, points2d[0].y); for (let index = 1; index < points2d.length; index += 1) { const prev = points2d[index - 1]; const current = points2d[index]; const controlX = (prev.x + current.x) / 2; ctx.quadraticCurveTo(controlX, prev.y, current.x, current.y); } ctx.lineTo(points2d[points2d.length - 1].x, chartHeight + padTop); ctx.closePath(); ctx.fillStyle = `${stroke}${fillAlpha}`; ctx.fill(); };
+    const drawLineSeries = (series, stroke, mapY, lineWidth = 3.2) => { const points2d = series.map((value, index) => ({ x: mapX(episodeSeries[index]), y: mapY(value) })); ctx.save(); ctx.beginPath(); ctx.moveTo(points2d[0].x, points2d[0].y); for (let index = 1; index < points2d.length; index += 1) { const prev = points2d[index - 1]; const current = points2d[index]; const controlX = (prev.x + current.x) / 2; ctx.quadraticCurveTo(controlX, prev.y, current.x, current.y); } ctx.strokeStyle = stroke; ctx.lineWidth = lineWidth; ctx.lineCap = "round"; ctx.shadowColor = "rgba(237, 246, 249, 0.42)"; ctx.shadowBlur = 8; ctx.stroke(); ctx.restore(); };
     drawSeries(scores, "#5cd6ad", "18", mapMainY); drawSeries(rewards, "#ffb347", "12", mapMainY); drawSeries(fitnesses, "#7fd0ff", "0f", mapFitnessY); drawLineSeries(scoreAverage20, "#edf6f9", mapMainY);
     [["Счет", "#5cd6ad", padLeft], ["Награда", "#ffb347", padLeft + 84], ["Срд счет", "#edf6f9", padLeft + 190], [metricLabel, "#7fd0ff", width - padRight - 76]].forEach(([label, color, x]) => { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, 18, 5, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = "#edf6f9"; ctx.font = "600 13px Aptos, Trebuchet MS, sans-serif"; ctx.fillText(label, x + 12, 22); });
   }

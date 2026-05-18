@@ -12,6 +12,8 @@ from backend_config import (
     ENDGAME_FILL_RATIO,
     MODEL_ACTION_LABELS,
     TAIL_PATH_LOST_PENALTY,
+    TURN_PENALTY,
+    DEATH_PENALTY,
 )
 
 # Типы для причин завершения игры
@@ -664,8 +666,7 @@ class SnakeEnv:
 
         # Тихий штраф за поворот (не попадает в логи и penalty_reasons)
         is_turn = chosen_direction != previous_direction
-        TURN_PENALTY = -0.1  # ← настройте под себя: -0.03 / -0.05 / -0.1
-        reward = TURN_PENALTY if is_turn else 0.0
+        reward = -TURN_PENALTY if is_turn else 0.0
         reason = "turn"
         penalty_reasons = []
 
@@ -678,7 +679,7 @@ class SnakeEnv:
         )
         if hits_wall or self._would_hit_self(next_head, will_eat):
             self.done = True
-            reward = -5.0
+            reward = -DEATH_PENALTY
             reason = "wall_collision" if hits_wall else "body_collision"
             penalty_reasons.append(reason)
             if avoidable_collision:
@@ -723,7 +724,7 @@ class SnakeEnv:
                 starve_limit = max(60, int(self.board_size * self.board_size * 0.8))
                 if self.steps_without_food > starve_limit or self._has_compact_head_loop(next_head):
                     self.done = True
-                    reward = -5.0
+                    reward = -DEATH_PENALTY
                     reason = "starvation"
                     penalty_reasons.append(reason)
                              
