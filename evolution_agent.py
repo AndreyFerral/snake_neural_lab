@@ -238,7 +238,7 @@ class EvolutionAgent:
                 death_penalty += max(0.0, float(3 - score)) * 30.0
                 death_penalty += max(0.0, float(board_size * 2.5 - steps)) * 0.9
         if reason == "starvation_safe_loop":
-            death_penalty += max(0.0, float(18 - score)) * 150.0 + min(620.0, max(0.0, float(steps - board_size * board_size * 0.55)) * 0.85)
+            death_penalty += max(0.0, float(22 - score)) * 180.0 + min(620.0, max(0.0, float(steps - board_size * board_size * 0.55)) * 0.85)
         if reason == "starvation_food_available":
             death_penalty += max(0.0, float(16 - score)) * 155.0 + min(980.0, max(0.0, float(steps - board_size * board_size * 0.3)) * 1.25)
         trap_after_apple_penalty = float(max(0, trap_after_apple_count)) * 650.0

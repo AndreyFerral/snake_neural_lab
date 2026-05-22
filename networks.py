@@ -98,7 +98,9 @@ class QNetwork(BaseSignalNetwork):
     def __init__(self, input_size: int = len(GLOBAL_SIGNAL_LABELS), *, input_adapter_mode: str = NETWORK_INPUT_ADAPTER_MODE) -> None:
         super().__init__(input_size, input_adapter_mode=input_adapter_mode)
         self.value_head = nn.Linear(HIDDEN_LAYER_2, 1)
+        self.value_head.bias.data.zero_()
         self.advantage_head = nn.Linear(HIDDEN_LAYER_2, len(MODEL_ACTION_LABELS))
+        self.advantage_head.bias.data.zero_()
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         _, hidden2 = self.forward_features(inputs)
@@ -120,6 +122,7 @@ class PolicyNetwork(BaseSignalNetwork):
     def __init__(self, input_size: int = len(GLOBAL_SIGNAL_LABELS), *, input_adapter_mode: str = NETWORK_INPUT_ADAPTER_MODE) -> None:
         super().__init__(input_size, input_adapter_mode=input_adapter_mode)
         self.output = nn.Linear(HIDDEN_LAYER_2, len(MODEL_ACTION_LABELS))
+        self.output.bias.data.zero_()
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         _, hidden2 = self.forward_features(inputs)

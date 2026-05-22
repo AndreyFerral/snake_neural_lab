@@ -92,6 +92,21 @@ class SnakeRequestHandler(SimpleHTTPRequestHandler):
                 self._send_json(self.backend.state_snapshot(include_network=include_network, include_details=include_details))
                 return
             
+            if parsed.path == "/api/debug_log":
+                log_path = STATIC_ROOT / ".runtime" / "debug_log.jsonl"
+                if log_path.is_file():
+                    data = log_path.read_text(encoding="utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/jsonl; charset=utf-8")
+                    self.send_header("Content-Disposition", 'attachment; filename="debug_log.jsonl"')
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(data.encode("utf-8"))
+                else:
+                    self._send_json({"ok": False, "error": "Log file not found. Complete at least one episode."})
+                return
+
             if parsed.path == "/":
                 self.path = "/index.html"
             super().do_GET()

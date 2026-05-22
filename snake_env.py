@@ -15,6 +15,7 @@ from backend_config import (
     STEP_PENALTY,
     TURN_PENALTY,
     DEATH_PENALTY,
+    DISTANCE_SHAPING_FACTOR,
 )
 
 # Типы для причин завершения игры
@@ -152,6 +153,7 @@ class SnakeEnv:
         self.max_steps_without_food = 0
         self.done = False
         self.last_reward = 0.0
+        self.last_dist_shaping = 0.0
         self.last_reason = "new_game"
         self.last_penalty_reasons: list[str] = []
         self.tail_path_lost_penalty_active = False
@@ -660,6 +662,7 @@ class SnakeEnv:
         head, move = self.snake[0], DIRECTIONS[chosen_direction]
         next_head = (head[0] + move[0], head[1] + move[1])
         will_eat = next_head == self.food
+        manhattan_before = abs(head[0] - self.food[0]) + abs(head[1] - self.food[1])
 
         # В начале step(), до self.step_count += 1:
         self._obs_cache_step = -1
@@ -672,6 +675,7 @@ class SnakeEnv:
             reward -= TURN_PENALTY
         reason = "turn"
         penalty_reasons = []
+        self.last_dist_shaping = 0.0
 
         self.step_count += 1
         self.steps_without_food += 1
@@ -708,6 +712,12 @@ class SnakeEnv:
                 if tail in self.eaten_food_trail:
                     self.eaten_food_trail.remove(tail)
 
+                # Награда/штраф за изменение расстояния до еды
+                manhattan_after = abs(next_head[0] - self.food[0]) + abs(next_head[1] - self.food[1])
+                dist_shaping = (manhattan_before - manhattan_after) * DISTANCE_SHAPING_FACTOR
+                reward += dist_shaping
+                self.last_dist_shaping = dist_shaping
+
                 # Штрафы за петли
                 loop_penalty = 0.0
                 revisit_count = sum(1 for p in self.recent_heads if p == next_head)
@@ -730,11 +740,11 @@ class SnakeEnv:
                     reward = -DEATH_PENALTY
                     reason = "starvation"
                     penalty_reasons.append(reason)
-                             
-                # Проверка потери пути к хвосту — применяется и при поедании яблока тоже
-                if self._tail_path_lost_now():
-                    reward -= TAIL_PATH_LOST_PENALTY
-                    penalty_reasons.append("tail_path_lost")
+
+            # Проверка потери пути к хвосту — применяется и при поедании яблока тоже
+            if self._tail_path_lost_now():
+                reward -= TAIL_PATH_LOST_PENALTY
+                penalty_reasons.append("tail_path_lost")
 
             self.recent_heads.append(next_head)
 

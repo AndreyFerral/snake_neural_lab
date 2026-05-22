@@ -56,6 +56,7 @@ from backend_config import (
     hunger_budget_for,
 )
 
+from debug_logger import finish_episode, record_step, start_episode
 from dqn_agent import DQNAgent
 from evolution_agent import EvolutionAgent, ParallelEvolutionRunner
 from snake_env import SnakeEnv, relative_to_absolute
@@ -902,6 +903,15 @@ class SnakeWebBackend:
         reason = str(info["reason"])
         next_state = self._current_observation()
 
+        record_step(
+            self.game,
+            state,
+            reward,
+            info,
+            action=visible_action,
+            q_values=q_values,
+        )
+
         self.last_state = next_state
         self.last_q_values = q_values
         self.live_reward = reward
@@ -913,8 +923,10 @@ class SnakeWebBackend:
         self.last_penalty_reasons = [str(item) for item in info.get("penalty_reasons", [])]
         train_reward = reward
         step_number = int(info.get("steps", self.game.step_count))
-        if step_number == 1 and self.step_review_entries:
-            self.step_review_entries.clear()
+        if step_number == 1:
+            start_episode()
+            if self.step_review_entries:
+                self.step_review_entries.clear()
         self.step_review_entries.append({
             "step": step_number,
             "reward": float(reward),
@@ -970,6 +982,7 @@ class SnakeWebBackend:
                 self.fitness_ema = loss_fitness if self.fitness_ema == 0 else self.fitness_ema * 0.92 + loss_fitness * 0.08
 
         if done:
+            finish_episode()
             self._finish_episode(str(info["reason"]), training_mode=training_mode)
 
         elapsed_ms = (time.perf_counter() - started_at) * 1000.0
@@ -2018,8 +2031,8 @@ class SnakeWebBackend:
             "network_source": self.network_source,
             "frame_id": self.frame_id,
             "running": self.running,
-            "training": self.training,
-            "mode": self.mode,
+                "training": self.training,
+                "mode": self.mode,
             "speed": self.speed,
             "last_action": self.last_action,
             "last_action_random": self.last_action_random,

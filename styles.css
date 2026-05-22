@@ -169,6 +169,8 @@ button.danger { background: rgba(255, 107, 107, 0.13); border-color: rgba(255, 1
 .viz-card.wide { grid-column: 1 / -1; }
 .network-panel .panel-head { max-width: 900px; margin-left: auto; margin-right: auto; }
 .viz-note { max-width: 760px; }
+
+
 @media (max-width: 1120px) {
   .dashboard { grid-template-columns: 1fr; }
   .network-layout { grid-template-columns: 1fr; }
