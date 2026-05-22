@@ -73,9 +73,6 @@ function formatReason(reason) {
   });
   return map[reason] ?? reason ?? "Ожидание";
 }
-function appleSticker() {
-  return '<span class="step-sticker" title="яблоко">🍎</span>';
-}
 function formatAppleVerdictTag(verdict) {
   const map = {
     safe: "безопасно",

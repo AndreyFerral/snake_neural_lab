@@ -47,7 +47,6 @@ class SnakeLabApp {
     this.stepStat = document.getElementById("stepStat");
     this.rewardRulesBody = document.getElementById("rewardRulesBody");
 
-    this.stepReviewSlider = document.getElementById("stepReviewSlider");
     this.stepReviewLiveButton = document.getElementById("stepReviewLive");
     this.stepReviewPreviousButton = document.getElementById("stepReviewPrevious");
     this.stepReviewLabel = document.getElementById("stepReviewLabel");
@@ -86,9 +85,7 @@ class SnakeLabApp {
     this.lastGameRenderSignature = "";
     this.lastRewardRulesMarkup = "";
     this.lastDecisionStatsMarkup = "";
-    this.lastSummaryMarkup = "";
     this.forceStepLogScroll = false;
-    this.selectedReviewStepIndex = -1;
     this.selectedStepLogKey = "live";
     this.agentModeFocused = false;
     this.smartModelFocused = false;
@@ -473,14 +470,6 @@ class SnakeLabApp {
     return { boardX, boardY, boardSize, cell, snake, head, food };
   }
 
-  getObservationWindowOrigin(head, boardCells, inputGrid = this.currentInputGrid()) {
-    if (boardCells >= inputGrid) {
-      const halfWindow = Math.floor(inputGrid / 2);
-      return { x: clamp(head.x - halfWindow, 0, boardCells - inputGrid), y: clamp(head.y - halfWindow, 0, boardCells - inputGrid) };
-    }
-    return { x: 0, y: 0 };
-  }
-
   bindEvents() {
     window.addEventListener("keydown", (event) => this.handleKeydown(event));
     window.addEventListener("resize", () => {
@@ -573,7 +562,7 @@ class SnakeLabApp {
   forceNextVisualRefresh() {
     this.lastPanelRenderAt = -Infinity; this.lastSnapshotRenderAt = -Infinity; this.lastChartRenderAt = -Infinity; this.lastNetworkRenderAt = -Infinity;
     this.lastNetworkPayloadAt = 0; this.lastDetailPayloadAt = 0; this.lastRenderedSnapshotKey = ""; this.lastDeathTimelineMarkup = ""; this.lastStepReviewSignature = "";
-    this.lastGameRenderSignature = ""; this.lastGameRenderTime = 0; this.lastRewardRulesMarkup = ""; this.lastDecisionStatsMarkup = ""; this.lastSummaryMarkup = ""; this.lastSmartModelMarkup = "";
+    this.lastGameRenderSignature = ""; this.lastGameRenderTime = 0; this.lastRewardRulesMarkup = ""; this.lastDecisionStatsMarkup = ""; this.lastSmartModelMarkup = "";
     this.pendingHeavyTasks = []; this.pendingHeavyTaskNames.clear();
   }
 
@@ -1102,7 +1091,7 @@ class SnakeLabApp {
     if (this.stepReviewPreviousButton) { this.stepReviewPreviousButton.disabled = !previousLog; this.stepReviewPreviousButton.title = previousLog ? `Эпизод ${previousLog.episode ?? "?"}, счет ${previousLog.score ?? 0}, ${formatReason(previousLog.reason)}` : "Прошлого лога пока нет"; }
     const selectedHistory = this.selectedStepLogKey === "previous" ? previousLog : null;
     const steps = selectedHistory ? Array.isArray(selectedHistory.entries) ? selectedHistory.entries : [] : Array.isArray(this.state?.step_review) ? this.state.step_review : [];
-    if (!steps.length) { this.selectedReviewStepIndex = -1; this.setText(this.stepReviewLabel, "Нет шагов"); this.setHtml(this.stepReviewBody, '<div class="muted">После первого шага здесь появятся награда и штрафы по ходу эпизода.</div>'); this.lastStepReviewSignature = ""; this.lastStepReviewReason = ""; return; }
+    if (!steps.length) { this.setText(this.stepReviewLabel, "Нет шагов"); this.setHtml(this.stepReviewBody, '<div class="muted">После первого шага здесь появятся награда и штрафы по ходу эпизода.</div>'); this.lastStepReviewSignature = ""; this.lastStepReviewReason = ""; return; }
     const visibleSteps = steps.slice(-100);
     const lastStep = steps[steps.length - 1];
     const stepReviewSource = selectedHistory ? "history" : this.state?.step_review_source ?? "current";
