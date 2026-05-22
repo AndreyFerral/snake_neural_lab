@@ -16,6 +16,7 @@ from backend_config import (
     TURN_PENALTY,
     DEATH_PENALTY,
     DISTANCE_SHAPING_FACTOR,
+    hunger_budget_for,
 )
 
 # Типы для причин завершения игры
@@ -734,8 +735,8 @@ class SnakeEnv:
                     penalty_reasons.append("looping")
 
                 # Голодание и тупики
-                starve_limit = max(60, int(self.board_size * self.board_size * 0.8))
-                if self.steps_without_food > starve_limit or self._has_compact_head_loop(next_head):
+                hunger_budget = hunger_budget_for(self.score, self.board_size)
+                if self.steps_without_food > hunger_budget or self._has_compact_head_loop(next_head):
                     self.done = True
                     reward = -DEATH_PENALTY
                     reason = "starvation"
