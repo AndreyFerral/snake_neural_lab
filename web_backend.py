@@ -245,6 +245,13 @@ def resolve_device(mode: str) -> tuple[torch.device, str, str]:
     return torch.device("cpu"), "CPU", "CPU"
 
 
+def _format_value(value: Any, prefix: str = "") -> str:
+    if isinstance(value, (int, float)):
+        s = f"{value:.2f}".rstrip("0").rstrip(".")
+        return f"{prefix}{s}"
+    return str(value)
+
+
 def build_connection_payload(
     from_values: np.ndarray,
     to_values: np.ndarray,
@@ -1225,7 +1232,7 @@ class SnakeWebBackend:
         bonuses: list[dict[str, Any]] = []
         for reward_id, item in REWARD_CATALOG.items():
             value = item.get("value")
-            value_text = f"+{value:.1f}" if isinstance(value, (int, float)) else str(value)
+            value_text = _format_value(value, prefix="+")
             bonuses.append({
                 "id": reward_id,
                 "label": item.get("label", reward_id),
@@ -1238,7 +1245,7 @@ class SnakeWebBackend:
             if item.get("show_in_ui", True) is False:
                 continue
             value = item.get("value")
-            value_text = f"{value:.1f}" if isinstance(value, (int, float)) else str(value)
+            value_text = _format_value(value)
             penalties.append({
                 "id": penalty_id,
                 "label": item.get("label", penalty_id),

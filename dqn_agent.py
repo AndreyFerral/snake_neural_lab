@@ -142,7 +142,7 @@ class DQNAgent:
         batch_size: int = CPU_BATCH_SIZE,
         buffer_size: int = 20_000,
         epsilon_start: float = 1.0,
-        epsilon_min: float = 0.12,
+        epsilon_min: float = 0.08,
         epsilon_decay: float = 0.9997,
         target_sync_interval: int = 160,
     ) -> None:

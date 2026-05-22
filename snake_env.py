@@ -12,6 +12,7 @@ from backend_config import (
     ENDGAME_FILL_RATIO,
     MODEL_ACTION_LABELS,
     TAIL_PATH_LOST_PENALTY,
+    STEP_PENALTY,
     TURN_PENALTY,
     DEATH_PENALTY,
 )
@@ -664,9 +665,11 @@ class SnakeEnv:
         self._obs_cache_step = -1
         self._obs_cache_vec = None
 
-        # Тихий штраф за поворот (не попадает в логи и penalty_reasons)
+        # Постоянный штраф за каждый шаг + штраф за поворот
         is_turn = chosen_direction != previous_direction
-        reward = -TURN_PENALTY if is_turn else 0.0
+        reward = -STEP_PENALTY
+        if is_turn:
+            reward -= TURN_PENALTY
         reason = "turn"
         penalty_reasons = []
 

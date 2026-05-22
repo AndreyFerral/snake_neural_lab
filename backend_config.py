@@ -43,7 +43,8 @@ SAVE_THROTTLE_SECONDS = 8.0
 APPLE_REWARD = 4.0
 TRAP_AFTER_APPLE_PENALTY = 3.0
 TAIL_PATH_LOST_PENALTY = 7.0
-TURN_PENALTY = 0.05
+STEP_PENALTY = 0.02
+TURN_PENALTY = 0.1
 DEATH_PENALTY = 5.0
 DQN_TAIL_PATH_LOST_REPLAY_EXTRA_COPIES = 4
 ELITE_EPISODE_MAX_TRANSITIONS = 320
@@ -92,20 +93,30 @@ NETWORK_INPUT_ADAPTER_MODE = "strict"  # strict | trim | pad
 NETWORK_INPUT_WARN_ON_ADAPT = True
 NETWORK_INPUT_PAD_VALUE = 0.0
 
+# --- Каталог штрафов для UI (строится автоматически из констант) ---
+# (catalog_id, label, short_label, константа)
+_PENALTY_MAP = [
+    ("step",             "Шаг",            "Шаг",            STEP_PENALTY),
+    ("turn",             "Поворот",        "Поворот",        TURN_PENALTY),
+    ("wall_collision",   "Смерть: стена",  "Стена",          DEATH_PENALTY),
+    ("body_collision",   "Смерть: тело",   "Тело",           DEATH_PENALTY),
+    ("starvation",       "Голодание",      "Голод",          DEATH_PENALTY),
+    ("tail_path_lost",   "Нет пути к хвосту", "Потеря хвоста", TAIL_PATH_LOST_PENALTY),
+    ("trap_after_apple", "Тупик после 🍎", "Тупик после 🍎", TRAP_AFTER_APPLE_PENALTY),
+]
+
 PENALTY_CATALOG = {
-    "turn": {"label": "Поворот", "short_label": "Поворот", "value": -TURN_PENALTY},
-    "wall_collision": {"label": "Смерть: стена", "short_label": "Стена", "value": -DEATH_PENALTY},
-    "body_collision": {"label": "Смерть: тело", "short_label": "Тело", "value": -DEATH_PENALTY},
-    "starvation": {"label": "Голодание", "short_label": "Голод", "value": -DEATH_PENALTY},
-    "tail_path_lost": {"label": "Нет пути к хвосту", "short_label": "Потеря хвоста", "value": -TAIL_PATH_LOST_PENALTY},
-    "looping": {"label": "Цикл", "short_label": "Цикл", "value": "до -0.35"},
-    "avoidable_collision": {
-        "label": "Избежимое столкновение",
-        "short_label": "Избежимое столкновение",
-        "value": "метка",
-        "show_in_ui": False,
-    },
-    "trap_after_apple": {"label": "Тупик после 🍎", "short_label": "Тупик после 🍎", "value": -TRAP_AFTER_APPLE_PENALTY},
+    cid: {"label": label, "short_label": short_label, "value": -value}
+    for cid, label, short_label, value in _PENALTY_MAP
+}
+
+# Исключения (не ложатся в шаблон)
+PENALTY_CATALOG["looping"] = {"label": "Цикл", "short_label": "Цикл", "value": "до -0.35"}
+PENALTY_CATALOG["avoidable_collision"] = {
+    "label": "Избежимое столкновение",
+    "short_label": "Избежимое столкновение",
+    "value": "метка",
+    "show_in_ui": False,
 }
 
 REWARD_CATALOG = {

@@ -96,7 +96,9 @@ class SnakeLabApp {
     this.lastSmartModelMarkup = "";
     this.resizeFrameHandle = null;
     this.renderFrameHandle = null;
+    this.renderFrameScheduledAt = 0;
     this.liveFrameRenderHandle = null;
+    this.liveFrameScheduledAt = 0;
     this.heavyFrameHandle = null;
     this.pendingHeavyTasks = [];
     this.pendingHeavyTaskNames = new Set();
@@ -146,7 +148,11 @@ class SnakeLabApp {
     if (this.framePollHandle) return;
     const pollFrame = async () => {
       this.framePollHandle = null;
-      if (!document.hidden) await this.refreshFrame();
+      if (document.hidden) {
+        if (this.liveFrameRenderHandle) { window.cancelAnimationFrame(this.liveFrameRenderHandle); this.liveFrameRenderHandle = null; }
+      } else {
+        await this.refreshFrame();
+      }
       if (!this.framePollHandle) this.framePollHandle = window.setTimeout(pollFrame, this.nextFramePollDelay());
     };
     this.framePollHandle = window.setTimeout(pollFrame, 0);
@@ -481,7 +487,8 @@ class SnakeLabApp {
       if (this.resizeFrameHandle !== null) window.cancelAnimationFrame(this.resizeFrameHandle);
       this.resizeFrameHandle = window.requestAnimationFrame(() => {
         this.resizeFrameHandle = null;
-        this.lastGameRenderSignature = "";
+    this.lastGameRenderSignature = "";
+    this.lastGameRenderTime = 0;
         this.safeRenderAll();
       });
     });
@@ -566,7 +573,7 @@ class SnakeLabApp {
   forceNextVisualRefresh() {
     this.lastPanelRenderAt = -Infinity; this.lastSnapshotRenderAt = -Infinity; this.lastChartRenderAt = -Infinity; this.lastNetworkRenderAt = -Infinity;
     this.lastNetworkPayloadAt = 0; this.lastDetailPayloadAt = 0; this.lastRenderedSnapshotKey = ""; this.lastDeathTimelineMarkup = ""; this.lastStepReviewSignature = "";
-    this.lastGameRenderSignature = ""; this.lastRewardRulesMarkup = ""; this.lastDecisionStatsMarkup = ""; this.lastSummaryMarkup = ""; this.lastSmartModelMarkup = "";
+    this.lastGameRenderSignature = ""; this.lastGameRenderTime = 0; this.lastRewardRulesMarkup = ""; this.lastDecisionStatsMarkup = ""; this.lastSummaryMarkup = ""; this.lastSmartModelMarkup = "";
     this.pendingHeavyTasks = []; this.pendingHeavyTaskNames.clear();
   }
 
@@ -663,7 +670,7 @@ class SnakeLabApp {
       if (Number.isFinite(previousFrameId) && Number.isFinite(nextFrameId) && nextFrameId === previousFrameId) return;
       this.state = this.mergeFrameState(frameState, this.state);
       this.stateDetailsFresh = false;
-      this.scheduleLiveFrameRender();
+      this.renderGame();
     } catch (error) { if (Date.now() >= this.restartPendingUntil) console.warn("Snake frame error:", error); } finally { this.isFetchingFrame = false; }
   }
 
@@ -674,17 +681,29 @@ class SnakeLabApp {
   }
 
   scheduleRender() {
-    if (this.renderFrameHandle) return;
+    if (this.renderFrameHandle) {
+      if (performance.now() - this.renderFrameScheduledAt < 200) return;
+      window.cancelAnimationFrame(this.renderFrameHandle);
+      this.renderFrameHandle = null;
+    }
+    this.renderFrameScheduledAt = performance.now();
     this.renderFrameHandle = window.requestAnimationFrame(() => {
       this.renderFrameHandle = null;
+      this.renderFrameScheduledAt = 0;
       try { this.renderAll(); } catch (error) { console.error("Snake render error:", error); this.setDecisionText(`Ошибка интерфейса: ${String(error.message || error)}`); }
     });
   }
 
   scheduleLiveFrameRender() {
-    if (this.liveFrameRenderHandle) return;
+    if (this.liveFrameRenderHandle) {
+      if (performance.now() - this.liveFrameScheduledAt < 200) return;
+      window.cancelAnimationFrame(this.liveFrameRenderHandle);
+      this.liveFrameRenderHandle = null;
+    }
+    this.liveFrameScheduledAt = performance.now();
     this.liveFrameRenderHandle = window.requestAnimationFrame(() => {
       this.liveFrameRenderHandle = null;
+      this.liveFrameScheduledAt = 0;
       try {
         const now = performance.now();
         if (now - this.lastPanelRenderAt >= UI_PANEL_RENDER_MS) { this.updateStats(); this.lastPanelRenderAt = now; }
@@ -739,8 +758,12 @@ class SnakeLabApp {
   safeRenderAll() {
     const preferredPollMs = this.state?.training ? TRAINING_API_POLL_MS : API_POLL_MS;
     this.resetPolling(preferredPollMs);
-    this.resetFramePolling();
     if (document.hidden) return;
+    if (performance.now() - this.lastGameRenderTime > 500) {
+      this.lastGameRenderSignature = "";
+    }
+    this.resetFramePolling();
+    this.renderGame();
     this.updateVisualizationVisibility();
     this.scheduleRender();
   }
@@ -1184,6 +1207,7 @@ class SnakeLabApp {
     ctx.font = "500 14px Aptos, Trebuchet MS, sans-serif";
     ctx.fillStyle = "#b4c7cf";
     ctx.fillText(`Поле: ${size}x${size} | Вход: ${this.currentInputLabel()}`, 28, 68);
+    this.lastGameRenderTime = performance.now();
   }
 
   renderNetworkGraph() {
