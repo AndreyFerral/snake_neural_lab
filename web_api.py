@@ -35,8 +35,14 @@ def log_perf(event: str, elapsed_ms: float, **fields: Any) -> None:
 def reset_session_perf_log() -> None:
     return
 
+
 class SnakeRequestHandler(SimpleHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    
+    # Оптимизация буферизации сокетов для сокращения числа системных вызовов
+    wbufsize = 65536
+    rbufsize = 65536
+    timeout = 5  # Защита от зависших потоков
 
     def __init__(self, *args: Any, directory: str | None = None, **kwargs: Any) -> None:
         super().__init__(*args, directory=directory or str(STATIC_ROOT), **kwargs)
@@ -51,29 +57,38 @@ class SnakeRequestHandler(SimpleHTTPRequestHandler):
     def backend(self) -> Any:
         return self.server.backend  # type: ignore[attr-defined]
 
+    # Кэширование статических ресурсов при отправке заголовков
+    def end_headers(self) -> None:
+        if not self.path.startswith("/api/"):
+            # Кэшируем фронтенд в браузере для избежания повторных чтений с диска
+            self.send_header("Cache-Control", "public, max-age=86400")
+        super().end_headers()
+
     def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         started_at = time.perf_counter()
         
-        # Используем оптимизированный упаковщик
         encoded = json_encode(payload)
         
-        self.send_response(status)
+        # Оптимизация: send_response_only не тратит ресурсы на генерацию даты и имени сервера
+        self.send_response_only(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
-        # Отключаем кэширование
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
         self.end_headers()
         
-        self.wfile.write(encoded)
+        try:
+            self.wfile.write(encoded)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            return
         
         elapsed_ms = (time.perf_counter() - started_at) * 1000.0
         if elapsed_ms >= SLOW_API_MS:
             log_perf("slow_send_json", elapsed_ms, status=int(status), bytes=len(encoded))
 
     def do_GET(self) -> None:
-        # Быстрый роутинг для частого запроса кадров
+        # Прямой роутинг для частого запроса кадров без парсинга URL
         if self.path == "/api/frame":
             self._send_json(self.backend.frame_snapshot())
             return
@@ -96,7 +111,7 @@ class SnakeRequestHandler(SimpleHTTPRequestHandler):
                 log_path = STATIC_ROOT / ".runtime" / "debug_log.jsonl"
                 if log_path.is_file():
                     data = log_path.read_text(encoding="utf-8")
-                    self.send_response(200)
+                    self.send_response_only(HTTPStatus.OK)
                     self.send_header("Content-Type", "application/jsonl; charset=utf-8")
                     self.send_header("Content-Disposition", 'attachment; filename="debug_log.jsonl"')
                     self.send_header("Content-Length", str(len(data)))
@@ -146,6 +161,7 @@ class SnakeRequestHandler(SimpleHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         return
 
+
 class SnakeHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -158,7 +174,7 @@ class SnakeHTTPServer(ThreadingHTTPServer):
 
     def server_bind(self):
         super().server_bind()
-        # ВАЖНО: Отключаем задержку TCP для мгновенной отправки кадров игры
+        # Отключаем задержку TCP (Алгоритм Нагла) для мгновенной передачи пакетов
         self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
@@ -167,6 +183,7 @@ class SnakeHTTPServer(ThreadingHTTPServer):
             return
         super().handle_error(request, client_address)
 
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Snake browser frontend with Python backend.")
     parser.add_argument("--host", default="127.0.0.1")
@@ -174,11 +191,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-cpu", action="store_true")
     return parser.parse_args()
 
+
 def backend_process_command(args: argparse.Namespace) -> list[str]:
     command = [sys.executable, str(Path(sys.argv[0]).resolve()), "--host", str(args.host), "--port", str(args.port)]
     if args.force_cpu:
         command.append("--force-cpu")
     return command
+
 
 def close_console_window() -> bool:
     if os.name != "nt": return False
@@ -188,12 +207,14 @@ def close_console_window() -> bool:
         return bool(ctypes.windll.user32.PostMessageW(hwnd, 0x0010, 0, 0)) if hwnd else False
     except Exception: return False
 
+
 def restart_backend_in_place(args: argparse.Namespace) -> None:
     command = backend_process_command(args)
     print("Restarting backend...")
     sys.stdout.flush()
     sys.stderr.flush()
     os.execv(sys.executable, command)
+
 
 def main(
     *,
@@ -226,7 +247,6 @@ def main(
     reset_session_perf_log()
     PID_PATH.write_text(f"process:{os.getpid()}", encoding="ascii")
     
-    # Теперь учитываем флаг force-cpu из аргументов
     backend = backend_class(force_cpu=args.force_cpu)
     handler = partial(SnakeRequestHandler, directory=str(STATIC_ROOT))
     server = SnakeHTTPServer((args.host, args.port), handler, backend)

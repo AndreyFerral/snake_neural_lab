@@ -83,6 +83,10 @@ class SnakeLabApp {
     this.lastStepReviewReason = "";
     this.lastStepReviewHistoryId = "";
     this.lastGameRenderSignature = "";
+    this.lastNetworkRenderSignature = "";
+    this.lastChartRenderSignature = "";
+    this.lastSnapshotRenderSignature = "";
+    this.lastGameRenderTime = 0;
     this.lastRewardRulesMarkup = "";
     this.lastDecisionStatsMarkup = "";
     this.forceStepLogScroll = false;
@@ -91,7 +95,6 @@ class SnakeLabApp {
     this.smartModelFocused = false;
     this.smartContextActive = false;
     this.lastSmartModelMarkup = "";
-    this.resizeFrameHandle = null;
     this.renderFrameHandle = null;
     this.renderFrameScheduledAt = 0;
     this.liveFrameRenderHandle = null;
@@ -99,9 +102,18 @@ class SnakeLabApp {
     this.heavyFrameHandle = null;
     this.pendingHeavyTasks = [];
     this.pendingHeavyTaskNames = new Set();
-    this.canvasSizeCache = new WeakMap();
-    this.gameBackgroundCache = null;
     this.pendingControlSync = false;
+
+    // Внедрение офскрин-рендеринга для кэширования сетки и градиента
+    this.gameBgCanvas = document.createElement("canvas");
+    this.gameBgCtx = this.gameBgCanvas.getContext("2d");
+    this.boardLayout = { boardX: 0, boardY: 0, boardSize: 0, cell: 0 };
+    this.bgDrawn = false;
+
+    this.canvasDimensions = new WeakMap();
+    this.initResizeObserver();
+
+    this.gameBackgroundCache = null;
 
     this.setHidden(this.networkPanel, false);
     this.setDecisionText("Подключение к Python backend...");
@@ -113,6 +125,31 @@ class SnakeLabApp {
 
   getCanvasContext(canvas) {
     return canvas ? canvas.getContext("2d") : null;
+  }
+
+  initResizeObserver() {
+    this.resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const canvas = entry.target;
+        const width = Math.max(1, Math.round(entry.contentRect.width || canvas.clientWidth || 1));
+        const height = Math.max(1, Math.round(entry.contentRect.height || canvas.clientHeight || 1));
+        
+        this.canvasDimensions.set(canvas, { width, height, dirty: true });
+      }
+      this.forceNextVisualRefresh();
+      this.scheduleRender();
+    });
+
+    [this.gameCanvas, this.networkCanvas, this.chartCanvas, this.deathSnapshotCanvas].forEach((canvas) => {
+      if (canvas) {
+        this.resizeObserver.observe(canvas);
+        this.canvasDimensions.set(canvas, {
+          width: canvas.width || 300,
+          height: canvas.height || 150,
+          dirty: true
+        });
+      }
+    });
   }
 
   setText(element, value) {
@@ -224,19 +261,24 @@ class SnakeLabApp {
   resizeCanvas(canvas, ctx) {
     if (!canvas || !ctx) return { width: 0, height: 0, resized: false };
     const dpr = Math.max(1, window.devicePixelRatio || 1);
-    const width = Math.max(1, Math.round(canvas.clientWidth || canvas.width || 1));
-    const height = Math.max(1, Math.round(canvas.clientHeight || canvas.height || 1));
-    const targetWidth = Math.round(width * dpr);
-    const targetHeight = Math.round(height * dpr);
-    const cached = this.canvasSizeCache.get(canvas);
-    const resized = !cached || cached.width !== width || cached.height !== height || cached.dpr !== dpr || canvas.width !== targetWidth || canvas.height !== targetHeight;
+    
+    let dim = this.canvasDimensions.get(canvas);
+    if (!dim) {
+      dim = { width: canvas.width || 300, height: canvas.height || 150, dirty: true };
+      this.canvasDimensions.set(canvas, dim);
+    }
+
+    const targetWidth = Math.round(dim.width * dpr);
+    const targetHeight = Math.round(dim.height * dpr);
+    const resized = dim.dirty || canvas.width !== targetWidth || canvas.height !== targetHeight;
+
     if (resized) {
       canvas.width = targetWidth;
       canvas.height = targetHeight;
-      this.canvasSizeCache.set(canvas, { width, height, dpr });
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      dim.dirty = false;
     }
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    return { width, height, resized };
+    return { width: dim.width, height: dim.height, resized };
   }
 
   pickTopIndices(values, count) {
@@ -263,17 +305,17 @@ class SnakeLabApp {
   }
 
   drawBoardFrame(ctx, boardX, boardY, boardSize, cells, options = {}) {
-    const glow = Number(options.glow ?? 6);
+    const glow = options.glow ?? 6;
     const strokeOffset = glow - 0.75;
     ctx.fillStyle = "rgba(255,255,255,0.04)";
     ctx.fillRect(boardX - glow, boardY - glow, boardSize + glow * 2, boardSize + glow * 2);
     ctx.strokeStyle = "rgba(255,255,255,0.09)";
-    ctx.lineWidth = Number(options.outerLineWidth ?? 1.5);
+    ctx.lineWidth = options.outerLineWidth ?? 1.5;
     ctx.strokeRect(boardX - strokeOffset, boardY - strokeOffset, boardSize + strokeOffset * 2, boardSize + strokeOffset * 2);
     ctx.fillStyle = "rgba(13, 30, 41, 0.96)";
     ctx.fillRect(boardX, boardY, boardSize, boardSize);
     ctx.strokeStyle = "rgba(255,255,255,0.08)";
-    ctx.lineWidth = Number(options.innerLineWidth ?? 1.5);
+    ctx.lineWidth = options.innerLineWidth ?? 1.5;
     const inset = ctx.lineWidth / 2;
     ctx.strokeRect(boardX + inset, boardY + inset, boardSize - inset * 2, boardSize - inset * 2);
     const cell = boardSize / cells;
@@ -294,20 +336,23 @@ class SnakeLabApp {
   }
 
   fillBoardCell(ctx, boardX, boardY, cell, gridX, gridY, options = {}) {
-    const inset = cell * Number(options.insetRatio ?? 0);
+    const insetRatio = options.insetRatio ?? 0;
+    const inset = cell * insetRatio;
     const sizePx = cell - inset * 2;
     ctx.fillStyle = options.fill ?? "rgba(13, 30, 41, 0.68)";
     if (options.rounded === false) {
       ctx.fillRect(boardX + gridX * cell + inset, boardY + gridY * cell + inset, sizePx, sizePx);
       return;
     }
+    const radiusRatio = options.radiusRatio ?? 0.24;
+    const minRadius = options.minRadius ?? 4;
     this.roundedRect(
       ctx,
       boardX + gridX * cell + inset,
       boardY + gridY * cell + inset,
       sizePx,
       sizePx,
-      Math.max(Number(options.minRadius ?? 4), cell * Number(options.radiusRatio ?? 0.24))
+      Math.max(minRadius, cell * radiusRatio)
     );
     ctx.fill();
   }
@@ -347,7 +392,7 @@ class SnakeLabApp {
       ctx.strokeStyle = "#44c8a2";
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
-      ctx.lineWidth = Math.max(Number(options.minLineWidth ?? 6), cell * Number(options.lineRatio ?? 0.58));
+      ctx.lineWidth = Math.max(options.minLineWidth ?? 6, cell * (options.lineRatio ?? 0.58));
       ctx.beginPath();
       snake.forEach((segment, index) => {
         const center = centerOf(segment);
@@ -361,31 +406,46 @@ class SnakeLabApp {
       const x = boardX + segment.x * cell + cell * 0.04;
       const y = boardY + segment.y * cell + cell * 0.04;
       const sizePx = cell * 0.92;
-      this.roundedRect(ctx, x, y, sizePx, sizePx, Math.max(Number(options.minRadius ?? 8), cell * Number(options.radiusRatio ?? 0.4)));
+      this.roundedRect(ctx, x, y, sizePx, sizePx, Math.max(options.minRadius ?? 8, cell * (options.radiusRatio ?? 0.4)));
       ctx.fillStyle = index === 0 ? "#d7fff4" : index === snake.length - 1 ? "#36b28b" : "#5cd6ad";
       ctx.fill();
     });
     return snake[0];
   }
 
+  // Оптимизированный рендеринг следа змеи (без строковой конкатенации в цикле)
   drawFoodTrail(ctx, boardX, boardY, cell, trail, options = {}) {
     if (!Array.isArray(trail) || !trail.length) return;
     const guard = options.guard ?? (() => true);
+    const baseAlpha = options.baseAlpha ?? 0.16;
+    const alphaScale = options.alphaScale ?? 0.20;
+    const baseSizeRatio = options.baseSizeRatio ?? 0.24;
+    const sizeScale = options.sizeScale ?? 0.10;
+    const strokeRgb = options.strokeRgb ?? "255, 214, 220";
+    const strokeAlphaScale = options.strokeAlphaScale ?? 0.7;
+
+    ctx.save();
+    // Использование глобальной альфы контекста вместо генерации строк rgba
+    ctx.fillStyle = "#ff526c";
+    ctx.strokeStyle = `rgb(${strokeRgb})`;
+    ctx.lineWidth = Math.max(options.minLineWidth ?? 1, cell * (options.lineRatio ?? 0.03));
+
     trail.forEach((marker, index) => {
       if (!marker || !guard(marker)) return;
       const freshness = (index + 1) / Math.max(1, trail.length);
-      const alpha = Number(options.baseAlpha ?? 0.16) + freshness * Number(options.alphaScale ?? 0.20);
-      const sizePx = cell * (Number(options.baseSizeRatio ?? 0.24) + freshness * Number(options.sizeScale ?? 0.10));
+      const alpha = baseAlpha + freshness * alphaScale;
+      const sizePx = cell * (baseSizeRatio + freshness * sizeScale);
       const offset = (cell - sizePx) / 2;
-      ctx.save();
+
       this.roundedRect(ctx, boardX + marker.x * cell + offset, boardY + marker.y * cell + offset, sizePx, sizePx, Math.max(3, sizePx * 0.30));
-      ctx.fillStyle = `rgba(255, 82, 108, ${alpha.toFixed(3)})`;
+      
+      ctx.globalAlpha = alpha;
       ctx.fill();
-      ctx.strokeStyle = `rgba(${options.strokeRgb ?? "255, 214, 220"}, ${(alpha * Number(options.strokeAlphaScale ?? 0.7)).toFixed(3)})`;
-      ctx.lineWidth = Math.max(Number(options.minLineWidth ?? 1), cell * Number(options.lineRatio ?? 0.03));
+      
+      ctx.globalAlpha = alpha * strokeAlphaScale;
       ctx.stroke();
-      ctx.restore();
     });
+    ctx.restore();
   }
 
   drawSnakeHead(ctx, boardX, boardY, cell, head, options = {}) {
@@ -393,7 +453,7 @@ class SnakeLabApp {
     const headX = boardX + head.x * cell + cell * 0.04;
     const headY = boardY + head.y * cell + cell * 0.04;
     const sizePx = cell * 0.92;
-    this.roundedRect(ctx, headX, headY, sizePx, sizePx, Math.max(Number(options.minRadius ?? 8), cell * Number(options.radiusRatio ?? 0.42)));
+    this.roundedRect(ctx, headX, headY, sizePx, sizePx, Math.max(options.minRadius ?? 8, cell * (options.radiusRatio ?? 0.42)));
     ctx.fillStyle = "#d7fff4";
     ctx.fill();
     ctx.strokeStyle = "rgba(9, 19, 27, 0.25)";
@@ -447,7 +507,12 @@ class SnakeLabApp {
     const boardX = Math.round((width - boardSize) / 2);
     const boardY = Math.round((height - boardSize) / 2);
     const cell = boardSize / size;
-    this.drawBoardFrame(ctx, boardX, boardY, boardSize, size, sceneOptions.frameOptions ?? {});
+
+    // Пропуск отрисовки рамки, если она уже нарисована на фоновом слое
+    if (!options.skipFrame) {
+      this.drawBoardFrame(ctx, boardX, boardY, boardSize, size, sceneOptions.frameOptions ?? {});
+    }
+
     if (food) this.fillBoardCell(ctx, boardX, boardY, cell, food.x, food.y, sceneOptions.foodCellOptions ?? { insetRatio: 0.08, radiusRatio: 0.24 });
     if (sceneOptions.clearOccupiedCells) {
       const clearOptions = sceneOptions.clearCellOptions ?? { fill: "rgba(13, 30, 41, 0.98)", insetRatio: 0, rounded: false };
@@ -472,15 +537,6 @@ class SnakeLabApp {
 
   bindEvents() {
     window.addEventListener("keydown", (event) => this.handleKeydown(event));
-    window.addEventListener("resize", () => {
-      if (this.resizeFrameHandle !== null) window.cancelAnimationFrame(this.resizeFrameHandle);
-      this.resizeFrameHandle = window.requestAnimationFrame(() => {
-        this.resizeFrameHandle = null;
-    this.lastGameRenderSignature = "";
-    this.lastGameRenderTime = 0;
-        this.safeRenderAll();
-      });
-    });
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) return;
       this.forceNextVisualRefresh();
@@ -512,7 +568,12 @@ class SnakeLabApp {
     this.runToggle?.addEventListener("click", () => this.sendCommand("toggle_running"));
     this.manualModeButton?.addEventListener("click", () => { if (this.state?.mode === "smart") this.smartContextActive = true; this.sendCommand("set_mode", "manual"); });
     this.aiModeButton?.addEventListener("click", () => { this.sendCommand("set_mode", this.smartContextActive ? "smart" : "ai"); });
-    this.trainToggle?.addEventListener("click", () => { if (this.trainToggle.disabled) return; this.sendCommand("toggle_training", !this.state?.training); });
+    
+    this.trainToggle?.addEventListener("click", () => { 
+      if (this.trainToggle.disabled) return; 
+      this.sendCommand("toggle_training", !this.state?.training); 
+    });
+
     this.resetAgentButton?.addEventListener("click", () => { if (this.resetAgentButton.disabled) return; this.sendCommand("reset_agent"); });
     this.restartBackendButton?.addEventListener("click", () => this.restartBackend());
     this.shutdownBackendButton?.addEventListener("click", () => this.shutdownBackend());
@@ -562,8 +623,17 @@ class SnakeLabApp {
   forceNextVisualRefresh() {
     this.lastPanelRenderAt = -Infinity; this.lastSnapshotRenderAt = -Infinity; this.lastChartRenderAt = -Infinity; this.lastNetworkRenderAt = -Infinity;
     this.lastNetworkPayloadAt = 0; this.lastDetailPayloadAt = 0; this.lastRenderedSnapshotKey = ""; this.lastDeathTimelineMarkup = ""; this.lastStepReviewSignature = "";
-    this.lastGameRenderSignature = ""; this.lastGameRenderTime = 0; this.lastRewardRulesMarkup = ""; this.lastDecisionStatsMarkup = ""; this.lastSmartModelMarkup = "";
+    this.lastGameRenderSignature = ""; this.lastNetworkRenderSignature = ""; this.lastChartRenderSignature = ""; this.lastSnapshotRenderSignature = "";
+    this.lastGameRenderTime = 0; this.lastRewardRulesMarkup = ""; this.lastDecisionStatsMarkup = ""; this.lastSmartModelMarkup = "";
     this.pendingHeavyTasks = []; this.pendingHeavyTaskNames.clear();
+    this.bgDrawn = false;
+    
+    [this.gameCanvas, this.networkCanvas, this.chartCanvas, this.deathSnapshotCanvas].forEach((canvas) => {
+      if (canvas) {
+        const dim = this.canvasDimensions.get(canvas);
+        if (dim) dim.dirty = true;
+      }
+    });
   }
 
   mergeDeferredState(nextState, previousState) {
@@ -720,19 +790,42 @@ class SnakeLabApp {
     });
   }
 
+  // Оптимизированное распределение рендеринга при активном воспроизведении
   renderAll() {
     if (!this.state) return;
     const now = performance.now();
-    const shouldRenderPanels = now - this.lastPanelRenderAt >= UI_PANEL_RENDER_MS;
-    if (shouldRenderPanels || this.pendingControlSync) { this.syncControlsFromState(); this.updateHeroBadges(); this.updateStats(); this.lastPanelRenderAt = now; this.pendingControlSync = false; }
+    const isRunning = this.state.running;
+
+    const shouldRenderPanels = now - this.lastPanelRenderAt >= (isRunning ? 300 : UI_PANEL_RENDER_MS);
+    if (shouldRenderPanels || this.pendingControlSync) { 
+      this.syncControlsFromState(); 
+      this.updateHeroBadges(); 
+      this.updateStats(); 
+      this.lastPanelRenderAt = now; 
+      this.pendingControlSync = false; 
+    }
+    
     this.renderGame();
+    
     const snapshot = this.state?.last_death_snapshot;
     const snapshotKey = snapshot ? `${snapshot.step_count ?? "-"}:${snapshot.score ?? "-"}:${snapshot.reason ?? "-"}` : "";
-    if (snapshotKey !== this.lastRenderedSnapshotKey || now - this.lastSnapshotRenderAt >= SNAPSHOT_RENDER_MS) { this.renderLastDeathSnapshot(); this.lastRenderedSnapshotKey = snapshotKey; this.lastSnapshotRenderAt = now; }
+    if (snapshotKey !== this.lastRenderedSnapshotKey || now - this.lastSnapshotRenderAt >= SNAPSHOT_RENDER_MS) { 
+      this.renderLastDeathSnapshot(); 
+      this.lastRenderedSnapshotKey = snapshotKey; 
+      this.lastSnapshotRenderAt = now; 
+    }
+    
     if (this.showNetwork) {
       const shouldRenderNetworkVisuals = this.shouldUseNetworkVisuals();
-      const shouldRenderNetwork = now - this.lastNetworkRenderAt >= NETWORK_RENDER_MS;
-      const shouldRenderChart = now - this.lastChartRenderAt >= CHART_RENDER_MS;
+      
+      // Троттлинг отрисовки сети при запущенной симуляции
+      const networkInterval = isRunning ? 400 : NETWORK_RENDER_MS;
+      const shouldRenderNetwork = now - this.lastNetworkRenderAt >= networkInterval;
+      
+      // Троттлинг графиков при запущенной симуляции
+      const chartInterval = isRunning ? 1500 : CHART_RENDER_MS;
+      const shouldRenderChart = now - this.lastChartRenderAt >= chartInterval;
+
       if (shouldRenderNetworkVisuals && shouldRenderNetwork) {
         this.lastNetworkRenderAt = now;
         this.queueHeavyRender("networkGraph", () => { if (this.shouldUseNetworkVisuals() && this.shouldShowNetworkGraph()) this.renderNetworkGraph(); });
@@ -953,11 +1046,19 @@ class SnakeLabApp {
   }
 
   renderLastDeathSnapshot() {
-    if (!this.deathSnapshotCtx || !this.deathSnapshotCanvas) return;
+    if (!this.deathSnapshotCtx || !this.deathSnapshotCanvas || !this.state) return;
+
     const snapshot = this.state?.last_death_snapshot;
+    const dim = this.canvasDimensions.get(this.deathSnapshotCanvas) || { width: this.deathSnapshotCanvas.width, height: this.deathSnapshotCanvas.height };
+    const snapshotKey = snapshot ? `${snapshot.step_count ?? "-"}:${snapshot.score ?? "-"}:${snapshot.reason ?? "-"}` : "";
+    const renderSignature = [dim.width, dim.height, snapshotKey, this.selectedDeathStepIndex].join("|");
+
+    if (!dim.dirty && renderSignature === this.lastSnapshotRenderSignature) return;
+    this.lastSnapshotRenderSignature = renderSignature;
+
     const ctx = this.deathSnapshotCtx;
     const { width, height } = this.resizeCanvas(this.deathSnapshotCanvas, ctx);
-    const snapshotKey = snapshot ? `${snapshot.step_count ?? "-"}:${snapshot.score ?? "-"}:${snapshot.reason ?? "-"}` : "";
+
     if (snapshotKey !== this.lastDeathSnapshotKey) { this.lastDeathSnapshotKey = snapshotKey; this.selectedDeathStepIndex = -1; }
     const { selectedStep, selectedIndex } = this.getSelectedDeathStep(snapshot);
     this.renderDeathStepTimeline(snapshot);
@@ -1020,7 +1121,6 @@ class SnakeLabApp {
     this.setText(this.deathChoiceMeta, choiceLine ?? "");
     this.setHidden(this.deathChoiceMeta, !choiceLine);
 
-    // === ИЗМЕНЕНИЕ: Формат голода и фикс 0 шагов ===
     const fallbackHungerSteps = Number(this.state?.stats?.hunger_steps ?? this.state?.game?.steps_without_food ?? 0);
     const stepsWithoutFood = Number(selectedStep.steps_without_food ?? selectedStep.last_steps_without_food ?? fallbackHungerSteps);
     const hungerInfo = (typeof outcomeReason === "string" && outcomeReason.startsWith("starvation")) ? `• ${stepsWithoutFood} шагов` : "";
@@ -1055,7 +1155,6 @@ class SnakeLabApp {
     const isDqn = this.state.agent_kind === "dqn" && !isSmart;
     const modeText = this.state.training ? "Обучение" : modeLabels[this.state.mode] ?? "ИИ";
     const smartModelName = this.state.smart_model?.label || this.state.smart_model?.name || "-";
-    const smartModelShort = String(smartModelName).length > 14 ? `${String(smartModelName).slice(0, 13)}...` : String(smartModelName);
     this.setText(this.modeStat, modeText);
     this.setText(this.epochStat, String(this.state.stats.episode));
     this.setText(this.scoreStat, String(this.state.game.score));
@@ -1106,60 +1205,53 @@ class SnakeLabApp {
     const nearBottom = this.stepReviewBody.scrollHeight - this.stepReviewBody.scrollTop - this.stepReviewBody.clientHeight < 24;
     this.setText(this.stepReviewLabel, `${visibleSteps.length} строк • последний шаг ${steps[steps.length - 1].step}${sourceLabel}`);
 
-	this.setHtml(this.stepReviewBody, visibleSteps.map((entry) => {
-		const sourceLabel = entry.random ? "random" : "q";
-		const reward = Number(entry.reward ?? 0);
-		const rewardText = reward.toFixed(3);
-		const moveArrow = this.arrowForAction(Number(entry.action ?? 0));
-		const stepStr = `#${String(entry.step).padStart(4, "0")}`;
+    this.setHtml(this.stepReviewBody, visibleSteps.map((entry) => {
+      const sourceLabel = entry.random ? "random" : "q";
+      const reward = Number(entry.reward ?? 0);
+      const rewardText = reward.toFixed(3);
+      const moveArrow = this.arrowForAction(Number(entry.action ?? 0));
+      const stepStr = `#${String(entry.step).padStart(4, "0")}`;
 
-		// 1. Собираем теги штрафов и причин
-		const penalties = Array.isArray(entry.penalties) ? entry.penalties : [];
-		const effectTags = penalties.map((reason) => this.penaltyEffectTag(reason)).filter(Boolean);
-		const reasonTag = stepReasonLabel(entry.reason);
-		if (reasonTag && reasonTag.trim() && !effectTags.includes(reasonTag)) {
-			effectTags.unshift(reasonTag);
-		}
+      const penalties = Array.isArray(entry.penalties) ? entry.penalties : [];
+      const effectTags = penalties.map((reason) => this.penaltyEffectTag(reason)).filter(Boolean);
+      const reasonTag = stepReasonLabel(entry.reason);
+      if (reasonTag && reasonTag.trim() && !effectTags.includes(reasonTag)) {
+        effectTags.unshift(reasonTag);
+      }
 
-		// 2. Формируем заметку о яблоке
-		const apple = entry.apple_opportunity;
-		if (apple?.adjacent) {
-			const appleDir = this.arrowForAction(Number(apple.action ?? 0));
-			const verdict = apple.safe ? "безопасно" : formatAppleVerdictTag(apple.verdict ?? "none");
-			const appleTag = `🍎 ${appleDir} ${verdict}`.trim();
-			if (!effectTags.some(t => t.includes("🍎"))) {
-				effectTags.push(appleTag);
-			}
-		}
+      const apple = entry.apple_opportunity;
+      if (apple?.adjacent) {
+        const appleDir = this.arrowForAction(Number(apple.action ?? 0));
+        const verdict = apple.safe ? "безопасно" : formatAppleVerdictTag(apple.verdict ?? "none");
+        const appleTag = `🍎 ${appleDir} ${verdict}`.trim();
+        if (!effectTags.some(t => t.includes("🍎"))) {
+          effectTags.push(appleTag);
+        }
+      }
 
-		// 3. Очищаем от пустых значений и дефисов
-		const cleanEvents = effectTags
-			.map(t => String(t).trim())
-			.filter(t => t && t !== "-" && t !== "  ");
+      const cleanEvents = effectTags
+        .map(t => String(t).trim())
+        .filter(t => t && t !== "-" && t !== "  ");
 
-		// 4. Собираем строку по шаблону: #0135 4.000 ↑ яблоко • 🍎 ↑ мало места • q
-		const headerParts = [stepStr, rewardText, moveArrow];
-		const extraParts = [...cleanEvents, sourceLabel];
-		const logText = headerParts.join(" ") + (extraParts.length ? " • " + extraParts.join(" • ") : "");
+      const headerParts = [stepStr, rewardText, moveArrow];
+      const extraParts = [...cleanEvents, sourceLabel];
+      const logText = headerParts.join(" ") + (extraParts.length ? " • " + extraParts.join(" • ") : "");
 
-		// 5. ПРИОРИТЕТ ЦВЕТОВ (строгий порядок: красный > зелёный > синий > жёлтый)
-			// Красим в красный только когда штраф реально применён на этом же шаге.
-			// Вердикт apple_opportunity может быть диагностическим и не означать штраф текущего шага.
-			const hasTailLost = penalties.includes("route_dead_end") || penalties.includes("tail_path_lost");
-		const isCollision = penalties.includes("wall_collision") || penalties.includes("body_collision");
-		const tookApple = entry.reason === "apple";
+      const hasTailLost = penalties.includes("route_dead_end") || penalties.includes("tail_path_lost");
+      const isCollision = penalties.includes("wall_collision") || penalties.includes("body_collision");
+      const tookApple = entry.reason === "apple";
 
-		let rowClass = "step-log-line log-yellow"; // Q по умолчанию
-		if (hasTailLost || isCollision || reward < -1.0) {
-			rowClass = "step-log-line log-red";    // ← Хвост/столкновение/штраф всегда красные, даже если взято яблоко
-		} else if (tookApple || reward > 1.0) {
-			rowClass = "step-log-line log-green";  // ← Яблоко зелёное, только если нет красных условий
-		} else if (entry.random) {
-			rowClass = "step-log-line log-blue";   // ← Random синий на нейтральных шагах
-		}
+      let rowClass = "step-log-line log-yellow";
+      if (hasTailLost || isCollision || reward < -1.0) {
+        rowClass = "step-log-line log-red";
+      } else if (tookApple || reward > 1.0) {
+        rowClass = "step-log-line log-green";
+      } else if (entry.random) {
+        rowClass = "step-log-line log-blue";
+      }
 
-		return `<div class="${rowClass}">${logText}</div>`;
-	}).join(""));
+      return `<div class="${rowClass}">${logText}</div>`;
+    }).join(""));
 
     this.lastStepReviewSignature = signature;
     this.lastStepReviewReason = lastStep.reason;
@@ -1167,25 +1259,84 @@ class SnakeLabApp {
     this.forceStepLogScroll = false;
   }
 
+  // Отрисовка статической части сцены на фоновом слое холста
+  drawStaticBackground(ctx, width, height, size) {
+    ctx.clearRect(0, 0, width, height);
+    
+    // Рисование градиентного фона
+    const background = ctx.createLinearGradient(0, 0, width, height);
+    background.addColorStop(0, "#09131b");
+    background.addColorStop(1, "#143244");
+    ctx.fillStyle = background;
+    ctx.fillRect(0, 0, width, height);
+
+    // Рисование сетки и рамки
+    const boardPadding = 18;
+    const boardSize = Math.min(width, height) - boardPadding * 2;
+    const boardX = Math.round((width - boardSize) / 2);
+    const boardY = Math.round((height - boardSize) / 2);
+    const cell = this.drawBoardFrame(ctx, boardX, boardY, boardSize, size, {
+      glow: 6,
+      outerLineWidth: 1.5,
+      innerLineWidth: 1.5
+    });
+
+    // Сохранение разметки во внутренний кеш
+    this.boardLayout = { boardX, boardY, boardSize, cell };
+  }
+
+  // Оптимизированный рендеринг игры с поддержкой офскрин-слоя фона
   renderGame() {
-    if (!this.gameCtx || !this.gameCanvas) return;
+    if (!this.gameCtx || !this.gameCanvas || !this.state) return;
     const ctx = this.gameCtx;
     const size = this.state.game.size;
+    
+    const dim = this.canvasDimensions.get(this.gameCanvas) || { width: this.gameCanvas.width, height: this.gameCanvas.height };
+    const frameId = this.state.frame_id ?? `${this.state.game.score}:${this.state.game.step_count}:${this.state.game.direction}`;
+    const gameSignature = [dim.width, dim.height, size, frameId, this.state.training ? 1 : 0, this.currentInputGrid()].join("|");
+    
+    if (!dim.dirty && gameSignature === this.lastGameRenderSignature) return;
+    this.lastGameRenderSignature = gameSignature;
+
     const { width, height, resized } = this.resizeCanvas(this.gameCanvas, ctx);
+
+    // Перерисовка фонового холста только при реальном изменении размеров окна
+    if (resized || !this.bgDrawn) {
+      this.gameBgCanvas.width = this.gameCanvas.width;
+      this.gameBgCanvas.height = this.gameCanvas.height;
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      this.gameBgCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      
+      this.drawStaticBackground(this.gameBgCtx, width, height, size);
+      this.bgDrawn = true;
+    }
+    
+    ctx.clearRect(0, 0, width, height);
+
+    // Быстрый перенос пикселей из фонового холста (без повторной отрисовки путей сетки)
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(this.gameBgCanvas, 0, 0);
+    ctx.restore();
+
+    // Отрисовка динамической части сцены ( skipFrame: true отключает избыточную перерисовку рамки )
     const snake = this.state.game.snake ?? [];
     const food = this.state.game.food;
     const eatenFoodTrail = this.state.game.eaten_food_trail ?? [];
-    const frameId = this.state.frame_id ?? `${this.state.game.score}:${this.state.game.step_count}:${this.state.game.direction}`;
-    const gameSignature = [width, height, size, frameId, this.state.training ? 1 : 0, this.currentInputGrid()].join("|");
-    if (!resized && gameSignature === this.lastGameRenderSignature) return;
-    this.lastGameRenderSignature = gameSignature;
-    ctx.clearRect(0, 0, width, height);
-    const backgroundKey = `${width}x${height}`;
-    if (!this.gameBackgroundCache || this.gameBackgroundCache.key !== backgroundKey) { const background = ctx.createLinearGradient(0, 0, width, height); background.addColorStop(0, "#09131b"); background.addColorStop(1, "#143244"); this.gameBackgroundCache = { key: backgroundKey, value: background }; }
-    ctx.fillStyle = this.gameBackgroundCache.value;
-    ctx.fillRect(0, 0, width, height);
     const occupiedBody = new Set(snake.slice(1).map((segment) => `${segment.x}:${segment.y}`));
-    this.drawSnakeScene(ctx, width, height, { size, snake, food, eatenFoodTrail }, { boardPadding: 18, showTrail: !this.state.training, trailOptions: { guard: (marker) => occupiedBody.has(`${marker.x}:${marker.y}`) }, headOptions: { direction: this.state.game.direction } });
+    
+    this.drawSnakeScene(ctx, width, height, 
+      { size, snake, food, eatenFoodTrail }, 
+      { 
+        boardPadding: 18, 
+        skipFrame: true, // Пропускаем отрисовку рамки/сетки поверх готового фона
+        showTrail: !this.state.training, 
+        trailOptions: { guard: (marker) => occupiedBody.has(`${marker.x}:${marker.y}`) }, 
+        headOptions: { direction: this.state.game.direction } 
+      }
+    );
+
+    // Отрисовка виджета счета
     ctx.fillStyle = "rgba(4, 14, 20, 0.72)";
     ctx.fillRect(14, 14, 280, 66);
     ctx.strokeStyle = "rgba(255,255,255,0.1)";
@@ -1200,7 +1351,15 @@ class SnakeLabApp {
   }
 
   renderNetworkGraph() {
-    if (!this.networkCtx || !this.networkCanvas) return;
+    if (!this.networkCtx || !this.networkCanvas || !this.state) return;
+
+    const dim = this.canvasDimensions.get(this.networkCanvas) || { width: this.networkCanvas.width, height: this.networkCanvas.height };
+    const frameId = this.state.frame_id ?? "";
+    const renderSignature = [dim.width, dim.height, frameId, this.state.input_mode].join("|");
+
+    if (!dim.dirty && renderSignature === this.lastNetworkRenderSignature) return;
+    this.lastNetworkRenderSignature = renderSignature;
+
     const ctx = this.networkCtx;
     const { width, height } = this.resizeCanvas(this.networkCanvas, ctx);
     const network = this.state.network ?? {};
@@ -1275,15 +1434,36 @@ class SnakeLabApp {
   drawOutputLayer(ctx, indices, positions, values, labels, mode = "q") { positions.forEach((position, offset) => { const index = indices[offset]; const value = values[index] ?? 0; this.roundedRect(ctx, position.x - 26, position.y - 18, 116, 36, 18); ctx.fillStyle = value === 0 ? "rgba(255,255,255,0.06)" : colorForActivation(value); ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,0.12)"; ctx.stroke(); ctx.fillStyle = "#08131d"; ctx.font = "700 14.5px Aptos, Trebuchet MS, sans-serif"; ctx.fillText(`${labels[index] ?? `Out-${index}`}`, position.x - 10, position.y + 5); }); }
 
   renderChart() {
-    if (!this.chartCtx || !this.chartCanvas) return;
-    const ctx = this.chartCtx;
-    const { width, height } = this.resizeCanvas(this.chartCanvas, ctx);
+    if (!this.chartCtx || !this.chartCanvas || !this.state) return;
+
+    const dim = this.canvasDimensions.get(this.chartCanvas) || { width: this.chartCanvas.width, height: this.chartCanvas.height };
     const points = this.state.history ?? [];
     const isSmart = this.state.mode === "smart";
     const isDqn = this.state.agent_kind === "dqn" && !isSmart;
+    const renderSignature = [dim.width, dim.height, points.length, isSmart, isDqn].join("|");
+
+    if (!dim.dirty && renderSignature === this.lastChartRenderSignature) return;
+    this.lastChartRenderSignature = renderSignature;
+
+    const ctx = this.chartCtx;
+    const { width, height } = this.resizeCanvas(this.chartCanvas, ctx);
     const metricLabel = isDqn ? "Loss" : isSmart ? "Счет" : "Fitness";
-    ctx.clearRect(0, 0, width, height); const gradient = ctx.createLinearGradient(0, 0, width, height); gradient.addColorStop(0, "#08131d"); gradient.addColorStop(1, "#0f2231"); ctx.fillStyle = gradient; ctx.fillRect(0, 0, width, height);
-    if (points.length < 2) { ctx.fillStyle = "#b4c7cf"; ctx.textAlign = "center"; ctx.font = "500 15px Aptos, Trebuchet MS, sans-serif"; drawCanvasLines(ctx, ["После нескольких эпизодов", `здесь появятся счет, награда и ${metricLabel.toLowerCase()}.`], width / 2, height / 2 - 8, 20); ctx.textAlign = "start"; return; }
+
+    ctx.clearRect(0, 0, width, height); 
+    const gradient = ctx.createLinearGradient(0, 0, width, height); 
+    gradient.addColorStop(0, "#08131d"); 
+    gradient.addColorStop(1, "#0f2231"); 
+    ctx.fillStyle = gradient; 
+    ctx.fillRect(0, 0, width, height);
+
+    if (points.length < 2) { 
+      ctx.fillStyle = "#b4c7cf"; 
+      ctx.textAlign = "center"; 
+      ctx.font = "500 15px Aptos, Trebuchet MS, sans-serif"; 
+      drawCanvasLines(ctx, ["После нескольких эпизодов", `здесь появятся счет, награда и ${metricLabel.toLowerCase()}.`], width / 2, height / 2 - 8, 20); 
+      ctx.textAlign = "start"; 
+      return; 
+    }
     const scores = points.map((point) => point.score); const rewards = points.map((point) => point.reward);
     const fitnesses = points.map((point) => { const value = Number(isDqn ? point.loss ?? 0 : isSmart ? point.score ?? 0 : point.fitness ?? 0); return Number.isFinite(value) ? value : 0; });
     const finiteFitnesses = fitnesses.filter(Number.isFinite); const movingAverage = (series, windowSize) => series.map((_, index) => { const start = Math.max(0, index - windowSize + 1); return average(series.slice(start, index + 1)); });
@@ -1303,7 +1483,24 @@ class SnakeLabApp {
     for (let index = 0; index <= 4; index += 1) { const value = mainMin + (mainRange / 4) * index; const y = mapMainY(value); ctx.beginPath(); ctx.moveTo(padLeft, y); ctx.lineTo(width - padRight, y); ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1; ctx.stroke(); ctx.fillStyle = "rgba(180,199,207,0.75)"; ctx.font = "11px Aptos, Trebuchet MS, sans-serif"; ctx.fillText(value.toFixed(1), 12, y + 4); }
     for (let index = 0; index <= 4; index += 1) { const value = fitnessMin + (fitnessRange / 4) * index; const y = mapFitnessY(value); ctx.fillStyle = "rgba(127,208,255,0.78)"; ctx.font = "11px Aptos, Trebuchet MS, sans-serif"; ctx.fillText(value.toFixed(2), width - padRight + 8, y + 4); }
     const drawSeries = (series, stroke, fillAlpha, mapY) => { const points2d = series.map((value, index) => ({ x: mapX(episodeSeries[index]), y: mapY(value) })); ctx.beginPath(); ctx.moveTo(points2d[0].x, points2d[0].y); for (let index = 1; index < points2d.length; index += 1) { const prev = points2d[index - 1]; const current = points2d[index]; const controlX = (prev.x + current.x) / 2; ctx.quadraticCurveTo(controlX, prev.y, current.x, current.y); } ctx.strokeStyle = stroke; ctx.lineWidth = 2.4; ctx.stroke(); ctx.beginPath(); ctx.moveTo(points2d[0].x, chartHeight + padTop); ctx.lineTo(points2d[0].x, points2d[0].y); for (let index = 1; index < points2d.length; index += 1) { const prev = points2d[index - 1]; const current = points2d[index]; const controlX = (prev.x + current.x) / 2; ctx.quadraticCurveTo(controlX, prev.y, current.x, current.y); } ctx.lineTo(points2d[points2d.length - 1].x, chartHeight + padTop); ctx.closePath(); ctx.fillStyle = `${stroke}${fillAlpha}`; ctx.fill(); };
-    const drawLineSeries = (series, stroke, mapY, lineWidth = 3.2) => { const points2d = series.map((value, index) => ({ x: mapX(episodeSeries[index]), y: mapY(value) })); ctx.save(); ctx.beginPath(); ctx.moveTo(points2d[0].x, points2d[0].y); for (let index = 1; index < points2d.length; index += 1) { const prev = points2d[index - 1]; const current = points2d[index]; const controlX = (prev.x + current.x) / 2; ctx.quadraticCurveTo(controlX, prev.y, current.x, current.y); } ctx.strokeStyle = stroke; ctx.lineWidth = lineWidth; ctx.lineCap = "round"; ctx.shadowColor = "rgba(237, 246, 249, 0.42)"; ctx.shadowBlur = 8; ctx.stroke(); ctx.restore(); };
+    
+    const drawLineSeries = (series, stroke, mapY, lineWidth = 3.2) => { 
+      const points2d = series.map((value, index) => ({ x: mapX(episodeSeries[index]), y: mapY(value) })); 
+      ctx.save(); 
+      ctx.beginPath(); 
+      ctx.moveTo(points2d[0].x, points2d[0].y); 
+      for (let index = 1; index < points2d.length; index += 1) { 
+        const prev = points2d[index - 1]; 
+        const current = points2d[index]; 
+        const controlX = (prev.x + current.x) / 2; 
+        ctx.quadraticCurveTo(controlX, prev.y, current.x, current.y); 
+      } 
+      ctx.strokeStyle = stroke; 
+      ctx.lineWidth = lineWidth; 
+      ctx.lineCap = "round"; 
+      ctx.stroke(); 
+      ctx.restore(); 
+    };
     drawSeries(scores, "#5cd6ad", "18", mapMainY); drawSeries(rewards, "#ffb347", "12", mapMainY); drawSeries(fitnesses, "#7fd0ff", "0f", mapFitnessY); drawLineSeries(scoreAverage20, "#edf6f9", mapMainY);
     [["Счет", "#5cd6ad", padLeft], ["Награда", "#ffb347", padLeft + 84], ["Срд счет", "#edf6f9", padLeft + 190], [metricLabel, "#7fd0ff", width - padRight - 76]].forEach(([label, color, x]) => { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, 18, 5, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = "#edf6f9"; ctx.font = "600 13px Aptos, Trebuchet MS, sans-serif"; ctx.fillText(label, x + 12, 22); });
   }
