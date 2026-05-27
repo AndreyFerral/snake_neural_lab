@@ -1141,7 +1141,13 @@ class SnakeLabApp {
 
   renderHungerStat() {
     if (this.epsilonStat?.previousElementSibling) this.epsilonStat.previousElementSibling.textContent = "";
-    this.setText(this.epsilonStat, "—");
+    const steps = Math.max(0, Number(this.state.stats?.hunger_steps ?? this.state.game?.steps_without_food ?? 0));
+    const budget = Math.max(1, Number(this.state.stats?.hunger_budget ?? 1));
+    const ratio = clamp(Number(this.state.stats?.hunger_ratio ?? steps / budget), 0, 1);
+    const percentValue = Math.round(ratio * 100);
+    const className = ratio >= 0.9 ? "hunger-meter is-danger" : ratio >= 0.65 ? "hunger-meter is-warn" : "hunger-meter";
+    const text = `${Math.round(steps)}/${Math.round(budget)}`;
+    this.setHtml(this.epsilonStat, `<span class="${className}" title="Шагов без яблока: ${Math.round(steps)} из ${Math.round(budget)}"><span class="hunger-meter__text"><span class="hunger-meter__label">Голод</span><span class="hunger-meter__value">${escapeText(text)}</span></span><span class="hunger-meter__track"><span class="hunger-meter__fill" style="--hunger-width: ${percentValue}%"></span></span></span>`);
   }
 
   updateStats() {

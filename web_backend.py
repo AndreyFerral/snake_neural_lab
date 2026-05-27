@@ -2003,6 +2003,14 @@ class SnakeWebBackend:
             "loss": 0.0 if not is_dqn else float(getattr(self.agent, "last_loss", 0.0)),
             "updates": 0 if not is_dqn else int(getattr(self.agent, "total_updates", 0)),
             "steps": self.game.step_count,
+            "hunger_steps": max(0, int(self.game.steps_without_food)),
+            "hunger_budget": hunger_budget_for(self.game.score, self.game.board_size),
+            "hunger_ratio": min(
+                1.0,
+                float(max(0, int(self.game.steps_without_food)))
+                / max(1.0, hunger_budget_for(self.game.score, self.game.board_size)),
+            ),
+            "max_hunger_steps": max(0, int(self.game.max_steps_without_food)),
         }
 
     def _frame_payload_unlocked(self) -> dict[str, Any]:
