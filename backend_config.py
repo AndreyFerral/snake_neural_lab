@@ -131,6 +131,64 @@ REWARD_CATALOG = {
     "victory": {"label": "Победа", "short_label": "Победа", "value": 10.0},
 }
 
+REASON_LABELS = {
+    "new_game": "Новая игра",
+    "step": "Шаг",
+    "turn": "Поворот",
+    "apple": "Яблоко",
+    "victory": "Победа",
+    "looping": "Ходит по кругу",
+    "tail_path_lost": "Потерян путь к хвосту",
+    "avoidable_collision": "Избежимое столкновение",
+    "blocked": "ход заблокирован",
+    "no_tail_after_apple": "нет пути к хвосту",
+    "not_enough_space": "мало места",
+    "safe": "безопасно",
+    "none": "нет",
+    "wall_collision": "Столкновение со стеной",
+    "body_collision": "Столкновение с телом",
+    "starvation": "Слишком долго без еды",
+    "starvation_timeout": "Голод: таймаут",
+    "starvation_loop": "Голод: зацикливание",
+    "starvation_food_unreachable": "Голод: еда недостижима",
+    "starvation_no_relayout_path": "Голод: нет перестройки",
+    "starvation_food_available": "Голод: еда доступна",
+    "starvation_safe_loop": "Голод: безопасная петля",
+    "starvation_endgame_trap": "Голод: эндшпильная ловушка",
+    "evolution_hunger_cut": "Отсев: голод",
+}
+
+SIGNAL_LABELS = {
+    "food_ahead": "🍎↑",
+    "food_right": "🍎→",
+    "food_left": "🍎←",
+    "danger_forward": "💀 ↑",
+    "danger_right": "💀 →",
+    "danger_left": "💀 ←",
+    "apple_step_forward": "🍎+↑",
+    "apple_step_right": "🍎+→",
+    "apple_step_left": "🍎+←",
+    "forward_food_reachable": "↑ food",
+    "forward_tail_reachable": "↑ tail",
+    "forward_enough_space": "↑ space",
+    "forward_food_tail_safe": "↑ safe",
+    "left_food_reachable": "← food",
+    "left_tail_reachable": "← tail",
+    "left_enough_space": "← space",
+    "left_food_tail_safe": "← safe",
+    "right_food_reachable": "→ food",
+    "right_tail_reachable": "→ tail",
+    "right_enough_space": "→ space",
+    "right_food_tail_safe": "→ safe",
+}
+
+TERMINAL_REASONS = tuple(dict.fromkeys((
+    "wall_collision",
+    "body_collision",
+    *(reason for reason in STEP_REASON_ORDER if reason.startswith("starvation")),
+    "victory",
+)))
+
 def hunger_budget_for(score: int, board_size: int) -> float:
     board_cells = max(1, board_size * board_size)
     snake_length = min(float(score + 3), float(board_cells))
