@@ -1,3 +1,79 @@
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+function escapeText(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+function average(values) {
+  if (!values.length) { return 0; }
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+function quantile(values, ratio) {
+  if (!values.length) { return 0; }
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = clamp((sorted.length - 1) * ratio, 0, sorted.length - 1);
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+  if (lower === upper) { return sorted[lower]; }
+  const fraction = index - lower;
+  return sorted[lower] * (1 - fraction) + sorted[upper] * fraction;
+}
+function colorForActivation(value) {
+  const normalized = clamp((value + 1) / 2, 0, 1);
+  const hue = 32 + normalized * 128;
+  const lightness = 28 + normalized * 42;
+  return `hsl(${hue}, 78%, ${lightness}%)`;
+}
+function drawCanvasLines(ctx, lines, x, y, lineHeight) {
+  lines.forEach((line, index) => {
+    ctx.fillText(line, x, y + index * lineHeight);
+  });
+}
+function formatReason(reason) {
+  const runtimeMap = (typeof REASON_LABELS === "object" && REASON_LABELS) ? REASON_LABELS : null;
+  return runtimeMap?.[reason] ?? reason ?? "Ожидание";
+}
+function formatAppleVerdictTag(verdict) {
+  const map = {
+    safe: "безопасно",
+    blocked: "блок",
+    no_tail_after_apple: "нет хвоста",
+    not_enough_space: "мало места",
+    none: "-",
+  };
+  return map[verdict] ?? formatReason(verdict);
+}
+function formatSignalLabel(label) {
+  const runtimeMap = (typeof SIGNAL_LABELS === "object" && SIGNAL_LABELS) ? SIGNAL_LABELS : null;
+  return runtimeMap?.[label] ?? label;
+}
+async function apiJson(path, options = {}) {
+  const timeoutMs = Number(options.timeoutMs ?? 6000);
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  const { timeoutMs: _timeoutMs, headers: optionHeaders, ...fetchOptions } = options;
+  const headers = { ...(optionHeaders ?? {}) };
+  if (fetchOptions.body !== undefined && !Object.keys(headers).some((key) => key.toLowerCase() === "content-type")) {
+    headers["Content-Type"] = "application/json";
+  }
+  const response = await fetch(path, {
+    cache: "no-store",
+    headers,
+    ...fetchOptions,
+    signal: controller.signal,
+  }).finally(() => window.clearTimeout(timeout));
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
 const DEFAULT_INPUT_GRID = 25;
 const DEFAULT_OUTPUT_LABELS = ["Вперед", "Влево", "Вправо"];
 const OUTPUT_DISPLAY_ORDER = [0, 1, 2];
@@ -58,17 +134,26 @@ const FRAME_PRESERVED_FIELDS = [
   ...DEFERRED_STATE_FIELDS,
 ];
 const NETWORK_CONNECTION_KEYS = ["global_hidden1", "hidden1_hidden2", "hidden2_output", "hidden2_value"];
-const TERMINAL_REASONS = new Set([
-  "wall_collision",
-  "body_collision",
-  "starvation",
-  "starvation_food_unreachable",
-  "starvation_no_relayout_path",
-  "starvation_food_available",
-  "starvation_safe_loop",
-  "starvation_endgame_trap",
-  "victory",
-]);
+const DEFAULT_TERMINAL_REASONS = [];
+const TERMINAL_REASONS = new Set(DEFAULT_TERMINAL_REASONS);
+let REASON_LABELS = Object.freeze({});
+let SIGNAL_LABELS = Object.freeze({});
+function applyRuntimeReasonConfig(state) {
+  if (!state || typeof state !== "object") return;
+  const terminalReasons = Array.isArray(state.terminal_reasons) ? state.terminal_reasons : null;
+  if (terminalReasons) {
+    TERMINAL_REASONS.clear();
+    terminalReasons.forEach((reason) => TERMINAL_REASONS.add(String(reason)));
+  }
+  const reasonLabels = state.reason_labels;
+  if (reasonLabels && typeof reasonLabels === "object") {
+    REASON_LABELS = Object.freeze({ ...reasonLabels });
+  }
+  const signalLabels = state.signal_labels;
+  if (signalLabels && typeof signalLabels === "object") {
+    SIGNAL_LABELS = Object.freeze({ ...signalLabels });
+  }
+}
 const KEY_DIRECTIONS = Object.freeze({
   arrowup: 0,
   w: 0,

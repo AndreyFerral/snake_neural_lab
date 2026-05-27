@@ -51,6 +51,9 @@ from backend_config import (
     STARTUP_BOARD_SIZE,
     STEP_REASON_ORDER,
     PENALTY_CATALOG,
+    REASON_LABELS,
+    SIGNAL_LABELS,
+    TERMINAL_REASONS,
     REWARD_CATALOG,
     hunger_budget_for,
 )
@@ -2051,6 +2054,9 @@ class SnakeWebBackend:
             "stats": self._stats_payload(),
             "action_scores": q_values_list,
             "q_values": q_values_list,
+            "reason_labels": dict(REASON_LABELS),
+            "signal_labels": dict(SIGNAL_LABELS),
+            "terminal_reasons": list(TERMINAL_REASONS),
         }
 
     def _update_frame_cache(self) -> None:
@@ -2085,6 +2091,9 @@ class SnakeWebBackend:
                 "stats": self._stats_payload(),
                 "action_scores": self.last_q_values.tolist(),
                 "q_values": self.last_q_values.tolist(),
+                "reason_labels": dict(REASON_LABELS),
+                "signal_labels": dict(SIGNAL_LABELS),
+                "terminal_reasons": list(TERMINAL_REASONS),
             }
         try:
             payload = self._frame_payload_unlocked()
@@ -2177,17 +2186,18 @@ class SnakeWebBackend:
                 "action_scores": self.last_q_values.tolist(),
                 "q_values": self.last_q_values.tolist(),
                 "network": self._network_payload() if include_network else None,
+                "reason_labels": dict(REASON_LABELS),
+                "signal_labels": dict(SIGNAL_LABELS),
+                "terminal_reasons": list(TERMINAL_REASONS),
             }
             if include_details:
-                terminal_reasons = {"wall_collision", "body_collision", "victory"}
-                terminal_reasons.update(reason for reason in STEP_REASON_ORDER if reason.startswith("starvation"))
                 step_review_source = "current"
                 step_review_payload: list[dict[str, Any]] = list(self.step_review_entries)
                 if (
                     self.training
                     and self.running
                     and not step_review_payload
-                    and self.last_outcome_reason in terminal_reasons
+                    and self.last_outcome_reason in TERMINAL_REASONS
                     and self.last_completed_step_review_entries
                 ):
                     step_review_source = "last_death"
