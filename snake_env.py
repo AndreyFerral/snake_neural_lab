@@ -12,11 +12,7 @@ from backend_config import (
     ENDGAME_FILL_RATIO,
     MODEL_ACTION_LABELS,
     TAIL_PATH_LOST_PENALTY,
-    STEP_PENALTY,
-    TURN_PENALTY,
     DEATH_PENALTY,
-    DISTANCE_SHAPING_FACTOR,
-    hunger_budget_for,
 )
 
 # Типы для причин завершения игры
@@ -26,9 +22,6 @@ GameEndReason = Literal[
     "body_collision",
     "apple",
     "victory",
-    "starvation",
-    "starvation_timeout",
-    "starvation_loop",
     "restart_pending",
     "shutdown_pending",
 ]
@@ -39,9 +32,6 @@ PenaltyReason = Literal[
     "avoidable_collision",
     "looping",
     "tail_path_lost",
-    "starvation",
-    "starvation_timeout",
-    "starvation_loop",
 ]
 
 
@@ -667,18 +657,13 @@ class SnakeEnv:
         head, move = self.snake[0], DIRECTIONS[chosen_direction]
         next_head = (head[0] + move[0], head[1] + move[1])
         will_eat = next_head == self.food
-        manhattan_before = abs(head[0] - self.food[0]) + abs(head[1] - self.food[1])
 
         # В начале step(), до self.step_count += 1:
         self._obs_cache_step = -1
         self._obs_cache_vec = None
 
-        # Постоянный штраф за каждый шаг + штраф за поворот
-        is_turn = chosen_direction != previous_direction
-        reward = -STEP_PENALTY
-        if is_turn:
-            reward -= TURN_PENALTY
-        reason = "turn"
+        reward = 0.0
+        reason = "step"
         penalty_reasons = []
         self.last_dist_shaping = 0.0
 
@@ -717,12 +702,6 @@ class SnakeEnv:
                 if tail in self.eaten_food_trail:
                     self.eaten_food_trail.remove(tail)
 
-                # Награда/штраф за изменение расстояния до еды
-                manhattan_after = abs(next_head[0] - self.food[0]) + abs(next_head[1] - self.food[1])
-                dist_shaping = (manhattan_before - manhattan_after) * DISTANCE_SHAPING_FACTOR
-                reward += dist_shaping
-                self.last_dist_shaping = dist_shaping
-
                 # Штрафы за петли
                 loop_penalty = 0.0
                 revisit_count = sum(1 for p in self.recent_heads if p == next_head)
@@ -738,16 +717,7 @@ class SnakeEnv:
                     reward -= min(0.35, loop_penalty)
                     penalty_reasons.append("looping")
 
-                # Голодание и тупики
-                hunger_budget = hunger_budget_for(self.score, self.board_size)
-                timed_out = self.steps_without_food > hunger_budget
-                compact_loop = self._has_compact_head_loop(next_head)
-                if timed_out or compact_loop:
-                    self.done = True
-                    reward = -DEATH_PENALTY
-                    reason = "starvation_loop" if compact_loop else "starvation_timeout"
-                    penalty_reasons.append(reason)
-
+                # Счётчик голода остаётся только для UI/метрик: без смерти от голода.
             # Проверка потери пути к хвосту — применяется и при поедании яблока тоже
             if self._tail_path_lost_now():
                 reward -= TAIL_PATH_LOST_PENALTY
