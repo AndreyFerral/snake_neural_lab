@@ -43,10 +43,7 @@ SAVE_THROTTLE_SECONDS = 8.0
 APPLE_REWARD = 4.0
 TRAP_AFTER_APPLE_PENALTY = 3.0
 TAIL_PATH_LOST_PENALTY = 10.0
-STEP_PENALTY = 0.08
-TURN_PENALTY = 0.1
 DEATH_PENALTY = 8.0
-DISTANCE_SHAPING_FACTOR = 0.08
 DQN_TAIL_PATH_LOST_REPLAY_EXTRA_COPIES = 4
 ELITE_EPISODE_MAX_TRANSITIONS = 320
 EPISODE_TRANSITION_LIMIT = 2_000
@@ -70,25 +67,12 @@ STEP_REASON_ORDER = (
     "looping",
     "wall_collision",
     "body_collision",
-    "starvation",
-    "starvation_timeout",
-    "starvation_loop",
-    "starvation_food_unreachable",
-    "starvation_food_available",
-    "starvation_safe_loop",
     "victory",
 )
 DEATH_REASON_ORDER = (
     "victory",
     "wall_collision",
     "body_collision",
-    "starvation",
-    "starvation_timeout",
-    "starvation_loop",
-    "starvation_food_unreachable",
-    "starvation_no_relayout_path",
-    "starvation_food_available",
-    "starvation_safe_loop",
 )
 PERF_LOG_MAX_BYTES = 512_000
 SLOW_API_MS = 35.0
@@ -101,15 +85,9 @@ NETWORK_INPUT_PAD_VALUE = 0.0
 # --- Каталог штрафов для UI (строится автоматически из констант) ---
 # (catalog_id, label, short_label, константа)
 _PENALTY_MAP = [
-    ("step",             "Шаг",            "Шаг",            STEP_PENALTY),
-    ("turn",             "Поворот",        "Поворот",        TURN_PENALTY),
     ("wall_collision",   "Смерть: стена",  "Стена",          DEATH_PENALTY),
     ("body_collision",   "Смерть: тело",   "Тело",           DEATH_PENALTY),
-    ("starvation",       "Голодание",      "Голод",          DEATH_PENALTY),
-    ("starvation_timeout", "Голодание: таймаут", "Голод: таймаут", DEATH_PENALTY),
-    ("starvation_loop",  "Голодание: цикл", "Голод: цикл",   DEATH_PENALTY),
     ("tail_path_lost",   "Нет пути к хвосту", "Потеря хвоста", TAIL_PATH_LOST_PENALTY),
-    ("trap_after_apple", "Тупик после 🍎", "Тупик после 🍎", TRAP_AFTER_APPLE_PENALTY),
 ]
 
 PENALTY_CATALOG = {
