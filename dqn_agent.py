@@ -52,6 +52,7 @@ class ReplayBuffer:
         self.beta = float(beta_start)
         self.beta_increment = float(beta_increment)
         self.priority_epsilon = float(priority_epsilon)
+        self._priority_cap = float(np.finfo(np.float32).max)
 
     def __len__(self) -> int:
         return len(self.buffer)
@@ -74,16 +75,22 @@ class ReplayBuffer:
             bool(done),
             float(priority_scale),
         )
-        priority = self.max_priority * max(1.0, float(priority_scale))
+        scale = max(1.0, float(priority_scale))
+        if not np.isfinite(scale):
+            scale = 1.0
+        base_priority = self.max_priority if np.isfinite(self.max_priority) and self.max_priority > 0.0 else 1.0
+        priority = base_priority * scale
+        if not np.isfinite(priority):
+            priority = self._priority_cap
         if len(self.buffer) < self.capacity:
             index = len(self.buffer)
             self.buffer.append(item)
         else:
             index = self.position
             self.buffer[index] = item
-        safe_priority = min(float(priority), np.finfo(np.float32).max)
+        safe_priority = min(max(float(priority), self.priority_epsilon), self._priority_cap)
         self.priorities[index] = safe_priority
-        self.max_priority = max(self.max_priority, float(priority))
+        self.max_priority = max(min(base_priority, self._priority_cap), safe_priority)
         self.position = (index + 1) % self.capacity
 
     def sample(
@@ -127,9 +134,18 @@ class ReplayBuffer:
             index = int(index)
             if not 0 <= index < size:
                 continue
-            boosted = max(float(priority), self.priority_epsilon) * max(1.0, float(scale))
-            self.priorities[index] = min(boosted, np.finfo(np.float32).max)
-            self.max_priority = max(self.max_priority, float(boosted))
+            safe_scale = max(1.0, float(scale))
+            if not np.isfinite(safe_scale):
+                safe_scale = 1.0
+            safe_priority = max(float(priority), self.priority_epsilon)
+            if not np.isfinite(safe_priority):
+                safe_priority = self._priority_cap
+            boosted = safe_priority * safe_scale
+            if not np.isfinite(boosted):
+                boosted = self._priority_cap
+            clipped = min(max(boosted, self.priority_epsilon), self._priority_cap)
+            self.priorities[index] = clipped
+            self.max_priority = max(min(self.max_priority, self._priority_cap), clipped)
 
 
 class DQNAgent:

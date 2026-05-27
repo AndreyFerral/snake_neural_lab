@@ -27,6 +27,8 @@ GameEndReason = Literal[
     "apple",
     "victory",
     "starvation",
+    "starvation_timeout",
+    "starvation_loop",
     "restart_pending",
     "shutdown_pending",
 ]
@@ -38,6 +40,8 @@ PenaltyReason = Literal[
     "looping",
     "tail_path_lost",
     "starvation",
+    "starvation_timeout",
+    "starvation_loop",
 ]
 
 
@@ -736,10 +740,12 @@ class SnakeEnv:
 
                 # Голодание и тупики
                 hunger_budget = hunger_budget_for(self.score, self.board_size)
-                if self.steps_without_food > hunger_budget or self._has_compact_head_loop(next_head):
+                timed_out = self.steps_without_food > hunger_budget
+                compact_loop = self._has_compact_head_loop(next_head)
+                if timed_out or compact_loop:
                     self.done = True
                     reward = -DEATH_PENALTY
-                    reason = "starvation"
+                    reason = "starvation_loop" if compact_loop else "starvation_timeout"
                     penalty_reasons.append(reason)
 
             # Проверка потери пути к хвосту — применяется и при поедании яблока тоже
