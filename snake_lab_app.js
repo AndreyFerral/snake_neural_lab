@@ -600,6 +600,7 @@ class SnakeLabApp {
       const forcePanelRefresh = this.shouldForcePanelRefresh(type);
       if (response.state) {
         this.state = this.isFrameOnlyState(response.state) && this.state ? this.mergeFrameState(response.state, this.state) : this.mergeDeferredState(response.state, this.state);
+        applyRuntimeReasonConfig(this.state);
         this.pendingControlSync = true;
         this.stateDetailsFresh = false;
         if (forcePanelRefresh) this.forceNextVisualRefresh();
@@ -706,6 +707,7 @@ class SnakeLabApp {
       else if (nextState.network) this.lastNetworkPayloadAt = now;
       if (shouldFetchDetails) this.lastDetailPayloadAt = now;
       this.state = this.mergeDeferredState(nextState, previousState);
+      applyRuntimeReasonConfig(this.state);
       this.pendingControlSync = true;
       this.stateDetailsFresh = Boolean(shouldFetchDetails && nextState.global_signals);
       if (this.stateDetailsFresh) this.captureStableHeroProfile();
@@ -728,6 +730,7 @@ class SnakeLabApp {
       const nextFrameId = Number(frameState?.frame_id ?? previousFrameId);
       if (Number.isFinite(previousFrameId) && Number.isFinite(nextFrameId) && nextFrameId === previousFrameId) return;
       this.state = this.mergeFrameState(frameState, this.state);
+      applyRuntimeReasonConfig(this.state);
       this.stateDetailsFresh = false;
       this.renderGame();
     } catch (error) { if (Date.now() >= this.restartPendingUntil) console.warn("Snake frame error:", error); } finally { this.isFetchingFrame = false; }
@@ -1027,7 +1030,8 @@ class SnakeLabApp {
     const recentList = Array.isArray(bucket.recent) ? bucket.recent : [];
     const recentCounts = {};
     recentList.forEach((item) => { recentCounts[item] = (recentCounts[item] ?? 0) + 1; });
-    const outcomeOrder = ["victory", "wall_collision", "body_collision", "starvation", "starvation_food_unreachable", "starvation_no_relayout_path", "starvation_food_available", "starvation_safe_loop", "starvation_endgame_trap"];
+    const terminalReasonsOrdered = Array.from(TERMINAL_REASONS);
+    const outcomeOrder = ["victory", ...terminalReasonsOrdered.filter((reason) => reason !== "victory")];
     const keys = [...Object.keys(allCounts)].filter((key) => Number(allCounts[key] ?? 0) > 0).sort((a, b) => { const left = outcomeOrder.includes(a) ? outcomeOrder.indexOf(a) : outcomeOrder.length; const right = outcomeOrder.includes(b) ? outcomeOrder.indexOf(b) : outcomeOrder.length; return left - right || a.localeCompare(b); });
     const allTotal = Object.values(allCounts).reduce((sum, value) => sum + Number(value || 0), 0);
     const recentTotal = recentList.length;
