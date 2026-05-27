@@ -221,7 +221,7 @@ class EvolutionAgent:
         apple_value = float(score) * 220.0 + float(score * score) * 12.0
         survival_value = min(float(steps), float(board_cells * 2)) * 0.025
         reward_value = float(reward) * 4.0
-        death_penalties = {"wall_collision": 210.0, "body_collision": 260.0, "starvation": 135.0, "starvation_food_unreachable": 115.0, "starvation_no_relayout_path": 150.0, "starvation_food_available": 560.0, "starvation_safe_loop": 390.0, EVOLUTION_HUNGER_CULL_REASON: 520.0}
+        death_penalties = {"wall_collision": 210.0, "body_collision": 260.0, EVOLUTION_HUNGER_CULL_REASON: 520.0}
         death_penalty = death_penalties.get(reason, 0.0)
         if reason in {"wall_collision", "body_collision"}:
             early_target = max(40, board_size * 5)
@@ -237,27 +237,21 @@ class EvolutionAgent:
             if reason == "body_collision":
                 death_penalty += max(0.0, float(3 - score)) * 30.0
                 death_penalty += max(0.0, float(board_size * 2.5 - steps)) * 0.9
-        if reason == "starvation_safe_loop":
-            death_penalty += max(0.0, float(22 - score)) * 180.0 + min(620.0, max(0.0, float(steps - board_size * board_size * 0.55)) * 0.85)
-        if reason == "starvation_food_available":
-            death_penalty += max(0.0, float(16 - score)) * 155.0 + min(980.0, max(0.0, float(steps - board_size * board_size * 0.3)) * 1.25)
         trap_after_apple_penalty = float(max(0, trap_after_apple_count)) * 650.0
         avoidable_collision_penalty = float(max(0, avoidable_collision_count)) * 900.0
-        if reason.startswith("starvation") and score > 0:
-            death_penalty *= 1.0 if reason in {"starvation_safe_loop", "starvation_food_available"} else max(0.68, 1.0 - min(score, 7) * 0.045)
-        if reason.startswith("starvation") or reason == EVOLUTION_HUNGER_CULL_REASON:
+        if reason == EVOLUTION_HUNGER_CULL_REASON:
             death_penalty *= EVOLUTION_STARVATION_DEATH_MULTIPLIER
         efficiency_budget = max(35.0, board_size * 3.0 + float(score) * board_size * 2.5)
         inefficient_steps = max(0.0, float(steps) - efficiency_budget)
-        efficiency_penalty = inefficient_steps * (0.9 if reason in {"starvation_safe_loop", "starvation_food_available"} else (0.55 if reason.startswith("starvation") else 0.24))
-        if reason.startswith("starvation") or reason == EVOLUTION_HUNGER_CULL_REASON:
+        efficiency_penalty = inefficient_steps * (0.55 if reason == EVOLUTION_HUNGER_CULL_REASON else 0.24)
+        if reason == EVOLUTION_HUNGER_CULL_REASON:
             efficiency_penalty *= EVOLUTION_STARVATION_EFFICIENCY_MULTIPLIER
         if score == 0:
             efficiency_penalty *= 1.45
         hunger_budget = hunger_budget_for(score, board_size)
         hunger_overage = max(0.0, float(max_steps_without_food) - hunger_budget)
         hunger_penalty = hunger_overage * hunger_overage * 4.0
-        if reason.startswith("starvation") or reason == EVOLUTION_HUNGER_CULL_REASON:
+        if reason == EVOLUTION_HUNGER_CULL_REASON:
             hunger_penalty *= EVOLUTION_STARVATION_HUNGER_MULTIPLIER
         if score <= max(3, int(board_cells * 0.12)):
             hunger_penalty *= 3.0
@@ -276,7 +270,7 @@ class EvolutionAgent:
             - avoidable_collision_penalty
         )
         # Не закрепляем поведение "умереть от голода": голодные эпизоды принудительно опускаем.
-        if reason.startswith("starvation") or reason == EVOLUTION_HUNGER_CULL_REASON:
+        if reason == EVOLUTION_HUNGER_CULL_REASON:
             fitness = min(fitness, EVOLUTION_STARVATION_FITNESS_FLOOR)
         return fitness
 
