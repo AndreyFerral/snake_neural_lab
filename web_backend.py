@@ -63,6 +63,15 @@ from evolution_agent import EvolutionAgent, ParallelEvolutionRunner
 from snake_env import SnakeEnv, relative_to_absolute
 from smart_agent import SmartH5Agent, smart_model_candidates
 
+
+def safe_hunger_budget_for(score: int, board_size: int) -> float:
+    try:
+        return float(hunger_budget_for(score, board_size))
+    except NameError:
+        board_cells = max(1, int(board_size) * int(board_size))
+        snake_length = min(float(int(score) + 3), float(board_cells))
+        return float(board_size) * 4.0 + snake_length * 1.0
+
 # =========================================================================
 # ЖЁСТКАЯ ФИКСАЦИЯ: ТОЛЬКО СИГНАЛЫ + АВТОПОДПИСЬ АРХИТЕКТУРЫ
 # =========================================================================
@@ -2004,11 +2013,11 @@ class SnakeWebBackend:
             "updates": 0 if not is_dqn else int(getattr(self.agent, "total_updates", 0)),
             "steps": self.game.step_count,
             "hunger_steps": max(0, int(self.game.steps_without_food)),
-            "hunger_budget": hunger_budget_for(self.game.score, self.game.board_size),
+            "hunger_budget": safe_hunger_budget_for(self.game.score, self.game.board_size),
             "hunger_ratio": min(
                 1.0,
                 float(max(0, int(self.game.steps_without_food)))
-                / max(1.0, hunger_budget_for(self.game.score, self.game.board_size)),
+                / max(1.0, safe_hunger_budget_for(self.game.score, self.game.board_size)),
             ),
             "max_hunger_steps": max(0, int(self.game.max_steps_without_food)),
         }
