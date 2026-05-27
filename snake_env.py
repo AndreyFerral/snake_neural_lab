@@ -11,7 +11,6 @@ from backend_config import (
     DIRECTIONS,
     ENDGAME_FILL_RATIO,
     MODEL_ACTION_LABELS,
-    TAIL_PATH_LOST_PENALTY,
     DEATH_PENALTY,
 )
 
@@ -31,7 +30,6 @@ PenaltyReason = Literal[
     "body_collision",
     "avoidable_collision",
     "looping",
-    "tail_path_lost",
 ]
 
 
@@ -40,10 +38,7 @@ class AppleOpportunitySafe(TypedDict):
     action: int
     action_label: str
     safe: bool
-    verdict: Literal["blocked", "no_tail_after_apple", "not_enough_space", "safe"]
-    tail_reachable: float
-    enough_space: float
-    food_tail_safe: float
+    verdict: Literal["blocked", "safe"]
 
 
 class AppleOpportunityNone(TypedDict):
@@ -151,7 +146,6 @@ class SnakeEnv:
         self.last_dist_shaping = 0.0
         self.last_reason = "new_game"
         self.last_penalty_reasons: list[str] = []
-        self.tail_path_lost_penalty_active = False
         self.trap_after_apple_count = 0
         self.avoidable_collision_count = 0
         self.eaten_food_trail: Deque[tuple[int, int]] = deque(maxlen=24)
@@ -206,21 +200,9 @@ class SnakeEnv:
                 continue
 
             signals = self._lookahead_signals_for_absolute_direction(absolute_direction)
-            blocked, food_reachable, tail_reachable, enough_space, food_tail_safe = signals
-
-            safe = (
-                blocked < 0.5
-                and food_tail_safe > 0.5
-                and (tail_reachable > 0.5 or enough_space > 0.5)
-            )
-            if blocked >= 0.5:
-                verdict = "blocked"
-            elif food_tail_safe < 0.5:
-                verdict = "no_tail_after_apple"
-            elif tail_reachable < 0.5 and enough_space < 0.5:
-                verdict = "not_enough_space"
-            else:
-                verdict = "safe"
+            blocked, food_reachable = signals
+            safe = blocked < 0.5 and food_reachable > 0.5
+            verdict = "blocked" if blocked >= 0.5 else "safe"
 
             return {
                 "adjacent": True,
@@ -228,9 +210,6 @@ class SnakeEnv:
                 "action_label": MODEL_ACTION_LABELS[relative_action],
                 "safe": safe,
                 "verdict": verdict,
-                "tail_reachable": tail_reachable,
-                "enough_space": enough_space,
-                "food_tail_safe": food_tail_safe,
             }
         return {"adjacent": False, "action": None, "safe": False, "verdict": "none"}
 
@@ -244,49 +223,23 @@ class SnakeEnv:
     def relative_move_safety(self) -> dict[str, dict[str, float]]:
         result: dict[str, dict[str, float]] = {}
         for key, relative_action in (("forward", 0), ("left", 1), ("right", 2)):
-            blocked, food, tail, space, safe = self._lookahead_signals_for_relative_action(
-                relative_action
-            )
+            blocked, food = self._lookahead_signals_for_relative_action(relative_action)
             result[key] = {
                 "risk": blocked,
                 "food": food,
-                "tail": tail,
-                "space": space,
-                "safe": safe,
             }
         return result
 
     def _is_dead_end_without_alternative(self) -> bool:
         for relative_action in range(len(MODEL_ACTION_LABELS)):
-            blocked, _, tail, space, _ = self._lookahead_signals_for_relative_action(
-                relative_action
-            )
-            if blocked < 0.5 and (tail > 0.5 or space > 0.5):
+            blocked, _ = self._lookahead_signals_for_relative_action(relative_action)
+            if blocked < 0.5:
                 return False
         return True
-
-    def _current_tail_reachable(self) -> bool:
-        if len(self.snake) <= 1:
-            return True
-        head, tail = self.snake[0], self.snake[-1]
-        blocked_without_tail = set(self.snake[1:-1])
-        return self._has_path(head, tail, blocked_without_tail)
 
     def _is_endgame(self) -> bool:
         return len(self.snake) >= self.board_size * self.board_size * ENDGAME_FILL_RATIO
 
-    def _minimum_useful_no_tail_area(self) -> float:
-        return float(max(4, min(len(self.snake), self.board_size)))
-
-    def _tail_path_lost_now(self) -> bool:
-        tail_reachable = self._current_tail_reachable()
-        if tail_reachable:
-            self.tail_path_lost_penalty_active = False
-            return False
-        if self.tail_path_lost_penalty_active:
-            return False
-        self.tail_path_lost_penalty_active = True
-        return True
 
     def _is_avoidable_collision(self, chosen_relative_action: int) -> bool:
         chosen_blocked = self._lookahead_signals_for_relative_action(
@@ -465,25 +418,6 @@ class SnakeEnv:
             remaining.difference_update(component)
         return components
 
-    def _food_tail_safe_after_path_for(
-        self,
-        path: list[tuple[int, int]] | None,
-        snake: list[tuple[int, int]],
-        food: tuple[int, int],
-    ) -> float:
-        if not path:
-            return 0.0
-        simulated_snake = list(snake)
-        for next_cell in path[1:]:
-            ate_food = next_cell == food
-            simulated_snake.insert(0, next_cell)
-            if not ate_food:
-                simulated_snake.pop()
-        if len(simulated_snake) <= 1:
-            return 1.0
-        head, tail = simulated_snake[0], simulated_snake[-1]
-        return 1.0 if self._has_path(head, tail, set(simulated_snake[1:-1])) else 0.0
-
     def _strategic_space_metrics_for(
         self, snake: list[tuple[int, int]], food: tuple[int, int]
     ) -> dict[str, float]:
@@ -506,7 +440,6 @@ class SnakeEnv:
         result = {
             "food_reachable": food_reachable,
             "food_area_ratio": clamp(food_area_count / total_walkable, 0.0, 1.0),
-            "food_tail_safe": self._food_tail_safe_after_path_for(path_to_food, snake, food),
             "pocket_count_norm": min(1.0, pocket_count / (self.board_size / 2.0)),
             "largest_pocket_ratio": clamp(largest_pocket / total_walkable, 0.0, 1.0),
             "head_area_ratio": clamp(len(head_area) / total_walkable, 0.0, 1.0),
@@ -565,21 +498,6 @@ class SnakeEnv:
         self._path_cache[cache_key] = res
         return res
 
-    def _best_no_tail_area(self) -> float:
-        best_area = 0.0
-        for rel_act in range(len(MODEL_ACTION_LABELS)):
-            probe = self._post_move_space_probe(relative_to_absolute(self.direction, rel_act))
-            if probe["blocked"] < 0.5 and probe["tail"] < 0.5:
-                best_area = max(best_area, probe["area"])
-        return best_area
-
-    def _has_available_tail_path(self) -> bool:
-        for rel_act in range(len(MODEL_ACTION_LABELS)):
-            probe = self._post_move_space_probe(relative_to_absolute(self.direction, rel_act))
-            if probe["blocked"] < 0.5 and probe["tail"] >= 0.5:
-                return True
-        return False
-
     def _lookahead_signals_for_absolute_direction(
         self, absolute_direction: int
     ) -> list[float]:
@@ -595,38 +513,16 @@ class SnakeEnv:
 
         probe = self._post_move_space_probe(absolute_direction)
         if probe["blocked"] >= 0.5:
-            res = [1.0, 0.0, 0.0, 0.0, 0.0]
+            res = [1.0, 0.0]
             self._path_cache[cache_key] = tuple(res)
             return res
 
         sim_snake = probe["simulated_snake"]
         blocked_cells = set(sim_snake[1:])
         food_reach = 1.0 if self._has_path(probe["next_head"], self.food, blocked_cells) else 0.0
-        tail_reach = probe["tail"]
-
-        if tail_reach >= 0.5:
-            enough_space = 1.0
-        elif self._has_available_tail_path():
-            enough_space = 0.0
-        else:
-            best_area = self._best_no_tail_area()
-            enough_space = (
-                1.0
-                if best_area >= self._minimum_useful_no_tail_area() and probe["area"] >= best_area
-                else 0.0
-            )
-
-        path_to_food = (
-            [probe["next_head"]]
-            if probe["next_head"] == self.food
-            else self._shortest_path(probe["next_head"], self.food, blocked_cells)
-        )
         res = [
             0.0,
             food_reach,
-            tail_reach,
-            enough_space,
-            self._food_tail_safe_after_path_for(path_to_food, sim_snake, self.food),
         ]
         self._path_cache[cache_key] = tuple(res)
         return res
@@ -718,11 +614,6 @@ class SnakeEnv:
                     penalty_reasons.append("looping")
 
                 # Счётчик голода остаётся только для UI/метрик: без смерти от голода.
-            # Проверка потери пути к хвосту — применяется и при поедании яблока тоже
-            if self._tail_path_lost_now():
-                reward -= TAIL_PATH_LOST_PENALTY
-                penalty_reasons.append("tail_path_lost")
-
             self.recent_heads.append(next_head)
 
         self.last_reward = reward
@@ -773,9 +664,6 @@ class SnakeEnv:
             self._danger_for_relative_action(0),
             self._danger_for_relative_action(2),
             self._danger_for_relative_action(1),
-            *self._lookahead_signals_for_relative_action(0)[1:],
-            *self._lookahead_signals_for_relative_action(1)[1:],
-            *self._lookahead_signals_for_relative_action(2)[1:],
         ]
         self._obs_cache_step = self.step_count
         self._obs_cache_vec = np.array(signals, dtype=np.float32)
@@ -798,7 +686,6 @@ class SnakeEnv:
             "last_reward": self.last_reward,
             "last_reason": self.last_reason,
             "last_penalty_reasons": list(self.last_penalty_reasons),
-            "tail_path_lost_penalty_active": self.tail_path_lost_penalty_active,
             "trap_after_apple_count": self.trap_after_apple_count,
             "avoidable_collision_count": self.avoidable_collision_count,
             "eaten_food_trail": [[x, y] for x, y in self.eaten_food_trail],

@@ -993,9 +993,9 @@ class SnakeLabApp {
       const metrics = safety?.[key] ?? {};
       const risk = Number(metrics.risk ?? risks?.[key] ?? 0);
       const rowClass = absoluteDirection === selectedDirection ? ' class="is-selected"' : "";
-      return [`<tr${rowClass}>`, `<td>${label}</td>`, `<td>${percent(risk)}</td>`, `<td>${percent(metrics.food)}</td>`, `<td>${percent(metrics.tail)}</td>`, `<td>${percent(metrics.space)}</td>`, `<td>${percent(metrics.safe)}</td>`, "</tr>"].join("");
+      return [`<tr${rowClass}>`, `<td>${label}</td>`, `<td>${percent(risk)}</td>`, `<td>${percent(metrics.food)}</td>`, "</tr>"].join("");
     }).join("");
-    this.setHtml(this.deathRiskTable, `<table class="death-risk-table"><thead><tr><th>Ход</th><th>Риск</th><th>Еда</th><th>Хвост</th><th>Место</th><th>После ябл.</th></tr></thead><tbody>${rows}</tbody></table>`);
+    this.setHtml(this.deathRiskTable, `<table class="death-risk-table"><thead><tr><th>Ход</th><th>Риск</th><th>Еда</th></tr></thead><tbody>${rows}</tbody></table>`);
   }
 
   getSelectedDeathStep(snapshot) {
@@ -1125,10 +1125,7 @@ class SnakeLabApp {
     this.setText(this.deathChoiceMeta, choiceLine ?? "");
     this.setHidden(this.deathChoiceMeta, !choiceLine);
 
-    const fallbackHungerSteps = Number(this.state?.stats?.hunger_steps ?? this.state?.game?.steps_without_food ?? 0);
-    const stepsWithoutFood = Number(selectedStep.steps_without_food ?? selectedStep.last_steps_without_food ?? fallbackHungerSteps);
-    const hungerInfo = (typeof outcomeReason === "string" && outcomeReason.startsWith("starvation")) ? `• ${stepsWithoutFood} шагов` : "";
-    this.setText(this.deathSnapshotMeta, [`${stepLabel}`, `Итог: ${formatReason(outcomeReason)}${hungerInfo}`, `Счет: ${selectedStep.score ?? 0} • Шагов: ${selectedStep.step_count ?? 0} • Длина: ${snake.length}`].filter(Boolean).join("\n"));
+    this.setText(this.deathSnapshotMeta, [`${stepLabel}`, `Итог: ${formatReason(outcomeReason)}`, `Счет: ${selectedStep.score ?? 0} • Шагов: ${selectedStep.step_count ?? 0} • Длина: ${snake.length}`].filter(Boolean).join("\n"));
   }
 
   renderRewardRules() {
@@ -1144,7 +1141,7 @@ class SnakeLabApp {
 
   renderHungerStat() {
     if (this.epsilonStat?.previousElementSibling) this.epsilonStat.previousElementSibling.textContent = "";
-    const steps = Math.max(0, Number(this.state.stats?.hunger_steps ?? 0));
+    const steps = Math.max(0, Number(this.state.stats?.hunger_steps ?? this.state.game?.steps_without_food ?? 0));
     const budget = Math.max(1, Number(this.state.stats?.hunger_budget ?? 1));
     const ratio = clamp(Number(this.state.stats?.hunger_ratio ?? steps / budget), 0, 1);
     const percentValue = Math.round(ratio * 100);
@@ -1204,7 +1201,7 @@ class SnakeLabApp {
     const shouldUpdateDuringTraining = selectedHistory || !this.state?.training || !this.state?.running || stepReviewSource === "current" || isDeathLog || TERMINAL_REASONS.has(lastStep.reason);
     if (!force && this.state?.training && !shouldUpdateDuringTraining && this.lastStepReviewSignature) { this.setText(this.stepReviewLabel, `${visibleSteps.length} строк • последний шаг ${lastStep.step} • обновление на паузе/смерти`); return; }
     if (!force && signature === this.lastStepReviewSignature && lastStep.reason === this.lastStepReviewReason) return;
-    const stepReasonLabel = (reason) => { if (reason === "apple") return "яблоко"; if (reason === "victory") return "win"; if (reason === "wall_collision") return "стена"; if (reason === "body_collision") return "тело"; if (typeof reason === "string" && reason.startsWith("starvation")) return "голод"; return "  "; };
+    const stepReasonLabel = (reason) => { if (reason === "apple") return "яблоко"; if (reason === "victory") return "win"; if (reason === "wall_collision" || reason === "body_collision") return "смерть"; return "  "; };
     const forceScroll = this.forceStepLogScroll;
     const nearBottom = this.stepReviewBody.scrollHeight - this.stepReviewBody.scrollTop - this.stepReviewBody.clientHeight < 24;
     this.setText(this.stepReviewLabel, `${visibleSteps.length} строк • последний шаг ${steps[steps.length - 1].step}${sourceLabel}`);
@@ -1241,7 +1238,7 @@ class SnakeLabApp {
       const extraParts = [...cleanEvents, sourceLabel];
       const logText = headerParts.join(" ") + (extraParts.length ? " • " + extraParts.join(" • ") : "");
 
-      const hasTailLost = penalties.includes("route_dead_end") || penalties.includes("tail_path_lost");
+      const hasTailLost = false;
       const isCollision = penalties.includes("wall_collision") || penalties.includes("body_collision");
       const tookApple = entry.reason === "apple";
 
@@ -1392,8 +1389,6 @@ class SnakeLabApp {
     const signalGroups = [
       { title: "Еда", labels: ["food_ahead", "food_left", "food_right", "apple_step_forward", "apple_step_left", "apple_step_right"] },
       { title: "Риск", labels: ["danger_forward", "danger_left", "danger_right"] },
-      { title: "Безопасность", labels: ["forward_food_reachable", "left_food_reachable", "right_food_reachable", "forward_tail_reachable", "left_tail_reachable", "right_tail_reachable", "forward_enough_space", "left_enough_space", "right_enough_space", "forward_food_tail_safe", "left_food_tail_safe", "right_food_tail_safe"] },
-      { title: "Маршрут", labels: ["forward_route_follow", "left_route_follow", "right_route_follow", "forward_route_apple_line", "left_route_apple_line", "right_route_apple_line", "forward_route_return", "left_route_return", "right_route_return"] },
     ].map((group) => ({ ...group, labels: group.labels.filter((label) => globalSignalLabelSet.has(label)) })).filter((group) => group.labels.length > 0);
     const inputWidth = Math.max(220, Math.min(255, width * 0.27)); const inputX = padX; const inputY = contentTop + 4;
     const hidden1X = Math.max(inputX + inputWidth + 76, width * 0.44); const hidden2X = Math.max(hidden1X + 160, width * 0.62); const outputX = width - padX - 74;

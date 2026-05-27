@@ -15,18 +15,6 @@ GLOBAL_SIGNAL_LABELS = (
     "danger_forward",
     "danger_right",
     "danger_left",
-    "forward_food_reachable",
-    "forward_tail_reachable",
-    "forward_enough_space",
-    "forward_food_tail_safe",
-    "left_food_reachable",
-    "left_tail_reachable",
-    "left_enough_space",
-    "left_food_tail_safe",
-    "right_food_reachable",
-    "right_tail_reachable",
-    "right_enough_space",
-    "right_food_tail_safe",
 )
 GLOBAL_SIGNAL_INDEX = {label: index for index, label in enumerate(GLOBAL_SIGNAL_LABELS)}
 DIRECTIONS = (
@@ -42,9 +30,7 @@ AVERAGE_SCORE_WINDOW_RATIO = 0.25
 SAVE_THROTTLE_SECONDS = 8.0
 APPLE_REWARD = 4.0
 TRAP_AFTER_APPLE_PENALTY = 3.0
-TAIL_PATH_LOST_PENALTY = 10.0
 DEATH_PENALTY = 8.0
-DQN_TAIL_PATH_LOST_REPLAY_EXTRA_COPIES = 4
 ELITE_EPISODE_MAX_TRANSITIONS = 320
 EPISODE_TRANSITION_LIMIT = 2_000
 DQN_DEATH_REPLAY_EXTRA_COPIES = 3
@@ -85,9 +71,7 @@ NETWORK_INPUT_PAD_VALUE = 0.0
 # --- Каталог штрафов для UI (строится автоматически из констант) ---
 # (catalog_id, label, short_label, константа)
 _PENALTY_MAP = [
-    ("wall_collision",   "Смерть: стена",  "Стена",          DEATH_PENALTY),
-    ("body_collision",   "Смерть: тело",   "Тело",           DEATH_PENALTY),
-    ("tail_path_lost",   "Нет пути к хвосту", "Потеря хвоста", TAIL_PATH_LOST_PENALTY),
+    ("death",   "Смерть",  "Смерть",          DEATH_PENALTY),
 ]
 
 PENALTY_CATALOG = {
@@ -116,24 +100,13 @@ REASON_LABELS = {
     "apple": "Яблоко",
     "victory": "Победа",
     "looping": "Ходит по кругу",
-    "tail_path_lost": "Потерян путь к хвосту",
     "avoidable_collision": "Избежимое столкновение",
     "blocked": "ход заблокирован",
-    "no_tail_after_apple": "нет пути к хвосту",
-    "not_enough_space": "мало места",
     "safe": "безопасно",
     "none": "нет",
-    "wall_collision": "Столкновение со стеной",
-    "body_collision": "Столкновение с телом",
-    "starvation": "Слишком долго без еды",
-    "starvation_timeout": "Голод: таймаут",
-    "starvation_loop": "Голод: зацикливание",
-    "starvation_food_unreachable": "Голод: еда недостижима",
-    "starvation_no_relayout_path": "Голод: нет перестройки",
-    "starvation_food_available": "Голод: еда доступна",
-    "starvation_safe_loop": "Голод: безопасная петля",
-    "starvation_endgame_trap": "Голод: эндшпильная ловушка",
-    "evolution_hunger_cut": "Отсев: голод",
+    "wall_collision": "Смерть",
+    "body_collision": "Смерть",
+    "death": "Смерть",
 }
 
 SIGNAL_LABELS = {
@@ -146,24 +119,11 @@ SIGNAL_LABELS = {
     "apple_step_forward": "🍎+↑",
     "apple_step_right": "🍎+→",
     "apple_step_left": "🍎+←",
-    "forward_food_reachable": "↑ food",
-    "forward_tail_reachable": "↑ tail",
-    "forward_enough_space": "↑ space",
-    "forward_food_tail_safe": "↑ safe",
-    "left_food_reachable": "← food",
-    "left_tail_reachable": "← tail",
-    "left_enough_space": "← space",
-    "left_food_tail_safe": "← safe",
-    "right_food_reachable": "→ food",
-    "right_tail_reachable": "→ tail",
-    "right_enough_space": "→ space",
-    "right_food_tail_safe": "→ safe",
 }
 
 TERMINAL_REASONS = tuple(dict.fromkeys((
     "wall_collision",
     "body_collision",
-    *(reason for reason in STEP_REASON_ORDER if reason.startswith("starvation")),
     "victory",
 )))
 
