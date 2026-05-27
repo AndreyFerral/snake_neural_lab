@@ -1177,8 +1177,6 @@ class SnakeWebBackend:
             return 6.0
         if done and reason in {"wall_collision", "body_collision"}:
             return 4.0 if reason == "wall_collision" else 5.0
-        if done and reason.startswith("starvation"):
-            return DQN_STARVATION_PRIORITY_SCALE
         if "trap_after_apple" in penalty_reasons:
             return 2.5
         return 1.0
@@ -1186,8 +1184,6 @@ class SnakeWebBackend:
     def _dqn_extra_replay_count(self, *, done: bool, reason: str, penalty_reasons: list[str]) -> int:
         if self.agent_kind != "dqn":
             return 0
-        if done and reason.startswith("starvation"):
-            return DQN_STARVATION_EXTRA_REPLAY_COPIES
         if done and reason in DEATH_REASON_ORDER and reason != "victory":
             return DQN_DEATH_REPLAY_EXTRA_COPIES
         return 0
@@ -1986,9 +1982,6 @@ class SnakeWebBackend:
         is_dqn = self.agent_kind == "dqn" and self.mode != "smart"
         replay_buffer = getattr(self.agent, "replay_buffer", None)
         buffer_size = len(replay_buffer) if replay_buffer is not None else 0
-        hunger_budget = hunger_budget_for(self.game.score, self.game.board_size)
-        hunger_steps = max(0, int(self.game.steps_without_food))
-        hunger_ratio = min(1.0, float(hunger_steps) / max(1.0, hunger_budget))
         return {
             "episode": self.episode_counter,
             "best_score": self.best_score,
@@ -1997,10 +1990,6 @@ class SnakeWebBackend:
             "reward": self.live_reward,
             "fitness": self.fitness_ema,
             "mutation": 0.0 if self.mode == "smart" else getattr(self.agent, "mutation_rate", 0.0),
-            "hunger_steps": hunger_steps,
-            "hunger_budget": hunger_budget,
-            "hunger_ratio": hunger_ratio,
-            "max_hunger_steps": max(0, int(self.game.max_steps_without_food)),
             "generation": 0 if self.mode == "smart" else getattr(self.agent, "generation", 0),
             "individual": 0 if self.mode == "smart" else getattr(self.agent, "current_index", 0) + 1,
             "population": 0 if self.mode == "smart" else getattr(self.agent, "population_size", 1),
@@ -2015,6 +2004,14 @@ class SnakeWebBackend:
             "loss": 0.0 if not is_dqn else float(getattr(self.agent, "last_loss", 0.0)),
             "updates": 0 if not is_dqn else int(getattr(self.agent, "total_updates", 0)),
             "steps": self.game.step_count,
+            "hunger_steps": max(0, int(self.game.steps_without_food)),
+            "hunger_budget": hunger_budget_for(self.game.score, self.game.board_size),
+            "hunger_ratio": min(
+                1.0,
+                float(max(0, int(self.game.steps_without_food)))
+                / max(1.0, hunger_budget_for(self.game.score, self.game.board_size)),
+            ),
+            "max_hunger_steps": max(0, int(self.game.max_steps_without_food)),
         }
 
     def _frame_payload_unlocked(self) -> dict[str, Any]:
