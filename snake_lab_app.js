@@ -1216,19 +1216,11 @@ class SnakeLabApp {
       const penalties = Array.isArray(entry.penalties) ? entry.penalties : [];
       const effectTags = penalties.map((reason) => this.penaltyEffectTag(reason)).filter(Boolean);
       const reasonTag = stepReasonLabel(entry.reason);
-      if (reasonTag && reasonTag.trim() && !effectTags.includes(reasonTag)) {
+      const hasDetailedDeathTag = effectTags.some((tag) => String(tag).startsWith("смерть:"));
+      if (reasonTag && reasonTag.trim() && !effectTags.includes(reasonTag) && !(reasonTag === "смерть" && hasDetailedDeathTag)) {
         effectTags.unshift(reasonTag);
       }
 
-      const apple = entry.apple_opportunity;
-      if (apple?.adjacent) {
-        const appleDir = this.arrowForAction(Number(apple.action ?? 0));
-        const verdict = apple.safe ? "безопасно" : formatAppleVerdictTag(apple.verdict ?? "none");
-        const appleTag = `🍎 ${appleDir} ${verdict}`.trim();
-        if (!effectTags.some(t => t.includes("🍎"))) {
-          effectTags.push(appleTag);
-        }
-      }
 
       const cleanEvents = effectTags
         .map(t => String(t).trim())
