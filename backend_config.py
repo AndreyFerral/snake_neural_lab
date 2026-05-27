@@ -104,8 +104,8 @@ REASON_LABELS = {
     "blocked": "ход заблокирован",
     "safe": "безопасно",
     "none": "нет",
-    "wall_collision": "Смерть",
-    "body_collision": "Смерть",
+    "wall_collision": "Смерть: стена",
+    "body_collision": "Смерть: тело",
     "death": "Смерть",
 }
 
