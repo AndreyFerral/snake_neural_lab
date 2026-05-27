@@ -745,7 +745,7 @@ class SnakeEnv:
                 if timed_out or compact_loop:
                     self.done = True
                     reward = -DEATH_PENALTY
-                    reason = "starvation_timeout" if timed_out else "starvation_loop"
+                    reason = "starvation_loop" if compact_loop else "starvation_timeout"
                     penalty_reasons.append(reason)
 
             # Проверка потери пути к хвосту — применяется и при поедании яблока тоже
