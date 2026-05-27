@@ -55,7 +55,6 @@ from backend_config import (
     SIGNAL_LABELS,
     TERMINAL_REASONS,
     REWARD_CATALOG,
-    hunger_budget_for,
 )
 
 from debug_logger import finish_episode, record_step, start_episode
