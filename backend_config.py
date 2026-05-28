@@ -69,19 +69,10 @@ NETWORK_INPUT_ADAPTER_MODE = "strict"  # strict | trim | pad
 NETWORK_INPUT_WARN_ON_ADAPT = True
 NETWORK_INPUT_PAD_VALUE = 0.0
 
-# --- Каталог штрафов для UI (строится автоматически из констант) ---
-# (catalog_id, label, short_label, константа)
-_PENALTY_MAP = [
-    ("death",   "Смерть",  "Смерть",          DEATH_PENALTY),
-]
-
 PENALTY_CATALOG = {
-    cid: {"label": label, "short_label": short_label, "value": -value}
-    for cid, label, short_label, value in _PENALTY_MAP
+    "death": {"label": "Смерть", "short_label": "Смерть", "value": -DEATH_PENALTY},
+    "looping": {"label": "Цикл", "short_label": "Цикл", "value": "до -0.35"},
 }
-
-# Исключения (не ложатся в шаблон)
-PENALTY_CATALOG["looping"] = {"label": "Цикл", "short_label": "Цикл", "value": "до -0.35"}
 
 REWARD_CATALOG = {
     "apple": {"label": "Яблоко", "short_label": "Яблоко", "value": APPLE_REWARD},
@@ -118,20 +109,20 @@ SIGNAL_LABELS = {
     "tail_ahead": "🐍↑",
     "tail_right": "🐍→",
     "tail_left": "🐍←",
-    "tail_blocked_forward": "🔗↑",
-    "tail_blocked_right": "🔗→",
-    "tail_blocked_left": "🔗←",
-    "trap_ahead": "🕸️↑",
-    "trap_right": "🕸️→",
-    "trap_left": "🕸️←",
+    "tail_blocked_forward": "⛔↑",
+    "tail_blocked_right": "⛔→",
+    "tail_blocked_left": "⛔←",
+    "trap_ahead": "⚠️↑",
+    "trap_right": "⚠️→",
+    "trap_left": "⚠️←",
 }
 
-TERMINAL_REASONS = tuple(dict.fromkeys((
+TERMINAL_REASONS = (
     "wall_collision",
     "body_collision",
     "victory",
     "starvation",
-)))
+)
 
 def hunger_budget_for(score: int, board_size: int) -> float:
     board_cells = max(1, board_size * board_size)
