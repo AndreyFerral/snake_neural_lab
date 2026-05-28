@@ -31,11 +31,6 @@ from backend_config import (
     DEATH_REASON_ORDER,
     DECISION_STATS_WINDOW,
     DIRECTIONS,
-    DQN_DEATH_REPLAY_EXTRA_COPIES,
-    DQN_PRE_DEATH_CONTEXT_REPLAYS,
-    DQN_STARVATION_EXTRA_REPLAY_COPIES,
-    DQN_STARVATION_PRIORITY_SCALE,
-    ELITE_EPISODE_MAX_TRANSITIONS,
     EPISODE_TRANSITION_LIMIT,
     GLOBAL_SIGNAL_LABELS,
     HIDDEN_LAYER_1,
@@ -80,10 +75,7 @@ RUNTIME_DIR = STATIC_ROOT / ".runtime"
 AUX_STATS_PATH = RUNTIME_DIR / "snake_model_stats.json"
 ACTIVE_CONTEXT_PATH = RUNTIME_DIR / "active_context.json"
 PID_PATH = RUNTIME_DIR / ".web_backend.pid"
-RESTART_FLAG_PATH = RUNTIME_DIR / "restart_requested.flag"
 PERF_LOG_PATH = RUNTIME_DIR / "backend_perf.log"
-RESTART_IN_PARENT_ENV = "SNAKE_RESTART_IN_PARENT"
-RESTART_EXIT_CODE = 42
 
 
 def reset_session_perf_log() -> None:
@@ -334,7 +326,6 @@ class AgentSlot:
     loading: bool = False
     error: str = ""
     loaded_checkpoint: bool = False
-    updated_at: float = 0.0
 
 
 class SnakeWebBackend:
@@ -354,7 +345,6 @@ class SnakeWebBackend:
         
         self._pending_save = False
         self._next_save_at = 0.0
-        self._last_save_at = 0.0
         self._frame_cache: dict[str, Any] | None = None
         self._last_frame_payload: dict[str, Any] | None = None
         self._snapshot_cache: dict[tuple[bool, bool], dict[str, Any]] = {}
@@ -405,7 +395,6 @@ class SnakeWebBackend:
         self.step_review_history: Deque[dict[str, Any]] = deque(maxlen=1)
         self.current_episode_transitions: Deque[tuple[np.ndarray, int, float, np.ndarray, bool, float]] = deque(maxlen=EPISODE_TRANSITION_LIMIT)
         self.training_display_index = 0
-        self._training_step_counter = 0
 
         self._sync_network_source()
         self._load_active_context()
@@ -496,7 +485,6 @@ class SnakeWebBackend:
                 loading=False,
                 error="",
                 loaded_checkpoint=loaded_checkpoint,
-                updated_at=time.monotonic(),
             )
 
     def _load_agent_checkpoint_into(self, agent: EvolutionAgent | DQNAgent) -> bool:
@@ -516,7 +504,7 @@ class SnakeWebBackend:
                 slot = self.agent_slots.get(key)
                 if slot and (slot.ready or slot.loading):
                     continue
-                self.agent_slots[key] = AgentSlot(loading=True, updated_at=time.monotonic())
+                self.agent_slots[key] = AgentSlot(loading=True)
 
             def preload(kind: str = agent_kind) -> None:
                 loaded = False
@@ -534,7 +522,6 @@ class SnakeWebBackend:
                         loading=False,
                         error=error,
                         loaded_checkpoint=loaded,
-                        updated_at=time.monotonic(),
                     )
 
             if blocking:
@@ -968,7 +955,6 @@ class SnakeWebBackend:
     def _finish_episode(self, reason: str, *, training_mode: bool) -> None:
         self.last_completed_step_review_entries = list(self.step_review_entries)
         self.episode_counter += 1
-        previous_best_score = self.best_score
         is_new_best = self.game.score > self.best_score
         self.best_score = max(self.best_score, self.game.score)
         self._sync_board_best_score()
@@ -1160,35 +1146,6 @@ class SnakeWebBackend:
             "note": " ",
         }
 
-    def _agent_metadata(self) -> dict[str, object]:
-        return {
-            "schema_version": 1,
-            "agent_kind": self.agent_kind,
-            "device_mode": self.device_mode,
-            "game": self.game.export_state(),
-            "running": self.running,
-            "training": False,
-            "mode": self.mode,
-            "speed": self.speed,
-            "pending_manual_direction": self.pending_manual_direction,
-            "live_reward": self.live_reward,
-            "episode_reward": self.episode_reward,
-            "fitness_ema": self.fitness_ema,
-            "generation": getattr(self.agent, "generation", 0),
-            "current_individual": getattr(self.agent, "current_index", 0) + 1,
-            "population_size": getattr(self.agent, "population_size", 1),
-            "victory_archive_size": int(getattr(self.agent, "victory_archive_size", 0)),
-            "best_fitness": self.agent.best_fitness,
-            "best_score": self.best_score,
-            "board_best_scores": {str(key): int(value) for key, value in self.board_best_scores.items()},
-            "episode_counter": self.episode_counter,
-            "last_action": self.last_action,
-            "last_action_random": self.last_action_random,
-            "last_greedy_action": self.last_greedy_action,
-            "last_reason": self.last_reason,
-            "last_outcome_reason": self.last_outcome_reason,
-            "last_penalty_reasons": list(self.last_penalty_reasons),
-        }
 
     def _active_context_payload(self) -> dict[str, object]:
         return {
@@ -1266,26 +1223,6 @@ class SnakeWebBackend:
         self._sync_network_source()
         return True
 
-    def _agent_state_payload(self) -> dict[str, object]:
-        if self.agent_kind == "dqn":
-            return {
-                "epsilon": float(getattr(self.agent, "epsilon", 0.0)),
-                "total_updates": int(getattr(self.agent, "total_updates", 0)),
-                "last_loss": float(getattr(self.agent, "last_loss", 0.0)),
-                "best_score": int(getattr(self.agent, "best_score", 0)),
-                "best_fitness": float(getattr(self.agent, "best_fitness", 0.0)),
-                "last_fitness": float(getattr(self.agent, "last_fitness", 0.0)),
-            }
-        return {
-            "generation": int(getattr(self.agent, "generation", 1)),
-            "current_index": int(getattr(self.agent, "current_index", 0)),
-            "best_fitness": float(getattr(self.agent, "best_fitness", 0.0)),
-            "best_score": int(getattr(self.agent, "best_score", 0)),
-            "last_fitness": float(getattr(self.agent, "last_fitness", 0.0)),
-            "last_generation_average": float(getattr(self.agent, "last_generation_average", 0.0)),
-            "completed_evaluations": int(getattr(self.agent, "completed_evaluations", 0)),
-            "settings": self.agent.settings_payload(),
-        }
 
     def _load_agent_state_payload(self, payload: dict[str, Any] | None) -> None:
         payload = payload if isinstance(payload, dict) else {}
@@ -1462,7 +1399,6 @@ class SnakeWebBackend:
         if payloads is None:
             return
         self._write_save_payloads(*payloads)
-        self._last_save_at = time.perf_counter()
         self._next_save_at = 0.0
 
     def _clear_aux_stats_json(self) -> None:
@@ -1472,7 +1408,7 @@ class SnakeWebBackend:
         if not self.persistence_enabled:
             return None
         checkpoint_path = self._checkpoint_path()
-        checkpoint_payload = self.agent.export_checkpoint(self._agent_metadata())
+        checkpoint_payload = self.agent.export_checkpoint()
         # Вшиваем подпись архитектуры в чекпоинт
         checkpoint_payload["arch_signature"] = ARCH_SIGNATURE
         aux_payload = self._aux_stats_payload()
@@ -1547,10 +1483,9 @@ class SnakeWebBackend:
         if payloads is None:
             return False
         self._write_save_payloads(*payloads)
-        self._last_save_at = time.perf_counter()
         return True
 
-    def _load_state(self, *, force_cpu: bool, preferred_device_mode: str | None = None) -> bool:
+    def _load_state(self, *, force_cpu: bool) -> bool:
         checkpoint_path = self._checkpoint_path()
         if not checkpoint_path.exists():
             return False
@@ -1663,7 +1598,6 @@ class SnakeWebBackend:
                     loading=False,
                     error=error,
                     loaded_checkpoint=loaded,
-                    updated_at=time.monotonic(),
                 )
 
         self._reset_training_runner(current_board_size)

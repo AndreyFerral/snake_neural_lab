@@ -95,8 +95,6 @@ class SmartH5Agent:
         self.lookahead_counter = 0
         self._load_model()
 
-    def close(self) -> None:
-        pass
 
     def _next_head_from(self, head: tuple[int, int], direction: int) -> tuple[int, int]:
         move_x, move_y = DIRECTIONS[direction]
@@ -161,11 +159,7 @@ class SmartH5Agent:
                 return distance
             distance += 1
 
-    def _free_distance_until_obstacle(self, game: "SnakeEnv", head: tuple[int, int], direction: int, body: set[tuple[int, int]]) -> int:
-        return self._free_distance_until_obstacle_fast(game.board_size, head, direction, body)
 
-    def _will_collide(self, game: "SnakeEnv", point: tuple[int, int], body: set[tuple[int, int]]) -> bool:
-        return self._will_collide_fast(game.board_size, point, body)
 
     def _quick_local_area_ratio_fast(self, board_size: int, head: tuple[int, int], blocked_cells: set[tuple[int, int]]) -> float:
         distances = (
@@ -176,8 +170,6 @@ class SmartH5Agent:
         )
         return clamp(sum(distances) / max(1.0, 4.0 * board_size), 0.0, 1.0)
 
-    def _quick_local_area_ratio(self, game: "SnakeEnv", head: tuple[int, int], blocked_cells: set[tuple[int, int]]) -> float:
-        return self._quick_local_area_ratio_fast(game.board_size, head, blocked_cells)
 
     def _should_use_full_floodfill(self, game: "SnakeEnv", periodic_tick: int, body: set[tuple[int, int]] | None = None) -> bool:
         snake = game.snake

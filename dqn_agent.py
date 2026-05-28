@@ -305,7 +305,7 @@ class DQNAgent:
         self.target_net = self.target_net.to(device)
         move_optimizer_state(self.optimizer, device)
 
-    def export_checkpoint(self, metadata: dict[str, object]) -> dict[str, object]:
+    def export_checkpoint(self) -> dict[str, object]:
         online_state = {key: value.detach().to(device="cpu", dtype=torch.float16) for key, value in self.online_net.state_dict().items()}
         target_state = {key: value.detach().to(device="cpu", dtype=torch.float16) for key, value in self.target_net.state_dict().items()}
         return {

@@ -10,7 +10,6 @@ from backend_config import (
     STARTUP_BOARD_SIZE,
     DIRECTIONS,
     ENDGAME_FILL_RATIO,
-    MODEL_ACTION_LABELS,
     DEATH_PENALTY,
     hunger_budget_for,
 )
@@ -95,15 +94,7 @@ def relative_to_absolute(current_direction: int, action: int) -> int:
     return (current_direction + 1) % 4
 
 
-def absolute_to_relative(previous_direction: int, chosen_direction: int) -> int:
-    delta = (chosen_direction - previous_direction) % 4
-    if delta == 0:
-        return 0
-    if delta == 3:
-        return 1
-    if delta == 1:
-        return 2
-    return 0
+
 
 
 class SnakeEnv:
@@ -122,11 +113,6 @@ class SnakeEnv:
         if len(self._path_cache) > self._path_cache_max_size:
             self._path_cache.clear()
 
-    def _blocked_key(self, blocked: set[tuple[int, int]]) -> int:
-        mask = 0
-        for x, y in blocked:
-            mask |= 1 << (y * self.board_size + x)
-        return mask
 
     def _neighbors_for(self, cell: tuple[int, int]) -> tuple[tuple[int, int], ...]:
         return board_neighbors(self.board_size).get(cell, ())
@@ -143,7 +129,6 @@ class SnakeEnv:
         self.max_steps_without_food = 0
         self.done = False
         self.last_reward = 0.0
-        self.last_dist_shaping = 0.0
         self.last_reason = "new_game"
         self.last_penalty_reasons: list[str] = []
         self.eaten_food_trail: Deque[tuple[int, int]] = deque(maxlen=24)
@@ -238,7 +223,6 @@ class SnakeEnv:
         reward = 0.0
         reason = "step"
         penalty_reasons = []
-        self.last_dist_shaping = 0.0
 
         self.step_count += 1
         self.steps_without_food += 1

@@ -158,7 +158,7 @@ class SnakeRequestHandler(SimpleHTTPRequestHandler):
             if elapsed_ms >= SLOW_API_MS:
                 log_perf("slow_post", elapsed_ms, path=self.path)
 
-    def log_message(self, format: str, *args: Any) -> None:
+    def log_message(self, _format: str, *args: Any) -> None:
         return
 
 

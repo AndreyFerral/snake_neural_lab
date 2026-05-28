@@ -19,17 +19,10 @@ except ImportError:
 from backend_config import (
     MODEL_ACTION_LABELS,
     GLOBAL_SIGNAL_LABELS,
-    EVOLUTION_STARVATION_FITNESS_FLOOR,
-    EVOLUTION_STARVATION_DEATH_MULTIPLIER,
-    EVOLUTION_STARVATION_EFFICIENCY_MULTIPLIER,
-    EVOLUTION_STARVATION_HUNGER_MULTIPLIER,
 )
 from networks import PolicyNetwork
 from snake_env import relative_to_absolute
 
-EVOLUTION_HUNGER_CULL_REASON = "evolution_hunger_cut"
-EVOLUTION_HUNGER_CULL_PROTECTED_RATIO = 0.45
-EVOLUTION_HUNGER_CULL_MIN_PROTECTED = 2
 EVOLUTION_POPULATION_SIZE = 48
 EVOLUTION_ELITE_COUNT = 4
 EVOLUTION_MUTATION_RATE = 0.045
@@ -274,19 +267,7 @@ class EvolutionAgent:
         self.generation += 1
         self._load_current_genome()
 
-    def _select_parent(self, ranked: list[EvolutionIndividual]) -> EvolutionIndividual:
-        tournament_size = min(7, len(ranked))
-        candidates = random.sample(ranked, tournament_size)
-        return max(candidates, key=lambda item: float(item.fitness if item.fitness is not None else float("-inf")))
 
-    def _crossover(self, first: dict[str, torch.Tensor], second: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        if random.random() > self.crossover_rate:
-            return self._clone_state(first)
-        v1 = self._pack_genome(first)
-        v2 = self._pack_genome(second)
-        mask = torch.rand_like(v1) < 0.5
-        child_vec = torch.where(mask, v1, v2)
-        return self._unpack_genome(child_vec)
 
     def _mutate(self, genome: dict[str, torch.Tensor], *, mutation_rate_scale: float = 1.0, mutation_strength_scale: float = 1.0) -> dict[str, torch.Tensor]:
         mutation_rate = max(0.0, min(1.0, self.mutation_rate * float(mutation_rate_scale)))
@@ -338,7 +319,7 @@ class EvolutionAgent:
         self.online_net = self.online_net.to(device)
         self._load_current_genome()
 
-    def export_checkpoint(self, metadata: dict[str, object]) -> dict[str, object]:
+    def export_checkpoint(self) -> dict[str, object]:
         ranked = self._ranked_population()
         best_individual = ranked[0] if ranked else None
         return {"checkpoint_mode": "elite", "elites": [] if best_individual is None else [self._individual_payload(best_individual)], "victory_archive": [], "best_genome": None if self.best_genome is None else self._serialized_genome(self.best_genome)}
@@ -378,14 +359,11 @@ class EvolutionAgent:
 
 
 class ParallelEvolutionRunner:
-    def __init__(self, population_size: int, board_size: int, *, env_factory: Callable[[int], Any], action_labels: tuple[str, ...] = MODEL_ACTION_LABELS, hunger_cull_enabled: bool = True, hunger_cull_protected_ratio: float = EVOLUTION_HUNGER_CULL_PROTECTED_RATIO, hunger_cull_min_protected: int = EVOLUTION_HUNGER_CULL_MIN_PROTECTED) -> None:
+    def __init__(self, population_size: int, board_size: int, *, env_factory: Callable[[int], Any], action_labels: tuple[str, ...] = MODEL_ACTION_LABELS) -> None:
         self.population_size = population_size
         self.board_size = board_size
         self.env_factory = env_factory
         self.action_labels = action_labels
-        self.hunger_cull_enabled = bool(hunger_cull_enabled)
-        self.hunger_cull_protected_ratio = max(0.0, min(1.0, float(hunger_cull_protected_ratio)))
-        self.hunger_cull_min_protected = max(1, int(hunger_cull_min_protected))
         self.envs: list[Any] = []
         self.done: list[bool] = []
         self.episode_rewards: list[float] = []
@@ -416,18 +394,10 @@ class ParallelEvolutionRunner:
 
     def alive_count(self) -> int: return sum(1 for item in self.done if not item)
     def all_done(self) -> bool: return self.alive_count() == 0
-    def hunger_cull_protected_count(self) -> int:
-        ratio_count = int(self.population_size * self.hunger_cull_protected_ratio + 0.999)
-        return min(self.population_size, max(self.hunger_cull_min_protected, ratio_count))
-    def _can_cull_for_hunger(self) -> bool: return self.hunger_cull_enabled and self.alive_count() > self.hunger_cull_protected_count()
-    def _should_cull_for_hunger(self, env: Any) -> bool:
-        return False
 
-    def _apply_hunger_cull(self, env: Any, reward: float, info: dict[str, Any]) -> tuple[float, bool, dict[str, Any]]:
-        return reward, True, info
 
-    def _display_stale_loop(self, index: int) -> bool:
-        return False
+
+
 
     def _leader_value(self, index: int) -> float:
         env = self.envs[index]
@@ -458,8 +428,6 @@ class ParallelEvolutionRunner:
         inference_ms = 0.0
         env_step_ms = 0.0
         bookkeeping_ms = 0.0
-        alive_processed = 0
-        early_generation = agent.generation <= 3
 
         alive_indices = [i for i, d in enumerate(self.done) if not d]
         if not alive_indices:
@@ -467,35 +435,10 @@ class ParallelEvolutionRunner:
             return completed
 
         pop = agent.population
-        net = agent.online_net
         dev = agent.device
         obs_dim = agent.global_signal_count
 
-        # 1. Сначала отсеиваем и обрабатываем особи с голодной смертью (cull for hunger)
-        active_indices = []
-        for env_idx in alive_indices:
-            env = self.envs[env_idx]
-            if not early_generation and self._should_cull_for_hunger(env):
-                part_started_at = time.perf_counter()
-                action = 0
-                action_scores = np.zeros(len(self.action_labels), dtype=np.float32)
-                was_random = False
-                greedy_action = 0
-                reward, done, info = self._apply_hunger_cull(env, -5.0, {"steps": env.step_count, "reason": EVOLUTION_HUNGER_CULL_REASON, "penalty_reasons": [EVOLUTION_HUNGER_CULL_REASON]})
-                bookkeeping_ms += (time.perf_counter() - part_started_at) * 1000.0
-                step_number = int(info.get("steps", env.step_count))
-                self.step_logs[env_idx].append({"step": step_number, "reward": float(reward), "train_reward": float(reward), "action": int(action), "action_label": self.action_labels[action] if 0 <= action < len(self.action_labels) else "-", "reason": EVOLUTION_HUNGER_CULL_REASON, "penalties": [EVOLUTION_HUNGER_CULL_REASON], "random": False, "individual": env_idx + 1, "apple_opportunity": None})
-                fitness = agent.finish_individual(env_idx, score=env.score, reward=self.episode_rewards[env_idx] + reward, steps=env.step_count, reason=EVOLUTION_HUNGER_CULL_REASON, board_size=env.board_size, max_steps_without_food=env.max_steps_without_food)
-                self.episode_rewards[env_idx] += reward
-                self.last_fitnesses[env_idx] = fitness
-                self.done[env_idx] = True
-                self.completed_count += 1
-                item = {"index": env_idx, "env": env, "reason": EVOLUTION_HUNGER_CULL_REASON, "reward": self.episode_rewards[env_idx], "fitness": fitness, "action": action, "action_scores": action_scores, "random": was_random, "greedy_action": greedy_action, "penalty_reasons": [EVOLUTION_HUNGER_CULL_REASON]}
-                completed.append(item)
-                if self.best_completed is None or fitness > float(self.best_completed.get("fitness", float("-inf"))):
-                    self.best_completed = dict(item)
-            else:
-                active_indices.append(env_idx)
+        active_indices = list(alive_indices)
 
         # Если не осталось активных особей для инференса, сразу выходим к обновлению лидера
         if not active_indices:
@@ -545,7 +488,6 @@ class ParallelEvolutionRunner:
         # 4. Выполнение шагов в окружениях на основе вычисленных действий
         for i, env_idx in enumerate(active_indices):
             env = self.envs[env_idx]
-            alive_processed += 1
             action = int(actions[i])
             action_scores = predictions_np[i]
             was_random = False
@@ -554,8 +496,6 @@ class ParallelEvolutionRunner:
             absolute_direction = relative_to_absolute(env.direction, action)
             env_start = time.perf_counter()
             _, reward, done, info = env.step(absolute_direction)
-            if not done and not early_generation and self._should_cull_for_hunger(env):
-                reward, done, info = self._apply_hunger_cull(env, reward, info)
             env_step_ms += (time.perf_counter() - env_start) * 1000.0
 
             book_start = time.perf_counter()
