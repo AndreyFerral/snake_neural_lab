@@ -103,7 +103,11 @@ button.danger { background: rgba(255, 107, 107, 0.13); border-color: rgba(255, 1
 .reward-list span { display: inline-flex; align-items: center; gap: 4px; padding: 4px 7px; border-radius: 999px; background: rgba(255, 255, 255, 0.045); color: var(--muted); max-width: 100%; min-width: 0; white-space: nowrap; overflow-wrap: normal; line-height: 1.25; }
 .reward-list code { white-space: nowrap; }
 .reward-table .muted { overflow-wrap: anywhere; }
-.step-review-body { height: 220px; overflow: auto; padding: 10px; border-radius: 12px; background: rgba(4, 12, 18, 0.62); border: 1px solid rgba(255, 255, 255, 0.07); font-family: "Cascadia Mono", "Consolas", monospace; font-size: 0.78rem; line-height: 1.55; color: var(--muted); }
+.step-review-body { height: 220px; overflow: auto; padding: 10px; border-radius: 12px; background: rgba(4, 12, 18, 0.62); border: 1px solid rgba(255, 255, 255, 0.07); font-family: "Cascadia Mono", "Consolas", monospace; font-size: 0.78rem; line-height: 1.55; color: var(--muted); scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.16) transparent; }
+.step-review-body::-webkit-scrollbar { width: 6px; height: 6px; }
+.step-review-body::-webkit-scrollbar-track { background: transparent; }
+.step-review-body::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.16); border-radius: 999px; }
+.step-review-body::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.28); }
 .step-log-line { white-space: nowrap; }
 .step-log-line strong { color: var(--text); white-space: nowrap; }
 .step-sticker { display: inline-flex; align-items: center; justify-content: center; width: 1.25em; height: 1.25em; margin: 0 0.08em; border-radius: 999px; background: rgba(92, 214, 173, 0.14); font-family: "Segoe UI Emoji", "Apple Color Emoji", sans-serif; font-size: 0.95em; line-height: 1; vertical-align: -0.12em; }

@@ -12,6 +12,7 @@ from backend_config import (
     ENDGAME_FILL_RATIO,
     MODEL_ACTION_LABELS,
     DEATH_PENALTY,
+    hunger_budget_for,
 )
 
 # Типы для причин завершения игры
@@ -28,7 +29,6 @@ GameEndReason = Literal[
 PenaltyReason = Literal[
     "wall_collision",
     "body_collision",
-    "avoidable_collision",
     "looping",
 ]
 
@@ -146,8 +146,6 @@ class SnakeEnv:
         self.last_dist_shaping = 0.0
         self.last_reason = "new_game"
         self.last_penalty_reasons: list[str] = []
-        self.trap_after_apple_count = 0
-        self.avoidable_collision_count = 0
         self.eaten_food_trail: Deque[tuple[int, int]] = deque(maxlen=24)
         self.snake = [(center, center), (center - 1, center), (center - 2, center)]
         self.recent_heads = deque([self.snake[0]], maxlen=18)
@@ -192,345 +190,27 @@ class SnakeEnv:
         hits_body = self._would_hit_self(next_head, will_eat)
         return 1.0 if hits_wall or hits_body else 0.0
 
-    def adjacent_apple_opportunity(self) -> AppleOpportunity:
-        for relative_action in range(len(MODEL_ACTION_LABELS)):
-            absolute_direction = relative_to_absolute(self.direction, relative_action)
-            next_head = self._next_head_for_direction(absolute_direction)
-            if next_head != self.food:
-                continue
-
-            signals = self._lookahead_signals_for_absolute_direction(absolute_direction)
-            blocked, food_reachable = signals
-            safe = blocked < 0.5 and food_reachable > 0.5
-            verdict = "blocked" if blocked >= 0.5 else "safe"
-
-            return {
-                "adjacent": True,
-                "action": relative_action,
-                "action_label": MODEL_ACTION_LABELS[relative_action],
-                "safe": safe,
-                "verdict": verdict,
-            }
-        return {"adjacent": False, "action": None, "safe": False, "verdict": "none"}
-
-    def relative_move_risks(self) -> dict[str, float]:
+    def relative_move_risks(self) -> dict[str, dict[str, float]]:
         return {
-            "forward": self._danger_for_relative_action(0),
-            "left": self._danger_for_relative_action(1),
-            "right": self._danger_for_relative_action(2),
+            "forward": {
+                "danger": self._danger_for_relative_action(0),
+                "tail_blocked": self._is_tail_blocked_after_relative_action(0),
+                "trap": self._is_trap_after_relative_action(0),
+            },
+            "left": {
+                "danger": self._danger_for_relative_action(1),
+                "tail_blocked": self._is_tail_blocked_after_relative_action(1),
+                "trap": self._is_trap_after_relative_action(1),
+            },
+            "right": {
+                "danger": self._danger_for_relative_action(2),
+                "tail_blocked": self._is_tail_blocked_after_relative_action(2),
+                "trap": self._is_trap_after_relative_action(2),
+            },
         }
-
-    def relative_move_safety(self) -> dict[str, dict[str, float]]:
-        result: dict[str, dict[str, float]] = {}
-        for key, relative_action in (("forward", 0), ("left", 1), ("right", 2)):
-            blocked, food = self._lookahead_signals_for_relative_action(relative_action)
-            result[key] = {
-                "risk": blocked,
-                "food": food,
-            }
-        return result
-
-    def _is_dead_end_without_alternative(self) -> bool:
-        for relative_action in range(len(MODEL_ACTION_LABELS)):
-            blocked, _ = self._lookahead_signals_for_relative_action(relative_action)
-            if blocked < 0.5:
-                return False
-        return True
 
     def _is_endgame(self) -> bool:
         return len(self.snake) >= self.board_size * self.board_size * ENDGAME_FILL_RATIO
-
-
-    def _is_avoidable_collision(self, chosen_relative_action: int) -> bool:
-        chosen_blocked = self._lookahead_signals_for_relative_action(
-            chosen_relative_action
-        )[0]
-        if chosen_blocked < 0.5:
-            return False
-        for relative_action in range(len(MODEL_ACTION_LABELS)):
-            if relative_action == chosen_relative_action:
-                continue
-            if self._lookahead_signals_for_relative_action(relative_action)[0] < 0.5:
-                return True
-        return False
-
-    def _has_compact_head_loop(self, next_head: tuple[int, int]) -> bool:
-        head_window = list(self.recent_heads)[-20:] + [next_head]
-        if len(head_window) < 16:
-            return False
-        unique_heads = len(set(head_window))
-        unique_limit = max(4, min(8, len(self.snake) // 4 + 2))
-        return unique_heads <= unique_limit
-
-    def _reachable_cell_count(
-        self, start: tuple[int, int], blocked: set[tuple[int, int]]
-    ) -> int:
-        cache_key = ("reachable_count", start, self._blocked_key(blocked))
-        cached = self._path_cache.get(cache_key)
-        if cached is not None:
-            return int(cached)
-
-        size = self.board_size
-        start_idx = start[1] * size + start[0]
-        # Быстрая маска блокировок (list[bool] быстрее set[tuple] в цикле)
-        blocked_mask = [False] * (size * size)
-        for x, y in blocked:
-            blocked_mask[y * size + x] = True
-
-        if blocked_mask[start_idx]:
-            return 0
-
-        visited = [False] * (size * size)
-        visited[start_idx] = True
-        queue = [start_idx]
-        head = 0
-        count = 1
-
-        while head < len(queue):
-            curr = queue[head]
-            head += 1
-            cx, cy = curr % size, curr // size
-            # Инлайн соседей без вызова _neighbors_for
-            for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
-                nx, ny = cx + dx, cy + dy
-                if 0 <= nx < size and 0 <= ny < size:
-                    nidx = ny * size + nx
-                    if not visited[nidx] and not blocked_mask[nidx]:
-                        visited[nidx] = True
-                        queue.append(nidx)
-                        count += 1
-
-        self._path_cache[cache_key] = count
-        return count
-
-    def _has_path(
-        self,
-        start: tuple[int, int],
-        goal: tuple[int, int],
-        blocked: set[tuple[int, int]],
-    ) -> bool:
-        cache_key = ("has_path", start, goal, self._blocked_key(blocked))
-        cached = self._path_cache.get(cache_key)
-        if cached is not None:
-            return bool(cached)
-        if start == goal:
-            return True
-
-        size = self.board_size
-        start_idx = start[1] * size + start[0]
-        goal_idx = goal[1] * size + goal[0]
-
-        blocked_mask = [False] * (size * size)
-        for x, y in blocked:
-            blocked_mask[y * size + x] = True
-
-        if blocked_mask[start_idx] or blocked_mask[goal_idx]:
-            self._path_cache[cache_key] = False
-            return False
-
-        visited = [False] * (size * size)
-        visited[start_idx] = True
-        queue = [start_idx]
-        head = 0
-
-        while head < len(queue):
-            curr = queue[head]
-            head += 1
-            if curr == goal_idx:
-                self._path_cache[cache_key] = True
-                return True
-            cx, cy = curr % size, curr // size
-            for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
-                nx, ny = cx + dx, cy + dy
-                if 0 <= nx < size and 0 <= ny < size:
-                    nidx = ny * size + nx
-                    if not visited[nidx] and not blocked_mask[nidx]:
-                        visited[nidx] = True
-                        queue.append(nidx)
-
-        self._path_cache[cache_key] = False
-        return False
-
-    def _shortest_path(
-        self,
-        start: tuple[int, int],
-        goal: tuple[int, int],
-        blocked: set[tuple[int, int]],
-    ) -> list[tuple[int, int]] | None:
-        cache_key = ("shortest_path", start, goal, self._blocked_key(blocked))
-        if cache_key in self._path_cache:
-            cached_path = self._path_cache[cache_key]
-            return None if cached_path is None else list(cached_path)
-        if start == goal:
-            return [start]
-
-        visited, parents, queue = {start}, {}, deque([start])
-        while queue:
-            cell = queue.popleft()
-            for next_cell in self._neighbors_for(cell):
-                if next_cell not in visited and next_cell not in blocked:
-                    parents[next_cell] = cell
-                    if next_cell == goal:
-                        path = [goal]
-                        while path[-1] != start:
-                            path.append(parents[path[-1]])
-                        path.reverse()
-                        self._path_cache[cache_key] = tuple(path)
-                        return path
-                    visited.add(next_cell)
-                    queue.append(next_cell)
-        self._path_cache[cache_key] = None
-        return None
-
-    def _reachable_cells(
-        self, start: tuple[int, int], blocked: set[tuple[int, int]]
-    ) -> set[tuple[int, int]]:
-        cache_key = ("reachable_cells", start, self._blocked_key(blocked))
-        if cache_key in self._path_cache:
-            return set(self._path_cache[cache_key])
-        if start in blocked:
-            return set()
-
-        visited, queue = {start}, deque([start])
-        while queue:
-            cell = queue.popleft()
-            for next_cell in self._neighbors_for(cell):
-                if next_cell not in visited and next_cell not in blocked:
-                    visited.add(next_cell)
-                    queue.append(next_cell)
-        self._path_cache[cache_key] = tuple(visited)
-        return visited
-
-    def _free_components(
-        self, blocked: set[tuple[int, int]]
-    ) -> list[set[tuple[int, int]]]:
-        remaining = {
-            (x, y)
-            for y in range(self.board_size)
-            for x in range(self.board_size)
-            if (x, y) not in blocked
-        }
-        components: list[set[tuple[int, int]]] = []
-        while remaining:
-            start = next(iter(remaining))
-            component = self._reachable_cells(start, blocked)
-            components.append(component)
-            remaining.difference_update(component)
-        return components
-
-    def _strategic_space_metrics_for(
-        self, snake: list[tuple[int, int]], food: tuple[int, int]
-    ) -> dict[str, float]:
-        cache_key = ("strategic", tuple(snake), food)
-        if cache_key in self._path_cache:
-            return dict(self._path_cache[cache_key])
-
-        total_cells = float(self.board_size * self.board_size)
-        blocked = set(snake[1:])
-        total_walkable = max(1.0, total_cells - len(blocked))
-        head = snake[0]
-        head_area = self._reachable_cells(head, blocked)
-        food_reachable = 1.0 if food in head_area else 0.0
-        food_area_count = len(head_area) if food_reachable else self._reachable_cell_count(food, blocked)
-        components = self._free_components(blocked)
-        pocket_count = sum(1 for c in components if head not in c)
-        largest_pocket = max((len(c) for c in components if head not in c), default=0)
-        path_to_food = self._shortest_path(head, food, blocked)
-
-        result = {
-            "food_reachable": food_reachable,
-            "food_area_ratio": clamp(food_area_count / total_walkable, 0.0, 1.0),
-            "pocket_count_norm": min(1.0, pocket_count / (self.board_size / 2.0)),
-            "largest_pocket_ratio": clamp(largest_pocket / total_walkable, 0.0, 1.0),
-            "head_area_ratio": clamp(len(head_area) / total_walkable, 0.0, 1.0),
-        }
-        self._path_cache[cache_key] = result
-        return result
-
-    def _strategic_space_metrics(self) -> dict[str, float]:
-        return self._strategic_space_metrics_for(list(self.snake), self.food)
-
-    def _post_move_space_probe(self, absolute_direction: int) -> dict[str, Any]:
-        cache_key = (
-            "post_move_space",
-            tuple(self.snake),
-            self.food,
-            self.direction,
-            absolute_direction,
-        )
-        if cache_key in self._path_cache:
-            return dict(self._path_cache[cache_key])
-
-        next_head = self._next_head_for_direction(absolute_direction)
-        ate_food = next_head == self.food
-        hits_wall = not (
-            0 <= next_head[0] < self.board_size and 0 <= next_head[1] < self.board_size
-        )
-
-        occupied = set(self.snake if ate_food else self.snake[:-1])
-        if hits_wall or next_head in occupied:
-            res = {
-                "blocked": 1.0,
-                "area": 0.0,
-                "tail": 0.0,
-                "next_head": next_head,
-                "simulated_snake": [],
-            }
-        else:
-            simulated_snake = [next_head] + (
-                list(self.snake) if ate_food else list(self.snake[:-1])
-            )
-            blocked_cells = set(simulated_snake[1:])
-            area_count = float(self._reachable_cell_count(next_head, blocked_cells))
-            tail_target = simulated_snake[-1]
-            tail_blocked = set(blocked_cells)
-            if not ate_food:
-                tail_blocked.discard(tail_target)
-            tail_reachable = 1.0 if self._has_path(next_head, tail_target, tail_blocked) else 0.0
-            res = {
-                "blocked": 0.0,
-                "area": area_count,
-                "tail": tail_reachable,
-                "next_head": next_head,
-                "simulated_snake": simulated_snake,
-            }
-
-        self._path_cache[cache_key] = res
-        return res
-
-    def _lookahead_signals_for_absolute_direction(
-        self, absolute_direction: int
-    ) -> list[float]:
-        cache_key = (
-            "lookahead",
-            tuple(self.snake),
-            self.food,
-            self.direction,
-            absolute_direction,
-        )
-        if cache_key in self._path_cache:
-            return list(self._path_cache[cache_key])
-
-        probe = self._post_move_space_probe(absolute_direction)
-        if probe["blocked"] >= 0.5:
-            res = [1.0, 0.0]
-            self._path_cache[cache_key] = tuple(res)
-            return res
-
-        sim_snake = probe["simulated_snake"]
-        blocked_cells = set(sim_snake[1:])
-        food_reach = 1.0 if self._has_path(probe["next_head"], self.food, blocked_cells) else 0.0
-        res = [
-            0.0,
-            food_reach,
-        ]
-        self._path_cache[cache_key] = tuple(res)
-        return res
-
-    def _lookahead_signals_for_relative_action(self, relative_action: int) -> list[float]:
-        return self._lookahead_signals_for_absolute_direction(
-            relative_to_absolute(self.direction, relative_action)
-        )
 
     def step(
         self, direction: int
@@ -545,9 +225,6 @@ class SnakeEnv:
 
         chosen_direction = self._normalize_direction(direction)
         previous_direction = self.direction
-        apple_opportunity = self.adjacent_apple_opportunity()
-        chosen_rel_act = absolute_to_relative(previous_direction, chosen_direction)
-        avoidable_collision = self._is_avoidable_collision(chosen_rel_act)
         self.direction = chosen_direction
 
         head, move = self.snake[0], DIRECTIONS[chosen_direction]
@@ -570,14 +247,17 @@ class SnakeEnv:
         hits_wall = not (
             0 <= next_head[0] < self.board_size and 0 <= next_head[1] < self.board_size
         )
-        if hits_wall or self._would_hit_self(next_head, will_eat):
+        hunger_limit = hunger_budget_for(self.score, self.board_size)
+        if self.steps_without_food > hunger_limit:
+            self.done = True
+            reward = -DEATH_PENALTY
+            reason = "starvation"
+            penalty_reasons.append("looping")
+        elif hits_wall or self._would_hit_self(next_head, will_eat):
             self.done = True
             reward = -DEATH_PENALTY
             reason = "wall_collision" if hits_wall else "body_collision"
             penalty_reasons.append(reason)
-            if avoidable_collision:
-                self.avoidable_collision_count += 1
-                penalty_reasons.append("avoidable_collision")
         else:
             self.snake.insert(0, next_head)
             if will_eat:
@@ -631,9 +311,74 @@ class SnakeEnv:
                 "reason": reason,  # type: ignore[typeddict-item]
                 "penalty_reasons": list(penalty_reasons),
                 "direction": chosen_direction,
-                "apple_opportunity": apple_opportunity,
+                "apple_opportunity": None,
             },
         )
+
+    def _has_path(self, start: tuple[int, int], target: tuple[int, int], blocked: set[tuple[int, int]]) -> bool:
+        if start in blocked or target in blocked:
+            return False
+        if start == target:
+            return True
+        visited = {start}
+        queue = deque([start])
+        while queue:
+            curr = queue.popleft()
+            if curr == target:
+                return True
+            for next_cell in self._neighbors_for(curr):
+                if next_cell not in visited and next_cell not in blocked:
+                    visited.add(next_cell)
+                    queue.append(next_cell)
+        return False
+
+    def _reachable_space_size(self, start: tuple[int, int], blocked: set[tuple[int, int]]) -> int:
+        if start in blocked:
+            return 0
+        visited = {start}
+        queue = deque([start])
+        while queue:
+            curr = queue.popleft()
+            for next_cell in self._neighbors_for(curr):
+                if next_cell not in visited and next_cell not in blocked:
+                    visited.add(next_cell)
+                    queue.append(next_cell)
+        return len(visited)
+
+    def _is_tail_blocked_after_relative_action(self, relative_action: int) -> float:
+        absolute_direction = relative_to_absolute(self.direction, relative_action)
+        next_head = self._next_head_for_direction(absolute_direction)
+        will_eat = next_head == self.food
+        hits_wall = not (0 <= next_head[0] < self.board_size and 0 <= next_head[1] < self.board_size)
+        if hits_wall or self._would_hit_self(next_head, will_eat):
+            return 1.0
+        if will_eat:
+            simulated_snake = [next_head] + self.snake
+        else:
+            simulated_snake = [next_head] + self.snake[:-1]
+        tail_target = simulated_snake[-1]
+        blocked = set(simulated_snake[1:-1])
+        has_path = self._has_path(next_head, tail_target, blocked)
+        return 0.0 if has_path else 1.0
+
+    def _is_trap_after_relative_action(self, relative_action: int) -> float:
+        absolute_direction = relative_to_absolute(self.direction, relative_action)
+        next_head = self._next_head_for_direction(absolute_direction)
+        will_eat = next_head == self.food
+        hits_wall = not (0 <= next_head[0] < self.board_size and 0 <= next_head[1] < self.board_size)
+        if hits_wall or self._would_hit_self(next_head, will_eat):
+            return 1.0
+        if will_eat:
+            simulated_snake = [next_head] + self.snake
+        else:
+            simulated_snake = [next_head] + self.snake[:-1]
+        blocked = set(simulated_snake[1:])
+        space_size = self._reachable_space_size(next_head, blocked)
+        tail_target = simulated_snake[-1]
+        tail_blocked = set(simulated_snake[1:-1])
+        tail_reachable = self._has_path(next_head, tail_target, tail_blocked)
+        is_trapped = (space_size < len(self.snake)) and not tail_reachable
+        return 1.0 if is_trapped else 0.0
 
     def get_extra_signals(self, target_size: int = STARTUP_BOARD_SIZE) -> np.ndarray:
         # Кэш на текущий шаг: если фронтенд или логгер вызовут метод повторно,
@@ -654,16 +399,43 @@ class SnakeEnv:
         else:
             fwd, rgt = -dx, -dy
 
+        tail_x, tail_y = self.snake[-1]
+        tx, ty = tail_x - head_x, tail_y - head_y
+
+        if self.direction == 0:
+            t_fwd, t_rgt = -ty, tx
+        elif self.direction == 1:
+            t_fwd, t_rgt = tx, ty
+        elif self.direction == 2:
+            t_fwd, t_rgt = ty, -tx
+        else:
+            t_fwd, t_rgt = -tx, -ty
+
         signals = [
             1.0 if fwd > 0 else 0.0,
             1.0 if rgt > 0 else 0.0,
             1.0 if rgt < 0 else 0.0,
+            1.0 if fwd < 0 else 0.0,  # food_behind
+
             1.0 if self._next_head_for_direction(relative_to_absolute(self.direction, 0)) == self.food else 0.0,
             1.0 if self._next_head_for_direction(relative_to_absolute(self.direction, 2)) == self.food else 0.0,
             1.0 if self._next_head_for_direction(relative_to_absolute(self.direction, 1)) == self.food else 0.0,
+
             self._danger_for_relative_action(0),
             self._danger_for_relative_action(2),
             self._danger_for_relative_action(1),
+
+            1.0 if t_fwd > 0 else 0.0,  # tail_ahead
+            1.0 if t_rgt > 0 else 0.0,  # tail_right
+            1.0 if t_rgt < 0 else 0.0,  # tail_left
+
+            self._is_tail_blocked_after_relative_action(0),  # tail_blocked_forward
+            self._is_tail_blocked_after_relative_action(2),  # tail_blocked_right
+            self._is_tail_blocked_after_relative_action(1),  # tail_blocked_left
+
+            self._is_trap_after_relative_action(0),  # trap_ahead
+            self._is_trap_after_relative_action(2),  # trap_right
+            self._is_trap_after_relative_action(1),  # trap_left
         ]
         self._obs_cache_step = self.step_count
         self._obs_cache_vec = np.array(signals, dtype=np.float32)
@@ -686,8 +458,6 @@ class SnakeEnv:
             "last_reward": self.last_reward,
             "last_reason": self.last_reason,
             "last_penalty_reasons": list(self.last_penalty_reasons),
-            "trap_after_apple_count": self.trap_after_apple_count,
-            "avoidable_collision_count": self.avoidable_collision_count,
             "eaten_food_trail": [[x, y] for x, y in self.eaten_food_trail],
             "snake": [[x, y] for x, y in self.snake],
             "food": [self.food[0], self.food[1]],

@@ -27,7 +27,7 @@ from backend_config import SLOW_API_MS
 
 STATIC_ROOT = Path(__file__).resolve().parent
 RUNTIME_DIR = STATIC_ROOT / ".runtime"
-PID_PATH = STATIC_ROOT / ".web_backend.pid"
+PID_PATH = RUNTIME_DIR / ".web_backend.pid"
 
 def log_perf(event: str, elapsed_ms: float, **fields: Any) -> None:
     return

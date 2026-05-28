@@ -23,9 +23,9 @@ from backend_config import (
     EVOLUTION_STARVATION_DEATH_MULTIPLIER,
     EVOLUTION_STARVATION_EFFICIENCY_MULTIPLIER,
     EVOLUTION_STARVATION_HUNGER_MULTIPLIER,
-    hunger_budget_for,
 )
 from networks import PolicyNetwork
+from snake_env import relative_to_absolute
 
 EVOLUTION_HUNGER_CULL_REASON = "evolution_hunger_cut"
 EVOLUTION_HUNGER_CULL_PROTECTED_RATIO = 0.45
@@ -179,8 +179,8 @@ class EvolutionAgent:
         safe_index = max(0, min(index, len(self.population) - 1))
         return self._select_action_with_genome(state, self.population[safe_index].genome)
 
-    def finish_episode(self, *, score: int, reward: float, steps: int, reason: str, board_size: int, trap_after_apple_count: int = 0, avoidable_collision_count: int = 0, max_steps_without_food: int = 0) -> float:
-        fitness = self.finish_individual(self.current_index, score=score, reward=reward, steps=steps, reason=reason, board_size=board_size, trap_after_apple_count=trap_after_apple_count, avoidable_collision_count=avoidable_collision_count, max_steps_without_food=max_steps_without_food)
+    def finish_episode(self, *, score: int, reward: float, steps: int, reason: str, board_size: int, max_steps_without_food: int = 0) -> float:
+        fitness = self.finish_individual(self.current_index, score=score, reward=reward, steps=steps, reason=reason, board_size=board_size, max_steps_without_food=max_steps_without_food)
         self.current_index += 1
         if self.current_index >= self.population_size:
             self.evolve_generation()
@@ -188,8 +188,8 @@ class EvolutionAgent:
             self._load_current_genome()
         return fitness
 
-    def finish_individual(self, index: int, *, score: int, reward: float, steps: int, reason: str, board_size: int, trap_after_apple_count: int = 0, avoidable_collision_count: int = 0, max_steps_without_food: int = 0) -> float:
-        fitness = self._fitness(score=score, reward=reward, steps=steps, reason=reason, board_size=board_size, trap_after_apple_count=trap_after_apple_count, avoidable_collision_count=avoidable_collision_count, max_steps_without_food=max_steps_without_food)
+    def finish_individual(self, index: int, *, score: int, reward: float, steps: int, reason: str, board_size: int, max_steps_without_food: int = 0) -> float:
+        fitness = self._fitness(score=score, reward=reward, steps=steps, reason=reason, board_size=board_size, max_steps_without_food=max_steps_without_food)
         safe_index = max(0, min(index, len(self.population) - 1))
         individual = self.population[safe_index]
         individual.fitness = fitness
@@ -216,63 +216,11 @@ class EvolutionAgent:
         self.victory_archive.append(self._clone_individual(individual))
         self.victory_archive = sorted(self.victory_archive, key=lambda item: (float(item.fitness if item.fitness is not None else float("-inf")), int(item.score), -int(item.steps)), reverse=True)[:EVOLUTION_VICTORY_ARCHIVE_SIZE]
 
-    def _fitness(self, *, score: int, reward: float, steps: int, reason: str, board_size: int, trap_after_apple_count: int = 0, avoidable_collision_count: int = 0, max_steps_without_food: int = 0) -> float:
-        board_cells = max(1, board_size * board_size)
-        apple_value = float(score) * 220.0 + float(score * score) * 12.0
-        survival_value = min(float(steps), float(board_cells * 2)) * 0.025
-        reward_value = float(reward) * 4.0
-        death_penalties = {"wall_collision": 210.0, "body_collision": 260.0, EVOLUTION_HUNGER_CULL_REASON: 520.0}
-        death_penalty = death_penalties.get(reason, 0.0)
-        if reason in {"wall_collision", "body_collision"}:
-            early_target = max(40, board_size * 5)
-            death_penalty += max(0.0, float(early_target - steps)) * 1.4
-            fill_ratio = min(1.0, float(score + 3) / float(board_cells))
-            death_penalty += fill_ratio * fill_ratio * 5000.0
-            collision_score_penalty = max(0.0, float(score - 6)) * (150.0 if reason == "body_collision" else 115.0)
-            late_collision_penalty = max(0.0, float(score - 9)) ** 2 * (24.0 if reason == "body_collision" else 18.0)
-            long_run_collision_penalty = min(1200.0, max(0.0, float(steps) - board_size * board_size * 0.7) * (0.95 if reason == "body_collision" else 0.7))
-            death_penalty += collision_score_penalty + late_collision_penalty + long_run_collision_penalty
-            if score >= int(board_cells * 0.7):
-                death_penalty += 6000.0 if reason == "body_collision" else 4500.0
-            if reason == "body_collision":
-                death_penalty += max(0.0, float(3 - score)) * 30.0
-                death_penalty += max(0.0, float(board_size * 2.5 - steps)) * 0.9
-        trap_after_apple_penalty = float(max(0, trap_after_apple_count)) * 650.0
-        avoidable_collision_penalty = float(max(0, avoidable_collision_count)) * 900.0
-        if reason == EVOLUTION_HUNGER_CULL_REASON:
-            death_penalty *= EVOLUTION_STARVATION_DEATH_MULTIPLIER
-        efficiency_budget = max(35.0, board_size * 3.0 + float(score) * board_size * 2.5)
-        inefficient_steps = max(0.0, float(steps) - efficiency_budget)
-        efficiency_penalty = inefficient_steps * (0.55 if reason == EVOLUTION_HUNGER_CULL_REASON else 0.24)
-        if reason == EVOLUTION_HUNGER_CULL_REASON:
-            efficiency_penalty *= EVOLUTION_STARVATION_EFFICIENCY_MULTIPLIER
-        if score == 0:
-            efficiency_penalty *= 1.45
-        hunger_budget = hunger_budget_for(score, board_size)
-        hunger_overage = max(0.0, float(max_steps_without_food) - hunger_budget)
-        hunger_penalty = hunger_overage * hunger_overage * 4.0
-        if reason == EVOLUTION_HUNGER_CULL_REASON:
-            hunger_penalty *= EVOLUTION_STARVATION_HUNGER_MULTIPLIER
-        if score <= max(3, int(board_cells * 0.12)):
-            hunger_penalty *= 3.0
-        elif score >= int(board_cells * 0.70):
-            hunger_penalty *= 0.85
-        victory_bonus = 15000.0 if reason == "victory" else 0.0
-        fitness = (
-            apple_value
-            + survival_value
-            + reward_value
-            + victory_bonus
-            - death_penalty
-            - efficiency_penalty
-            - hunger_penalty
-            - trap_after_apple_penalty
-            - avoidable_collision_penalty
-        )
-        # Не закрепляем поведение "умереть от голода": голодные эпизоды принудительно опускаем.
-        if reason == EVOLUTION_HUNGER_CULL_REASON:
-            fitness = min(fitness, EVOLUTION_STARVATION_FITNESS_FLOOR)
-        return fitness
+    def _fitness(self, *, score: int, reward: float, steps: int, reason: str, board_size: int, max_steps_without_food: int = 0) -> float:
+        # Улучшенная стабильная формула:
+        # Приоритет отдается яблокам (score), но и время жизни (steps) вносит свой вклад.
+        # Исключает риск числового переполнения float32 при высоких счетах.
+        return float(steps) + (float(score) ** 2.0) * 100.0
 
     def evolve_generation(self) -> None:
         evaluated = [ind for ind in self.population if ind.fitness is not None]
@@ -453,11 +401,6 @@ class ParallelEvolutionRunner:
     def _manhattan(first: tuple[int, int], second: tuple[int, int]) -> int:
         return abs(first[0] - second[0]) + abs(first[1] - second[1])
 
-    @staticmethod
-    def _relative_to_absolute(current_direction: int, action: int) -> int:
-        if action == 0: return current_direction
-        if action == 1: return (current_direction - 1) % 4
-        return (current_direction + 1) % 4
 
     def reset_generation(self, *, board_size: int | None = None) -> None:
         if board_size is not None: self.board_size = board_size
@@ -478,64 +421,29 @@ class ParallelEvolutionRunner:
         return min(self.population_size, max(self.hunger_cull_min_protected, ratio_count))
     def _can_cull_for_hunger(self) -> bool: return self.hunger_cull_enabled and self.alive_count() > self.hunger_cull_protected_count()
     def _should_cull_for_hunger(self, env: Any) -> bool:
-        if not self._can_cull_for_hunger(): return False
-        return float(env.steps_without_food) > hunger_budget_for(int(env.score), int(env.board_size))
+        return False
 
     def _apply_hunger_cull(self, env: Any, reward: float, info: dict[str, Any]) -> tuple[float, bool, dict[str, Any]]:
-        reward = min(float(reward), -5.0)
-        penalty_reasons = [str(item) for item in info.get("penalty_reasons", [])]
-        if EVOLUTION_HUNGER_CULL_REASON not in penalty_reasons: penalty_reasons.append(EVOLUTION_HUNGER_CULL_REASON)
-        info = dict(info)
-        info["reason"] = EVOLUTION_HUNGER_CULL_REASON
-        info["penalty_reasons"] = penalty_reasons
-        info["hunger_budget"] = hunger_budget_for(int(env.score), int(env.board_size))
-        info["hunger_cull_protected"] = self.hunger_cull_protected_count()
         return reward, True, info
 
     def _display_stale_loop(self, index: int) -> bool:
-        env = self.envs[index]
-        if self.done[index] or not env.snake: return False
-        recent_heads_raw = getattr(env, "recent_heads", None)
-        if isinstance(recent_heads_raw, (list, tuple)): recent_heads = list(recent_heads_raw)[-12:]
-        elif hasattr(recent_heads_raw, '__iter__'):
-            from collections import deque
-            recent_heads = list(deque(recent_heads_raw, maxlen=12))[-12:] if isinstance(recent_heads_raw, deque) else []
-        else: recent_heads = []
-        unique_recent = len(set(recent_heads))
-        small_snake = len(env.snake) <= 5
-        long_without_food = env.steps_without_food >= max(18, env.board_size * 2)
-        tight_loop = len(recent_heads) >= 10 and unique_recent <= 4
-        repeated_loop_reason = getattr(env, "last_reason", " ") == "looping" and env.steps_without_food >= max(12, env.board_size)
-        return small_snake and long_without_food and (tight_loop or repeated_loop_reason)
+        return False
 
     def _leader_value(self, index: int) -> float:
         env = self.envs[index]
         distance = self._manhattan(env.snake[0], env.food) if env.snake else 0
         alive_bonus = 10_000.0 if not self.done[index] else 0.0
-        recent_heads_raw = getattr(env, "recent_heads", None)
-        if isinstance(recent_heads_raw, (list, tuple)): recent_heads = list(recent_heads_raw)[-12:]
-        elif hasattr(recent_heads_raw, '__iter__'):
-            from collections import deque
-            recent_heads = list(deque(recent_heads_raw, maxlen=12))[-12:] if isinstance(recent_heads_raw, deque) else []
-        else: recent_heads = []
-        unique_recent = len(set(recent_heads))
-        stale_penalty = 35_000.0 if self._display_stale_loop(index) else 0.0
-        return alive_bonus + env.score * 100_000.0 + len(env.snake) * 700.0 + unique_recent * 120.0 - env.steps_without_food * 95.0 - distance * 45.0 - stale_penalty
+        return alive_bonus + env.score * 100_000.0 + len(env.snake) * 700.0 - distance * 45.0
 
     def update_leader(self) -> int:
         if not self.envs:
             self.leader_index = 0
             return self.leader_index
         current_valid = 0 <= self.leader_index < len(self.envs)
-        if current_valid and not self.done[self.leader_index] and not self._display_stale_loop(self.leader_index):
+        if current_valid and not self.done[self.leader_index]:
             return self.leader_index
         alive_indices = [index for index, done in enumerate(self.done) if not done]
-        if current_valid and not self.done[self.leader_index]:
-            fresh_alive = [index for index in alive_indices if not self._display_stale_loop(index)]
-            if not fresh_alive: return self.leader_index
-            candidates = fresh_alive
-        else:
-            candidates = alive_indices or list(range(len(self.envs)))
+        candidates = alive_indices or list(range(len(self.envs)))
         self.leader_index = max(candidates, key=self._leader_value)
         return self.leader_index
 
@@ -563,77 +471,114 @@ class ParallelEvolutionRunner:
         dev = agent.device
         obs_dim = agent.global_signal_count
 
-        states_np = np.empty((len(alive_indices), obs_dim), dtype=np.float32)
+        # 1. Сначала отсеиваем и обрабатываем особи с голодной смертью (cull for hunger)
+        active_indices = []
+        for env_idx in alive_indices:
+            env = self.envs[env_idx]
+            if not early_generation and self._should_cull_for_hunger(env):
+                part_started_at = time.perf_counter()
+                action = 0
+                action_scores = np.zeros(len(self.action_labels), dtype=np.float32)
+                was_random = False
+                greedy_action = 0
+                reward, done, info = self._apply_hunger_cull(env, -5.0, {"steps": env.step_count, "reason": EVOLUTION_HUNGER_CULL_REASON, "penalty_reasons": [EVOLUTION_HUNGER_CULL_REASON]})
+                bookkeeping_ms += (time.perf_counter() - part_started_at) * 1000.0
+                step_number = int(info.get("steps", env.step_count))
+                self.step_logs[env_idx].append({"step": step_number, "reward": float(reward), "train_reward": float(reward), "action": int(action), "action_label": self.action_labels[action] if 0 <= action < len(self.action_labels) else "-", "reason": EVOLUTION_HUNGER_CULL_REASON, "penalties": [EVOLUTION_HUNGER_CULL_REASON], "random": False, "individual": env_idx + 1, "apple_opportunity": None})
+                fitness = agent.finish_individual(env_idx, score=env.score, reward=self.episode_rewards[env_idx] + reward, steps=env.step_count, reason=EVOLUTION_HUNGER_CULL_REASON, board_size=env.board_size, max_steps_without_food=env.max_steps_without_food)
+                self.episode_rewards[env_idx] += reward
+                self.last_fitnesses[env_idx] = fitness
+                self.done[env_idx] = True
+                self.completed_count += 1
+                item = {"index": env_idx, "env": env, "reason": EVOLUTION_HUNGER_CULL_REASON, "reward": self.episode_rewards[env_idx], "fitness": fitness, "action": action, "action_scores": action_scores, "random": was_random, "greedy_action": greedy_action, "penalty_reasons": [EVOLUTION_HUNGER_CULL_REASON]}
+                completed.append(item)
+                if self.best_completed is None or fitness > float(self.best_completed.get("fitness", float("-inf"))):
+                    self.best_completed = dict(item)
+            else:
+                active_indices.append(env_idx)
+
+        # Если не осталось активных особей для инференса, сразу выходим к обновлению лидера
+        if not active_indices:
+            leader_start = time.perf_counter()
+            self.update_leader()
+            leader_ms = (time.perf_counter() - leader_start) * 1000.0
+            bookkeeping_ms += leader_ms
+            self.last_profile_ms = {"alive": len(alive_indices), "observation": round(observation_ms, 1), "inference": 0.0, "env_step": 0.0, "bookkeeping": round(bookkeeping_ms, 1), "leader": round(leader_ms, 1)}
+            return completed
+
+        # 2. Батчевая генерация наблюдений для всех активных особей
+        states_np = np.empty((len(active_indices), obs_dim), dtype=np.float32)
         obs_start = time.perf_counter()
-        for i, idx in enumerate(alive_indices):
+        for i, idx in enumerate(active_indices):
             states_np[i] = self.envs[idx].get_observation_grid()
         observation_ms = (time.perf_counter() - obs_start) * 1000.0
-        states_tensor = torch.from_numpy(states_np).to(device=dev)
 
-        with torch.inference_mode():
-            for idx_in_alive, env_idx in enumerate(alive_indices):
-                env = self.envs[env_idx]
-                alive_processed += 1
+        # 3. Выполнение прямого прохода нейросетей всей популяции параллельно одной батч-операцией torch.bmm
+        infer_start = time.perf_counter()
+        
+        # Склеиваем веса активных особей из их геномов
+        w1 = torch.stack([pop[idx].genome["hidden1_layer.weight"] for idx in active_indices]).to(dev)
+        b1 = torch.stack([pop[idx].genome["hidden1_layer.bias"] for idx in active_indices]).to(dev).unsqueeze(1)
+        w2 = torch.stack([pop[idx].genome["hidden2_layer.weight"] for idx in active_indices]).to(dev)
+        b2 = torch.stack([pop[idx].genome["hidden2_layer.bias"] for idx in active_indices]).to(dev).unsqueeze(1)
+        w3 = torch.stack([pop[idx].genome["output.weight"] for idx in active_indices]).to(dev)
+        b3 = torch.stack([pop[idx].genome["output.bias"] for idx in active_indices]).to(dev).unsqueeze(1)
 
-                if not early_generation and self._should_cull_for_hunger(env):
-                    part_started_at = time.perf_counter()
-                    action = 0
-                    action_scores = np.zeros(len(self.action_labels), dtype=np.float32)
-                    was_random = False
-                    greedy_action = 0
-                    reward, done, info = self._apply_hunger_cull(env, -5.0, {"steps": env.step_count, "reason": EVOLUTION_HUNGER_CULL_REASON, "penalty_reasons": [EVOLUTION_HUNGER_CULL_REASON]})
-                    bookkeeping_ms += (time.perf_counter() - part_started_at) * 1000.0
-                    step_number = int(info.get("steps", env.step_count))
-                    self.step_logs[env_idx].append({"step": step_number, "reward": float(reward), "train_reward": float(reward), "action": int(action), "action_label": self.action_labels[action] if 0 <= action < len(self.action_labels) else "-", "reason": EVOLUTION_HUNGER_CULL_REASON, "penalties": [EVOLUTION_HUNGER_CULL_REASON], "random": False, "individual": env_idx + 1, "apple_opportunity": None})
-                    fitness = agent.finish_individual(env_idx, score=env.score, reward=self.episode_rewards[env_idx] + reward, steps=env.step_count, reason=EVOLUTION_HUNGER_CULL_REASON, board_size=env.board_size, trap_after_apple_count=env.trap_after_apple_count, avoidable_collision_count=env.avoidable_collision_count, max_steps_without_food=env.max_steps_without_food)
-                    self.episode_rewards[env_idx] += reward
-                    self.last_fitnesses[env_idx] = fitness
-                    self.done[env_idx] = True
-                    self.completed_count += 1
-                    item = {"index": env_idx, "env": env, "reason": EVOLUTION_HUNGER_CULL_REASON, "reward": self.episode_rewards[env_idx], "fitness": fitness, "action": action, "action_scores": action_scores, "random": was_random, "greedy_action": greedy_action, "penalty_reasons": [EVOLUTION_HUNGER_CULL_REASON]}
-                    completed.append(item)
-                    if self.best_completed is None or fitness > float(self.best_completed.get("fitness", float("-inf"))):
-                        self.best_completed = dict(item)
-                    continue
+        # Переводим наблюдения в тензор PyTorch и делаем unsqueeze до 3D-тензора [B, 1, input_size]
+        states_t = torch.from_numpy(states_np).to(device=dev).unsqueeze(1)
 
-                infer_start = time.perf_counter()
-                state_t = states_tensor[idx_in_alive]
-                genome = pop[env_idx].genome
-                action_scores_t = functional_call(net, genome, (state_t,)).squeeze(0)
-                action = int(torch.argmax(action_scores_t).item())
-                action_scores = action_scores_t.cpu().numpy()
-                was_random = False
-                greedy_action = action
-                inference_ms += (time.perf_counter() - infer_start) * 1000.0
+        # Векторное вычисление слоев через bmm
+        x1 = torch.bmm(states_t, w1.transpose(1, 2)) + b1
+        x1 = torch.tanh(x1)
+        x2 = torch.bmm(x1, w2.transpose(1, 2)) + b2
+        x2 = torch.tanh(x2)
+        predictions = torch.bmm(x2, w3.transpose(1, 2)) + b3
+        predictions = predictions.squeeze(1) # Убираем размерность 1: [B, 3]
 
-                absolute_direction = self._relative_to_absolute(env.direction, action)
-                env_start = time.perf_counter()
-                _, reward, done, info = env.step(absolute_direction)
-                if not done and not early_generation and self._should_cull_for_hunger(env):
-                    reward, done, info = self._apply_hunger_cull(env, reward, info)
-                env_step_ms += (time.perf_counter() - env_start) * 1000.0
+        # Вычисляем индексы действий и переводим результаты в numpy
+        actions_t = torch.argmax(predictions, dim=1)
+        actions = actions_t.cpu().numpy()
+        predictions_np = predictions.cpu().numpy()
+        
+        inference_ms = (time.perf_counter() - infer_start) * 1000.0
 
-                book_start = time.perf_counter()
-                self.episode_rewards[env_idx] += reward
-                step_number = int(info.get("steps", env.step_count))
-                if step_number <= 1:
-                    self.step_logs[env_idx].clear()
-                self.step_logs[env_idx].append({"step": step_number, "reward": float(reward), "train_reward": float(reward), "action": int(action), "action_label": self.action_labels[action] if 0 <= action < len(self.action_labels) else "-", "reason": str(info.get("reason", env.last_reason)), "penalties": [str(item) for item in info.get("penalty_reasons", [])], "random": bool(was_random), "individual": env_idx + 1, "apple_opportunity": info.get("apple_opportunity")})
-                if done:
-                    reason = str(info.get("reason", env.last_reason))
-                    fitness = agent.finish_individual(env_idx, score=env.score, reward=self.episode_rewards[env_idx], steps=env.step_count, reason=reason, board_size=env.board_size, trap_after_apple_count=env.trap_after_apple_count, avoidable_collision_count=env.avoidable_collision_count, max_steps_without_food=env.max_steps_without_food)
-                    self.last_fitnesses[env_idx] = fitness
-                    self.done[env_idx] = True
-                    self.completed_count += 1
-                    item = {"index": env_idx, "env": env, "reason": reason, "reward": self.episode_rewards[env_idx], "fitness": fitness, "action": action, "action_scores": action_scores, "random": was_random, "greedy_action": greedy_action, "penalty_reasons": list(info.get("penalty_reasons", []))}
-                    completed.append(item)
-                    if self.best_completed is None or fitness > float(self.best_completed.get("fitness", float("-inf"))):
-                        self.best_completed = dict(item)
-                bookkeeping_ms += (time.perf_counter() - book_start) * 1000.0
+        # 4. Выполнение шагов в окружениях на основе вычисленных действий
+        for i, env_idx in enumerate(active_indices):
+            env = self.envs[env_idx]
+            alive_processed += 1
+            action = int(actions[i])
+            action_scores = predictions_np[i]
+            was_random = False
+            greedy_action = action
+
+            absolute_direction = relative_to_absolute(env.direction, action)
+            env_start = time.perf_counter()
+            _, reward, done, info = env.step(absolute_direction)
+            if not done and not early_generation and self._should_cull_for_hunger(env):
+                reward, done, info = self._apply_hunger_cull(env, reward, info)
+            env_step_ms += (time.perf_counter() - env_start) * 1000.0
+
+            book_start = time.perf_counter()
+            self.episode_rewards[env_idx] += reward
+            step_number = int(info.get("steps", env.step_count))
+            if step_number <= 1:
+                self.step_logs[env_idx].clear()
+            self.step_logs[env_idx].append({"step": step_number, "reward": float(reward), "train_reward": float(reward), "action": int(action), "action_label": self.action_labels[action] if 0 <= action < len(self.action_labels) else "-", "reason": str(info.get("reason", env.last_reason)), "penalties": [str(item) for item in info.get("penalty_reasons", [])], "random": bool(was_random), "individual": env_idx + 1, "apple_opportunity": None})
+            if done:
+                reason = str(info.get("reason", env.last_reason))
+                fitness = agent.finish_individual(env_idx, score=env.score, reward=self.episode_rewards[env_idx], steps=env.step_count, reason=reason, board_size=env.board_size, max_steps_without_food=env.max_steps_without_food)
+                self.last_fitnesses[env_idx] = fitness
+                self.done[env_idx] = True
+                self.completed_count += 1
+                item = {"index": env_idx, "env": env, "reason": reason, "reward": self.episode_rewards[env_idx], "fitness": fitness, "action": action, "action_scores": action_scores, "random": was_random, "greedy_action": greedy_action, "penalty_reasons": list(info.get("penalty_reasons", []))}
+                completed.append(item)
+                if self.best_completed is None or fitness > float(self.best_completed.get("fitness", float("-inf"))):
+                    self.best_completed = dict(item)
+            bookkeeping_ms += (time.perf_counter() - book_start) * 1000.0
 
         leader_start = time.perf_counter()
         self.update_leader()
         leader_ms = (time.perf_counter() - leader_start) * 1000.0
         bookkeeping_ms += leader_ms
-        self.last_profile_ms = {"alive": alive_processed, "observation": round(observation_ms, 1), "inference": round(inference_ms, 1), "env_step": round(env_step_ms, 1), "bookkeeping": round(bookkeeping_ms, 1), "leader": round(leader_ms, 1)}
+        self.last_profile_ms = {"alive": len(alive_indices), "observation": round(observation_ms, 1), "inference": round(inference_ms, 1), "env_step": round(env_step_ms, 1), "bookkeeping": round(bookkeeping_ms, 1), "leader": round(leader_ms, 1)}
         return completed

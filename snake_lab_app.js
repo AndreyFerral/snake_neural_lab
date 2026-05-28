@@ -113,8 +113,6 @@ class SnakeLabApp {
     this.canvasDimensions = new WeakMap();
     this.initResizeObserver();
 
-    this.gameBackgroundCache = null;
-
     this.setHidden(this.networkPanel, false);
     this.setDecisionText("Подключение к Python backend...");
     this.bindEvents();
@@ -129,15 +127,22 @@ class SnakeLabApp {
 
   initResizeObserver() {
     this.resizeObserver = new ResizeObserver((entries) => {
+      let changed = false;
       for (const entry of entries) {
         const canvas = entry.target;
         const width = Math.max(1, Math.round(entry.contentRect.width || canvas.clientWidth || 1));
         const height = Math.max(1, Math.round(entry.contentRect.height || canvas.clientHeight || 1));
         
-        this.canvasDimensions.set(canvas, { width, height, dirty: true });
+        const existing = this.canvasDimensions.get(canvas);
+        if (!existing || existing.width !== width || existing.height !== height) {
+          this.canvasDimensions.set(canvas, { width, height, dirty: true });
+          changed = true;
+        }
       }
-      this.forceNextVisualRefresh();
-      this.scheduleRender();
+      if (changed) {
+        this.forceNextVisualRefresh();
+        this.scheduleRender();
+      }
     });
 
     [this.gameCanvas, this.networkCanvas, this.chartCanvas, this.deathSnapshotCanvas].forEach((canvas) => {
@@ -229,21 +234,8 @@ class SnakeLabApp {
     return "-";
   }
 
-  arrowForAbsoluteDirection(direction) {
-    if (direction === 0) return "↑";
-    if (direction === 1) return "→";
-    if (direction === 2) return "↓";
-    if (direction === 3) return "←";
-    return "-";
-  }
-
   currentInputGrid() {
     return this.state?.input_grid ?? DEFAULT_INPUT_GRID;
-  }
-
-  currentInputLabel() {
-    const inputGrid = this.currentInputGrid();
-    return inputGrid > 0 ? `${inputGrid}x${inputGrid}` : "Без карты";
   }
 
   inputMode() {
@@ -650,8 +642,7 @@ class SnakeLabApp {
     const staleFrame = Number.isFinite(previousFrameId) && Number.isFinite(nextFrameId) && nextFrameId < previousFrameId;
     if (nextState.backend_busy || staleFrame) STALE_FRAME_FIELDS.forEach((key) => { if (key in previousState) nextState[key] = previousState[key]; });
     carryDeferredFields();
-    if (previousState.network && !nextState.network) nextState.network = previousState.network;
-    else if (nextState.network && previousState.network) {
+    if (nextState.network && previousState.network) {
       const nextConnections = nextState.network.connections ?? {};
       const previousConnections = previousState.network.connections ?? {};
       const shouldReuseConnections = NETWORK_CONNECTION_KEYS.every((key) => Array.isArray(nextConnections[key]) && nextConnections[key].length === 0) && NETWORK_CONNECTION_KEYS.some((key) => Array.isArray(previousConnections[key]) && previousConnections[key].length > 0);
@@ -756,23 +747,7 @@ class SnakeLabApp {
     });
   }
 
-  scheduleLiveFrameRender() {
-    if (this.liveFrameRenderHandle) {
-      if (performance.now() - this.liveFrameScheduledAt < 200) return;
-      window.cancelAnimationFrame(this.liveFrameRenderHandle);
-      this.liveFrameRenderHandle = null;
-    }
-    this.liveFrameScheduledAt = performance.now();
-    this.liveFrameRenderHandle = window.requestAnimationFrame(() => {
-      this.liveFrameRenderHandle = null;
-      this.liveFrameScheduledAt = 0;
-      try {
-        const now = performance.now();
-        if (now - this.lastPanelRenderAt >= UI_PANEL_RENDER_MS) { this.updateStats(); this.lastPanelRenderAt = now; }
-        this.renderGame();
-      } catch (error) { console.error("Snake live frame render error:", error); this.setDecisionText(`Ошибка интерфейса: ${String(error.message || error)}`); }
-    });
-  }
+
 
   queueHeavyRender(name, callback) {
     if (this.pendingHeavyTaskNames.has(name)) return;
@@ -980,22 +955,52 @@ class SnakeLabApp {
 
   renderDeathRiskTable(selectedStep) {
     if (!this.deathRiskTable) return;
-    const safety = selectedStep?.move_safety ?? null;
     const risks = selectedStep?.move_risks ?? null;
-    if (!safety && !risks) { this.setHtml(this.deathRiskTable, ""); return; }
-    const baseDirection = Number(selectedStep?.direction ?? 1);
-    const selectedDirection = Number(selectedStep?.planned_direction ?? selectedStep?.direction ?? 1);
-    const percent = (value) => `${Math.round(Number(value ?? 0) * 100)}%`;
-    const absoluteForRelativeAction = (action) => { if (action === 1) return (baseDirection + 3) % 4; if (action === 2) return (baseDirection + 1) % 4; return baseDirection; };
-    const rows = [{ action: 0, key: "forward" }, { action: 1, key: "left" }, { action: 2, key: "right" }].map(({ action, key }) => {
-      const absoluteDirection = absoluteForRelativeAction(action);
-      const label = this.arrowForAbsoluteDirection(absoluteDirection);
-      const metrics = safety?.[key] ?? {};
-      const risk = Number(metrics.risk ?? risks?.[key] ?? 0);
-      const rowClass = absoluteDirection === selectedDirection ? ' class="is-selected"' : "";
-      return [`<tr${rowClass}>`, `<td>${label}</td>`, `<td>${percent(risk)}</td>`, `<td>${percent(metrics.food)}</td>`, "</tr>"].join("");
+    if (!risks) { this.setHtml(this.deathRiskTable, ""); return; }
+    
+    const percent = (value) => {
+      const num = Number(value ?? 0);
+      return `${Math.round(num * 100)}%`;
+    };
+    
+    const getRiskValues = (dirKey) => {
+      const raw = risks?.[dirKey];
+      if (raw && typeof raw === "object") {
+        return {
+          danger: percent(raw.danger),
+          tail_blocked: percent(raw.tail_blocked),
+          trap: percent(raw.trap)
+        };
+      }
+      return {
+        danger: percent(raw),
+        tail_blocked: "-",
+        trap: "-"
+      };
+    };
+
+    const rows = [
+      { action: 0, key: "forward" },
+      { action: 1, key: "left" },
+      { action: 2, key: "right" }
+    ].map(({ action, key }) => {
+      const label = this.arrowForAction(action);
+      const vals = getRiskValues(key);
+      const rowClass = (selectedStep && Number.isInteger(selectedStep.action) && action === Number(selectedStep.action)) ? ' class="is-selected"' : "";
+      return [
+        `<tr${rowClass}>`,
+        `<td>${label}</td>`,
+        `<td>${vals.danger}</td>`,
+        `<td>${vals.tail_blocked}</td>`,
+        `<td>${vals.trap}</td>`,
+        "</tr>"
+      ].join("");
     }).join("");
-    this.setHtml(this.deathRiskTable, `<table class="death-risk-table"><thead><tr><th>Ход</th><th>Риск</th><th>Еда</th></tr></thead><tbody>${rows}</tbody></table>`);
+    
+    this.setHtml(
+      this.deathRiskTable,
+      `<table class="death-risk-table"><thead><tr><th>ход</th><th>СТЕНА</th><th>ХВОСТ</th><th>ТУПИК</th></tr></thead><tbody>${rows}</tbody></table>`
+    );
   }
 
   getSelectedDeathStep(snapshot) {
@@ -1155,7 +1160,6 @@ class SnakeLabApp {
     const isSmart = this.state.mode === "smart";
     const isDqn = this.state.agent_kind === "dqn" && !isSmart;
     const modeText = this.state.training ? "Обучение" : modeLabels[this.state.mode] ?? "ИИ";
-    const smartModelName = this.state.smart_model?.label || this.state.smart_model?.name || "-";
     this.setText(this.modeStat, modeText);
     this.setText(this.epochStat, String(this.state.stats.episode));
     this.setText(this.scoreStat, String(this.state.game.score));
@@ -1197,11 +1201,11 @@ class SnakeLabApp {
     const stepReviewSource = selectedHistory ? "history" : this.state?.step_review_source ?? "current";
     const isDeathLog = stepReviewSource === "last_death";
     const sourceLabel = selectedHistory ? `• эп. ${selectedHistory.episode ?? "?"}` : isDeathLog ? `• ${this.state?.last_outcome_reason === "victory" ? "последняя победа" : "итог эпизода"}` : "";
-    const signature = [this.selectedStepLogKey, stepReviewSource, this.state?.last_outcome_reason ?? "", steps.length, lastStep.step, lastStep.reward, lastStep.train_reward, lastStep.reason, (lastStep.penalties ?? []).join(", "), JSON.stringify(lastStep.apple_opportunity ?? null)].join(":");
+    const signature = [this.selectedStepLogKey, stepReviewSource, this.state?.last_outcome_reason ?? "", steps.length, lastStep.step, lastStep.reward, lastStep.train_reward, lastStep.reason, (lastStep.penalties ?? []).join(", ")].join(":");
     const shouldUpdateDuringTraining = selectedHistory || !this.state?.training || !this.state?.running || stepReviewSource === "current" || isDeathLog || TERMINAL_REASONS.has(lastStep.reason);
     if (!force && this.state?.training && !shouldUpdateDuringTraining && this.lastStepReviewSignature) { this.setText(this.stepReviewLabel, `${visibleSteps.length} строк • последний шаг ${lastStep.step} • обновление на паузе/смерти`); return; }
     if (!force && signature === this.lastStepReviewSignature && lastStep.reason === this.lastStepReviewReason) return;
-    const stepReasonLabel = (reason) => { if (reason === "apple") return "яблоко"; if (reason === "victory") return "win"; if (reason === "wall_collision" || reason === "body_collision") return "смерть"; return "  "; };
+    const stepReasonLabel = (reason) => { if (reason === "apple") return "яблоко"; if (reason === "victory") return "win"; if (TERMINAL_REASONS.has(reason)) return formatReason(reason).toLowerCase(); return "  "; };
     const forceScroll = this.forceStepLogScroll;
     const nearBottom = this.stepReviewBody.scrollHeight - this.stepReviewBody.scrollTop - this.stepReviewBody.clientHeight < 24;
     this.setText(this.stepReviewLabel, `${visibleSteps.length} строк • последний шаг ${steps[steps.length - 1].step}${sourceLabel}`);
@@ -1230,12 +1234,11 @@ class SnakeLabApp {
       const extraParts = [...cleanEvents, sourceLabel];
       const logText = headerParts.join(" ") + (extraParts.length ? " • " + extraParts.join(" • ") : "");
 
-      const hasTailLost = false;
       const isCollision = penalties.includes("wall_collision") || penalties.includes("body_collision");
       const tookApple = entry.reason === "apple";
 
       let rowClass = "step-log-line log-yellow";
-      if (hasTailLost || isCollision || reward < -1.0) {
+      if (isCollision || reward < -1.0) {
         rowClass = "step-log-line log-red";
       } else if (tookApple || reward > 1.0) {
         rowClass = "step-log-line log-green";
@@ -1329,17 +1332,30 @@ class SnakeLabApp {
       }
     );
 
-    // Отрисовка виджета счета
+    // Отрисовка виджета счета с динамической шириной под размер текста
+    const scoreText = `Счет: ${this.state.game.score}`;
+    const boardText = `Поле: ${size}x${size}`;
+
+    ctx.font = "600 22px Aptos, Trebuchet MS, sans-serif";
+    const scoreWidth = ctx.measureText(scoreText).width;
+
+    ctx.font = "500 14px Aptos, Trebuchet MS, sans-serif";
+    const boardWidth = ctx.measureText(boardText).width;
+
+    const boxWidth = Math.max(140, Math.round(Math.max(scoreWidth, boardWidth) + 28));
+
     ctx.fillStyle = "rgba(4, 14, 20, 0.72)";
-    ctx.fillRect(14, 14, 280, 66);
+    ctx.fillRect(14, 14, boxWidth, 66);
     ctx.strokeStyle = "rgba(255,255,255,0.1)";
-    ctx.strokeRect(14, 14, 280, 66);
+    ctx.strokeRect(14, 14, boxWidth, 66);
+
     ctx.fillStyle = "#edf6f9";
     ctx.font = "600 22px Aptos, Trebuchet MS, sans-serif";
-    ctx.fillText(`Счет: ${this.state.game.score}`, 28, 44);
+    ctx.fillText(scoreText, 28, 44);
+
     ctx.font = "500 14px Aptos, Trebuchet MS, sans-serif";
     ctx.fillStyle = "#b4c7cf";
-    ctx.fillText(`Поле: ${size}x${size} | Вход: ${this.currentInputLabel()}`, 28, 68);
+    ctx.fillText(boardText, 28, 68);
     this.lastGameRenderTime = performance.now();
   }
 
@@ -1379,9 +1395,33 @@ class SnakeLabApp {
     const globalSignalIndexByLabel = new Map(globalSignalLabels.map((label, index) => [label, index]));
     const padX = 26; const titleY = 32; const contentTop = 54; const contentBottom = height - 20; const contentHeight = Math.max(160, contentBottom - contentTop);
     const signalGroups = [
-      { title: "Еда", labels: ["food_ahead", "food_left", "food_right", "apple_step_forward", "apple_step_left", "apple_step_right"] },
-      { title: "Риск", labels: ["danger_forward", "danger_left", "danger_right"] },
-    ].map((group) => ({ ...group, labels: group.labels.filter((label) => globalSignalLabelSet.has(label)) })).filter((group) => group.labels.length > 0);
+      {
+        title: "Еда",
+        rows: [
+          ["food_ahead", "food_left", "food_right", "food_behind"],
+          ["apple_step_forward", "apple_step_left", "apple_step_right"]
+        ]
+      },
+      {
+        title: "Хвост",
+        rows: [
+          ["tail_ahead", "tail_left", "tail_right"]
+        ]
+      },
+      {
+        title: "Риск",
+        rows: [
+          ["danger_forward", "danger_left", "danger_right"],
+          ["tail_blocked_forward", "tail_blocked_left", "tail_blocked_right"],
+          ["trap_ahead", "trap_left", "trap_right"]
+        ]
+      }
+    ].map((group) => {
+      const filteredRows = group.rows
+        .map((row) => row.filter((label) => globalSignalLabelSet.has(label)))
+        .filter((row) => row.length > 0);
+      return { ...group, rows: filteredRows };
+    }).filter((group) => group.rows.length > 0);
     const inputWidth = Math.max(220, Math.min(255, width * 0.27)); const inputX = padX; const inputY = contentTop + 4;
     const hidden1X = Math.max(inputX + inputWidth + 76, width * 0.44); const hidden2X = Math.max(hidden1X + 160, width * 0.62); const outputX = width - padX - 74;
     const hidden1Indices = this.pickTopIndices(hidden1, 14); const hidden2Indices = this.pickTopIndices(hidden2, 10);
@@ -1392,30 +1432,48 @@ class SnakeLabApp {
     const hidden1Map = new Map(hidden1Indices.map((index, position) => [index, hidden1Positions[position]])); const hidden2Map = new Map(hidden2Indices.map((index, position) => [index, hidden2Positions[position]]));
     const outputMap = new Map(outputIndices.map((index, position) => [index, outputPositions[position]])); const signalMap = new Map();
     if (globalSignalLabels.length) {
-      const groupGap = 5; const groupPadding = 8; const pillGap = 6; const pillColumns = 3; const pillWidth = (inputWidth - groupPadding * 2 - pillGap * (pillColumns - 1)) / pillColumns; const pillHeight = 22; const pillRowGap = 23;
-      const signalLayouts = signalGroups.map((group) => ({ ...group, rows: Math.ceil(group.labels.length / pillColumns) }));
-      const totalSignalHeight = signalLayouts.reduce((sum, group) => sum + 22 + group.rows * pillRowGap + 6, Math.max(0, signalLayouts.length - 1) * groupGap);
+      const groupGap = 5; const groupPadding = 8; const pillGap = 6;
+      const pillHeight = 18; const pillVerticalGap = 6; const pillRowGap = pillHeight + pillVerticalGap;
+      const totalSignalHeight = signalGroups.reduce((sum, group) => sum + 23 + group.rows.length * pillRowGap, Math.max(0, signalGroups.length - 1) * groupGap);
       let currentY = inputY + Math.max(0, (contentHeight - totalSignalHeight) / 2);
-      signalLayouts.forEach((group) => {
-        const groupHeight = 22 + group.rows * pillRowGap + 6; this.roundedRect(ctx, inputX, currentY, inputWidth, groupHeight, 10);
+      signalGroups.forEach((group) => {
+        const groupHeight = 23 + group.rows.length * pillRowGap; this.roundedRect(ctx, inputX, currentY, inputWidth, groupHeight, 10);
         ctx.fillStyle = "rgba(255,255,255,0.045)"; ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,0.075)"; ctx.lineWidth = 1; ctx.stroke();
         ctx.fillStyle = "#ffcf66"; ctx.font = "700 10.5px Aptos, Trebuchet MS, sans-serif"; ctx.fillText(group.title.toUpperCase(), inputX + groupPadding, currentY + 14.5);
-        group.labels.forEach((label, labelOffset) => {
-          const signalIndex = globalSignalIndexByLabel.get(label) ?? -1; if (signalIndex < 0) return;
-          const colIndex = labelOffset % pillColumns; const rowIndex = Math.floor(labelOffset / pillColumns);
-          const x = inputX + groupPadding + colIndex * (pillWidth + pillGap); const y = currentY + 21 + rowIndex * pillRowGap;
-          const value = globalSignalValues[signalIndex] ?? 0; this.roundedRect(ctx, x, y, pillWidth, pillHeight, 7);
-          ctx.fillStyle = value > 0.66 ? "rgba(255, 179, 71, 0.24)" : value > 0.05 ? "rgba(92, 214, 173, 0.18)" : "rgba(255,255,255,0.06)"; ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,0.055)"; ctx.stroke();
-          ctx.fillStyle = "#edf6f9"; ctx.font = "700 11px Aptos, Trebuchet MS, sans-serif";
-          const displayValue = Math.abs(value - Math.round(value)) < 0.005 ? String(Math.round(value)) : value.toFixed(2);
-          ctx.fillText(`${formatSignalLabel(label)} ${displayValue}`, x + 5, y + 15); signalMap.set(signalIndex, { x: x + pillWidth, y: y + pillHeight / 2 });
+        group.rows.forEach((rowLabels, rowIndex) => {
+          const cols = rowLabels.length;
+          const pillWidth = (inputWidth - groupPadding * 2 - pillGap * (cols - 1)) / cols;
+          rowLabels.forEach((label, colIndex) => {
+            const signalIndex = globalSignalIndexByLabel.get(label) ?? -1; if (signalIndex < 0) return;
+            const x = inputX + groupPadding + colIndex * (pillWidth + pillGap); const y = currentY + 21 + rowIndex * pillRowGap;
+            const value = globalSignalValues[signalIndex] ?? 0; this.roundedRect(ctx, x, y, pillWidth, pillHeight, 7);
+            ctx.fillStyle = value > 0.66 ? "rgba(255, 179, 71, 0.24)" : value > 0.05 ? "rgba(92, 214, 173, 0.18)" : "rgba(255,255,255,0.06)"; ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,0.055)"; ctx.stroke();
+            ctx.fillStyle = "#edf6f9"; ctx.font = "700 11px Aptos, Trebuchet MS, sans-serif";
+            const displayValue = Math.abs(value - Math.round(value)) < 0.005 ? String(Math.round(value)) : value.toFixed(2);
+            ctx.fillText(`${formatSignalLabel(label)} ${displayValue}`, x + 5, y + 13); signalMap.set(signalIndex, { x: x + pillWidth, y: y + pillHeight / 2 });
+          });
         });
         currentY += groupHeight + groupGap;
       });
     }
-    (connections.global_hidden1 ?? []).forEach((connection) => { const from = signalMap.get(connection.from_index); const to = hidden1Map.get(connection.to_index); if (!from || !to) return; const alpha = clamp(connection.influence * 4.2, 0.20, 0.78); ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.bezierCurveTo(from.x + 34, from.y, to.x - 48, to.y, to.x - 10, to.y); ctx.strokeStyle = connection.weight >= 0 ? `rgba(127, 208, 255, ${alpha})` : `rgba(255, 179, 71, ${alpha})`; ctx.lineWidth = clamp(Math.abs(connection.weight) * 2.2, 1.05, 3.0); ctx.stroke(); });
-    (connections.hidden1_hidden2 ?? []).forEach((connection) => { const from = hidden1Map.get(connection.from_index); const to = hidden2Map.get(connection.to_index); if (!from || !to) return; const alpha = clamp(connection.influence * 4.4, 0.16, 0.76); ctx.beginPath(); ctx.moveTo(from.x + 10, from.y); ctx.bezierCurveTo(from.x + 55, from.y, to.x - 55, to.y, to.x - 10, to.y); ctx.strokeStyle = connection.weight >= 0 ? `rgba(92, 214, 173, ${alpha})` : `rgba(255, 179, 71, ${alpha})`; ctx.lineWidth = clamp(Math.abs(connection.weight) * 3.0, 1.0, 3.2); ctx.stroke(); });
-    (connections.hidden2_output ?? []).forEach((connection) => { const from = hidden2Map.get(connection.from_index); const to = outputMap.get(connection.to_index); if (!from || !to) return; const alpha = clamp(connection.influence * 4.6, 0.18, 0.82); ctx.beginPath(); ctx.moveTo(from.x + 12, from.y); ctx.bezierCurveTo(from.x + 46, from.y, to.x - 46, to.y, to.x - 12, to.y); ctx.strokeStyle = connection.weight >= 0 ? `rgba(92, 214, 173, ${alpha})` : `rgba(255, 179, 71, ${alpha})`; ctx.lineWidth = clamp(Math.abs(connection.weight) * 3.2, 1.1, 3.6); ctx.stroke(); });
+    this.drawConnections(ctx, connections.global_hidden1, signalMap, hidden1Map, {
+      xOffsetFrom: 0, xOffsetTo: -10, cpX1: 34, cpX2: -48,
+      alphaMult: 4.2, alphaMin: 0.20, alphaMax: 0.78,
+      widthMult: 2.2, widthMin: 1.05, widthMax: 3.0,
+      posRgb: "127, 208, 255", negRgb: "255, 179, 71"
+    });
+    this.drawConnections(ctx, connections.hidden1_hidden2, hidden1Map, hidden2Map, {
+      xOffsetFrom: 10, xOffsetTo: -10, cpX1: 55, cpX2: -55,
+      alphaMult: 4.4, alphaMin: 0.16, alphaMax: 0.76,
+      widthMult: 3.0, widthMin: 1.0, widthMax: 3.2,
+      posRgb: "92, 214, 173", negRgb: "255, 179, 71"
+    });
+    this.drawConnections(ctx, connections.hidden2_output, hidden2Map, outputMap, {
+      xOffsetFrom: 12, xOffsetTo: -12, cpX1: 46, cpX2: -46,
+      alphaMult: 4.6, alphaMin: 0.18, alphaMax: 0.82,
+      widthMult: 3.2, widthMin: 1.1, widthMax: 3.6,
+      posRgb: "92, 214, 173", negRgb: "255, 179, 71"
+    });
     this.drawIndexedLayer(ctx, hidden1Indices, hidden1Positions, hidden1, 10, "H1"); this.drawIndexedLayer(ctx, hidden2Indices, hidden2Positions, hidden2, 12, "H2"); this.drawOutputLayer(ctx, outputIndices, outputPositions, output, labels, "q");
     ctx.fillStyle = "#edf6f9"; ctx.font = "600 14px Aptos, Trebuchet MS, sans-serif"; ctx.fillText("Актуальные сигналы", inputX - 2, titleY); ctx.fillText("Активные нейроны H1", hidden1X - 44, titleY); ctx.fillText("Активные нейроны H2", hidden2X - 42, titleY); ctx.fillText("Решения", outputX - 18, titleY);
   }
@@ -1424,6 +1482,64 @@ class SnakeLabApp {
   drawIndexedLayer(ctx, indices, positions, values, radius, prefix) { positions.forEach((position, offset) => { const index = indices[offset]; const value = values[index] ?? 0; ctx.beginPath(); ctx.arc(position.x, position.y, radius, 0, Math.PI * 2); ctx.fillStyle = value === 0 ? "rgba(255,255,255,0.08)" : colorForActivation(value); ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,0.14)"; ctx.stroke(); ctx.fillStyle = "#b4c7cf"; ctx.font = "600 12.5px Aptos, Trebuchet MS, sans-serif"; ctx.fillText(`${prefix}-${index}`, position.x + 16, position.y + 4.5); }); }
   drawOutputLayer(ctx, indices, positions, values, labels, mode = "q") { positions.forEach((position, offset) => { const index = indices[offset]; const value = values[index] ?? 0; this.roundedRect(ctx, position.x - 26, position.y - 18, 116, 36, 18); ctx.fillStyle = value === 0 ? "rgba(255,255,255,0.06)" : colorForActivation(value); ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,0.12)"; ctx.stroke(); ctx.fillStyle = "#08131d"; ctx.font = "700 14.5px Aptos, Trebuchet MS, sans-serif"; ctx.fillText(`${labels[index] ?? `Out-${index}`}`, position.x - 10, position.y + 5); }); }
 
+  drawConnections(ctx, connectionList, fromMap, toMap, options) {
+    if (!Array.isArray(connectionList) || !connectionList.length) return;
+    
+    const xOffsetFrom = options.xOffsetFrom ?? 0;
+    const xOffsetTo = options.xOffsetTo ?? 0;
+    const cpX1 = options.cpX1 ?? 0;
+    const cpX2 = options.cpX2 ?? 0;
+    const alphaMult = options.alphaMult ?? 1.0;
+    const alphaMin = options.alphaMin ?? 0.20;
+    const alphaMax = options.alphaMax ?? 0.80;
+    const widthMult = options.widthMult ?? 1.0;
+    const widthMin = options.widthMin ?? 1.0;
+    const widthMax = options.widthMax ?? 3.0;
+    const posRgb = options.posRgb ?? "127, 208, 255";
+    const negRgb = options.negRgb ?? "255, 179, 71";
+
+    const groups = {};
+
+    connectionList.forEach((connection) => {
+      const from = fromMap.get(connection.from_index);
+      const to = toMap.get(connection.to_index);
+      if (!from || !to) return;
+
+      const alpha = clamp(connection.influence * alphaMult, alphaMin, alphaMax);
+      const weight = connection.weight ?? 0;
+      const lineWidth = clamp(Math.abs(weight) * widthMult, widthMin, widthMax);
+
+      const roundedAlpha = Math.round(alpha * 10) / 10;
+      const roundedLineWidth = Math.round(lineWidth * 10) / 10;
+      const isPos = weight >= 0 ? 1 : 0;
+      
+      const key = `${isPos}|${roundedAlpha}|${roundedLineWidth}`;
+      if (!groups[key]) {
+        groups[key] = [];
+      }
+      groups[key].push({ from, to });
+    });
+
+    for (const [key, paths] of Object.entries(groups)) {
+      const [isPosStr, alphaStr, lineWidthStr] = key.split("|");
+      const isPos = isPosStr === "1";
+      const alpha = parseFloat(alphaStr);
+      const lineWidth = parseFloat(lineWidthStr);
+      const rgb = isPos ? posRgb : negRgb;
+
+      ctx.strokeStyle = `rgba(${rgb}, ${alpha})`;
+      ctx.lineWidth = lineWidth;
+      ctx.beginPath();
+      
+      paths.forEach(({ from, to }) => {
+        ctx.moveTo(from.x + xOffsetFrom, from.y);
+        ctx.bezierCurveTo(from.x + cpX1, from.y, to.x + cpX2, to.y, to.x + xOffsetTo, to.y);
+      });
+      
+      ctx.stroke();
+    }
+  }
+
   renderChart() {
     if (!this.chartCtx || !this.chartCanvas || !this.state) return;
 
@@ -1431,7 +1547,8 @@ class SnakeLabApp {
     const points = this.state.history ?? [];
     const isSmart = this.state.mode === "smart";
     const isDqn = this.state.agent_kind === "dqn" && !isSmart;
-    const renderSignature = [dim.width, dim.height, points.length, isSmart, isDqn].join("|");
+    const lastEpisode = points.length ? points[points.length - 1].episode ?? "" : "";
+    const renderSignature = [dim.width, dim.height, points.length, lastEpisode, isSmart, isDqn].join("|");
 
     if (!dim.dirty && renderSignature === this.lastChartRenderSignature) return;
     this.lastChartRenderSignature = renderSignature;

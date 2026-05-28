@@ -55,9 +55,9 @@ from backend_config import (
     SIGNAL_LABELS,
     TERMINAL_REASONS,
     REWARD_CATALOG,
+    hunger_budget_for,
 )
 
-from debug_logger import finish_episode, record_step, start_episode
 from dqn_agent import DQNAgent
 from evolution_agent import EvolutionAgent, ParallelEvolutionRunner
 from snake_env import SnakeEnv, relative_to_absolute
@@ -65,12 +65,7 @@ from smart_agent import SmartH5Agent, smart_model_candidates
 
 
 def safe_hunger_budget_for(score: int, board_size: int) -> float:
-    try:
-        return float(hunger_budget_for(score, board_size))
-    except NameError:
-        board_cells = max(1, int(board_size) * int(board_size))
-        snake_length = min(float(int(score) + 3), float(board_cells))
-        return float(board_size) * 4.0 + snake_length * 1.0
+    return float(hunger_budget_for(score, board_size))
 
 # =========================================================================
 # ЖЁСТКАЯ ФИКСАЦИЯ: ТОЛЬКО СИГНАЛЫ + АВТОПОДПИСЬ АРХИТЕКТУРЫ
@@ -84,7 +79,7 @@ STATIC_ROOT = Path(__file__).resolve().parent
 RUNTIME_DIR = STATIC_ROOT / ".runtime"
 AUX_STATS_PATH = RUNTIME_DIR / "snake_model_stats.json"
 ACTIVE_CONTEXT_PATH = RUNTIME_DIR / "active_context.json"
-PID_PATH = STATIC_ROOT / ".web_backend.pid"
+PID_PATH = RUNTIME_DIR / ".web_backend.pid"
 RESTART_FLAG_PATH = RUNTIME_DIR / "restart_requested.flag"
 PERF_LOG_PATH = RUNTIME_DIR / "backend_perf.log"
 RESTART_IN_PARENT_ENV = "SNAKE_RESTART_IN_PARENT"
@@ -913,15 +908,6 @@ class SnakeWebBackend:
         reason = str(info["reason"])
         next_state = self._current_observation()
 
-        record_step(
-            self.game,
-            state,
-            reward,
-            info,
-            action=visible_action,
-            q_values=q_values,
-        )
-
         self.last_state = next_state
         self.last_q_values = q_values
         self.live_reward = reward
@@ -934,7 +920,6 @@ class SnakeWebBackend:
         train_reward = reward
         step_number = int(info.get("steps", self.game.step_count))
         if step_number == 1:
-            start_episode()
             if self.step_review_entries:
                 self.step_review_entries.clear()
         self.step_review_entries.append({
@@ -959,40 +944,13 @@ class SnakeWebBackend:
         self.recent_step_snapshots.append(pre_step_snapshot)
 
         if training_mode and self.agent_kind == "dqn":
-            priority_scale = self._training_priority_scale(
-                done=done,
-                reason=self.last_reason,
-                penalty_reasons=self.last_penalty_reasons,
-            )
-            self.agent.remember(
-                state,
-                visible_action,
-                reward,
-                next_state,
-                done,
-                priority_scale=priority_scale,
-            )
-            for _ in range(self._dqn_extra_replay_count(done=done, reason=self.last_reason, penalty_reasons=self.last_penalty_reasons)):
-                self.agent.remember(
-                    state,
-                    visible_action,
-                    reward,
-                    next_state,
-                    done,
-                    priority_scale=priority_scale,
-                )
-            self.current_episode_transitions.append(
-                (state.copy(), visible_action, reward, next_state.copy(), done, priority_scale)
-            )
-            if done and self.last_reason in DEATH_REASON_ORDER and self.last_reason != "victory":
-                self._remember_dqn_death_context()
+            self.agent.remember(state, visible_action, reward, next_state, done)
             loss = self.agent.optimize()
             if loss is not None:
                 loss_fitness = -float(loss)
                 self.fitness_ema = loss_fitness if self.fitness_ema == 0 else self.fitness_ema * 0.92 + loss_fitness * 0.08
 
         if done:
-            finish_episode()
             self._finish_episode(str(info["reason"]), training_mode=training_mode)
 
         elapsed_ms = (time.perf_counter() - started_at) * 1000.0
@@ -1044,8 +1002,6 @@ class SnakeWebBackend:
             steps=self.game.step_count,
             reason=reason,
             board_size=self.game.board_size,
-            trap_after_apple_count=self.game.trap_after_apple_count,
-            avoidable_collision_count=self.game.avoidable_collision_count,
             max_steps_without_food=self.game.max_steps_without_food,
         ) if training_mode else float(getattr(self.agent, "last_fitness", 0.0))
         
@@ -1066,13 +1022,6 @@ class SnakeWebBackend:
         if len(self.history) > HISTORY_LIMIT:
             self.history.pop(0)
 
-        if training_mode and self.agent_kind == "dqn":
-            elite_priority = self._episode_elite_priority(previous_best_score, reason)
-            if elite_priority > 0:
-                self.agent.remember_elite_episode(
-                    self._compact_elite_transitions(self.current_episode_transitions),
-                    min_priority=elite_priority,
-                )
         self.current_episode_transitions.clear()
 
         self.last_outcome_reason = reason
@@ -1149,7 +1098,6 @@ class SnakeWebBackend:
             "action_random": bool(action_random),
             "greedy_action": int(greedy_action),
             "move_risks": self.game.relative_move_risks(),
-            "move_safety": self.game.relative_move_safety(),
         }
 
     def _reset_decision_stats(self) -> None:
@@ -1178,73 +1126,7 @@ class SnakeWebBackend:
         all_counts[key] = int(all_counts.get(key, 0)) + 1
         recent.append(key)
 
-    def _training_priority_scale(self, *, done: bool, reason: str, penalty_reasons: list[str]) -> float:
-        if reason == "apple":
-            return 2.0
-        if reason == "victory":
-            return 6.0
-        if done and reason in {"wall_collision", "body_collision"}:
-            return 4.0 if reason == "wall_collision" else 5.0
-        if "trap_after_apple" in penalty_reasons:
-            return 2.5
-        return 1.0
 
-    def _dqn_extra_replay_count(self, *, done: bool, reason: str, penalty_reasons: list[str]) -> int:
-        if self.agent_kind != "dqn":
-            return 0
-        if done and reason in DEATH_REASON_ORDER and reason != "victory":
-            return DQN_DEATH_REPLAY_EXTRA_COPIES
-        return 0
-
-    def _remember_dqn_death_context(self) -> None:
-        if self.agent_kind != "dqn" or not self.current_episode_transitions:
-            return
-        transitions_list = list(self.current_episode_transitions)
-        context = transitions_list[-(DQN_PRE_DEATH_CONTEXT_REPLAYS + 1):-1]
-        for state, action, reward, next_state, done, priority_scale in context:
-            self.agent.remember(
-                state,
-                action,
-                reward,
-                next_state,
-                done,
-                priority_scale=max(priority_scale, 4.0),
-            )
-
-    def _compact_elite_transitions(
-        self,
-        transitions: Deque[tuple[np.ndarray, int, float, np.ndarray, bool, float]],
-    ) -> list[tuple[np.ndarray, int, float, np.ndarray, bool, float]]:
-        transitions_list = list(transitions)
-        if len(transitions_list) <= ELITE_EPISODE_MAX_TRANSITIONS:
-            return transitions_list
-        important = [item for item in transitions_list if item[4] or item[2] > 0.5 or item[5] > 1.0]
-        stride = max(1, len(transitions_list) // ELITE_EPISODE_MAX_TRANSITIONS)
-        sampled = list(transitions_list[::stride])
-        merged: list[tuple[np.ndarray, int, float, np.ndarray, bool, float]] = []
-        seen: set[int] = set()
-        for item in important + sampled:
-            marker = id(item)
-            if marker in seen:
-                continue
-            seen.add(marker)
-            merged.append(item)
-            if len(merged) >= ELITE_EPISODE_MAX_TRANSITIONS:
-                break
-        return merged
-
-    def _episode_elite_priority(self, previous_best_score: int, reason: str) -> float:
-        score = self.game.score
-        max_score = max(1, self.game.board_size * self.game.board_size - 3)
-        if reason == "victory" or score >= max_score:
-            return 6.0
-        if score >= max(2, previous_best_score):
-            return 3.0
-        if previous_best_score >= 3 and score >= max(2, int(previous_best_score * 0.8)):
-            return 2.4
-        if score >= 1 and self.game.step_count >= max(80, self.game.board_size * 4):
-            return 1.6
-        return 0.0
 
     def _reward_rules_payload(self) -> dict[str, Any]:
         # Динамический каталог из backend_config.py
@@ -1888,12 +1770,16 @@ class SnakeWebBackend:
             try:
                 # === ИСПРАВЛЕННЫЙ БЛОК: корректное сопоставление весов и активаций ===
                 
-                # input -> hidden1: промежуточный слой 64 не выводится в UI, поэтому используем
-                # эффективную матрицу W_h1 @ W_in размером (HIDDEN_LAYER_1, input_size)
-                if hasattr(net, 'input_layer') and hasattr(net, 'hidden1_layer'):
-                    w_in = net.input_layer.weight.detach()
-                    w_h1 = net.hidden1_layer.weight.detach()
-                    w_in_h1 = (w_h1 @ w_in).cpu().numpy()
+                # input -> hidden1: промежуточный слой 64 не выводится в UI (в старой архитектуре),
+                # а в новой архитектуре hidden1_layer идет напрямую. Обрабатываем оба случая.
+                if hasattr(net, 'hidden1_layer'):
+                    if hasattr(net, 'input_layer'):
+                        w_in = net.input_layer.weight.detach()
+                        w_h1 = net.hidden1_layer.weight.detach()
+                        w_in_h1 = (w_h1 @ w_in).cpu().numpy()
+                    else:
+                        w_in_h1 = net.hidden1_layer.weight.detach().cpu().numpy()
+                    
                     input_hidden1_connections = build_connection_payload(
                         input_values, hidden1_values, w_in_h1,
                         len(input_values), len(hidden1_values), 48

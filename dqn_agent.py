@@ -194,7 +194,6 @@ class DQNAgent:
 
         self.optimizer = torch.optim.AdamW(self.online_net.parameters(), lr=learning_rate)
         self.replay_buffer = ReplayBuffer(buffer_size)
-        self.elite_buffer = ReplayBuffer(max(1_000, buffer_size // 5))
 
     def _array_to_float_tensor(self, values: np.ndarray) -> torch.Tensor:
         if not isinstance(values, np.ndarray):
@@ -226,9 +225,7 @@ class DQNAgent:
         with torch.inference_mode():
             q_values = self.online_net(state_tensor).squeeze(0)
         greedy_action = int(torch.argmax(q_values).item())
-        length_exploration_factor = max(0.15, 1.0 - max(0, int(snake_length) - 4) * 0.06)
-        effective_epsilon = self.epsilon * length_exploration_factor
-        was_random = bool(training and random.random() < effective_epsilon)
+        was_random = bool(training and random.random() < self.epsilon)
         action = random.randrange(len(MODEL_ACTION_LABELS)) if was_random else greedy_action
         return action, q_values.detach().cpu().numpy(), was_random, greedy_action
 
@@ -238,29 +235,13 @@ class DQNAgent:
     def remember(self, state: np.ndarray, action: int, reward: float, next_state: np.ndarray, done: bool, *, priority_scale: float = 1.0) -> None:
         self.replay_buffer.push(state, action, reward, next_state, done, priority_scale=priority_scale)
 
-    def remember_elite_episode(self, transitions: list[tuple[np.ndarray, int, float, np.ndarray, bool, float]], *, min_priority: float = 1.2) -> None:
-        for state, action, reward, next_state, done, priority_scale in transitions:
-            self.elite_buffer.push(state, action, reward, next_state, done, priority_scale=max(min_priority, priority_scale))
+
 
     def optimize(self) -> float | None:
         if len(self.replay_buffer) < self.batch_size:
             return None
-        elite_batch_size = 0
-        if len(self.elite_buffer) >= max(8, self.batch_size // 8):
-            elite_batch_size = min(max(1, self.batch_size * 2 // 5), len(self.elite_buffer))
-        regular_batch_size = self.batch_size - elite_batch_size
 
-        states, actions, rewards, next_states, dones, indices, weights, priority_scales = self.replay_buffer.sample(regular_batch_size)
-        elite_payload: tuple[np.ndarray, ...] | None = None
-        if elite_batch_size > 0:
-            elite_payload = self.elite_buffer.sample(elite_batch_size)
-            states = np.concatenate((states, elite_payload[0]), axis=0)
-            actions = np.concatenate((actions, elite_payload[1]), axis=0)
-            rewards = np.concatenate((rewards, elite_payload[2]), axis=0)
-            next_states = np.concatenate((next_states, elite_payload[3]), axis=0)
-            dones = np.concatenate((dones, elite_payload[4]), axis=0)
-            weights = np.concatenate((weights, elite_payload[6]), axis=0)
-            priority_scales = np.concatenate((priority_scales, elite_payload[7]), axis=0)
+        states, actions, rewards, next_states, dones, indices, weights, priority_scales = self.replay_buffer.sample(self.batch_size)
 
         states_tensor = self._array_to_tensor(states)
         actions_tensor = self._array_to_tensor(actions, dtype=torch.int64)
@@ -285,9 +266,7 @@ class DQNAgent:
         self.optimizer.step()
 
         td_priorities = np.abs(td_errors.detach().cpu().numpy()) + 1e-3
-        self.replay_buffer.update_priorities(indices, td_priorities[:regular_batch_size], priority_scales[:regular_batch_size])
-        if elite_payload is not None:
-            self.elite_buffer.update_priorities(elite_payload[5], td_priorities[regular_batch_size:], priority_scales[regular_batch_size:])
+        self.replay_buffer.update_priorities(indices, td_priorities, priority_scales)
 
         self.total_updates += 1
         if self.total_updates % self.target_sync_interval == 0:
@@ -304,17 +283,9 @@ class DQNAgent:
         steps: int,
         reason: str,
         board_size: int,
-        trap_after_apple_count: int = 0,
-        avoidable_collision_count: int = 0,
-        available_food_ignored_count: int = 0,
         max_steps_without_food: int = 0,
     ) -> float:
-        fitness = float(score) * 100.0 + float(reward) + min(float(steps), 2_000.0) * 0.01
-        if reason == "victory":
-            fitness += 10_000.0
-        fitness -= float(trap_after_apple_count) * 25.0
-        fitness -= float(avoidable_collision_count) * 10.0
-        fitness -= float(available_food_ignored_count) * 3.0
+        fitness = float(score) * 100.0 + float(steps) * 0.1
         self.last_fitness = fitness
         if int(score) > self.best_score:
             self.best_score = int(score)

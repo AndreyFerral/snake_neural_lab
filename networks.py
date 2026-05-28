@@ -25,8 +25,7 @@ class BaseSignalNetwork(nn.Module):
         self.warn_on_adapt = warn_on_adapt
         self._adapter_warning_emitted = False
 
-        self.input_layer = nn.Linear(self.input_size, 64)
-        self.hidden1_layer = nn.Linear(64, HIDDEN_LAYER_1)
+        self.hidden1_layer = nn.Linear(self.input_size, HIDDEN_LAYER_1)
         self.hidden2_layer = nn.Linear(HIDDEN_LAYER_1, HIDDEN_LAYER_2)
 
     def _prepare_inputs(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -34,8 +33,8 @@ class BaseSignalNetwork(nn.Module):
             inputs = inputs.unsqueeze(0)
         if inputs.dim() != 2:
             raise ValueError(f"Expected 1D/2D tensor input, got shape={tuple(inputs.shape)}")
-        if inputs.dtype != self.input_layer.weight.dtype:
-            inputs = inputs.to(dtype=self.input_layer.weight.dtype)
+        if inputs.dtype != self.hidden1_layer.weight.dtype:
+            inputs = inputs.to(dtype=self.hidden1_layer.weight.dtype)
         width = int(inputs.shape[1])
         if width == self.input_size:
             return inputs
@@ -69,9 +68,7 @@ class BaseSignalNetwork(nn.Module):
     def forward_features(self, inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         inputs = self._prepare_inputs(inputs)
 
-        x = self.input_layer(inputs)
-        x = torch.tanh(x)
-        x = self.hidden1_layer(x)
+        x = self.hidden1_layer(inputs)
         x = torch.tanh(x)
         hidden2 = self.hidden2_layer(x)
         hidden2 = torch.tanh(hidden2)
@@ -81,9 +78,7 @@ class BaseSignalNetwork(nn.Module):
     def forward_with_activations(self, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
         inputs = self._prepare_inputs(inputs)
 
-        x = self.input_layer(inputs)
-        x = torch.tanh(x)
-        hidden1 = self.hidden1_layer(x)
+        hidden1 = self.hidden1_layer(inputs)
         hidden1 = torch.tanh(hidden1)
         hidden2 = self.hidden2_layer(hidden1)
         hidden2 = torch.tanh(hidden2)

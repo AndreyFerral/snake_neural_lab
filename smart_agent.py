@@ -1,4 +1,5 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 import numpy as np
@@ -108,6 +109,47 @@ class SmartH5Agent:
             point in body
         )
 
+    def _neighbors_for_independent(self, cell: tuple[int, int], board_size: int) -> list[tuple[int, int]]:
+        x, y = cell
+        neighbors = []
+        for dx, dy in DIRECTIONS:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < board_size and 0 <= ny < board_size:
+                neighbors.append((nx, ny))
+        return neighbors
+
+    def _has_path_independent(self, start: tuple[int, int], target: tuple[int, int], blocked: set[tuple[int, int]], board_size: int) -> bool:
+        if start in blocked or target in blocked:
+            return False
+        if start == target:
+            return True
+        visited = {start}
+        queue = deque([start])
+        while queue:
+            curr = queue.popleft()
+            if curr == target:
+                return True
+            for nx, ny in self._neighbors_for_independent(curr, board_size):
+                next_cell = (nx, ny)
+                if next_cell not in visited and next_cell not in blocked:
+                    visited.add(next_cell)
+                    queue.append(next_cell)
+        return False
+
+    def _reachable_space_size_independent(self, start: tuple[int, int], blocked: set[tuple[int, int]], board_size: int) -> int:
+        if start in blocked:
+            return 0
+        visited = {start}
+        queue = deque([start])
+        while queue:
+            curr = queue.popleft()
+            for nx, ny in self._neighbors_for_independent(curr, board_size):
+                next_cell = (nx, ny)
+                if next_cell not in visited and next_cell not in blocked:
+                    visited.add(next_cell)
+                    queue.append(next_cell)
+        return len(visited)
+
     def _free_distance_until_obstacle_fast(self, board_size: int, head: tuple[int, int], direction: int, body: set[tuple[int, int]]) -> int:
         move_x, move_y = DIRECTIONS[direction]
         x, y = head
@@ -195,9 +237,9 @@ class SmartH5Agent:
 
         blocked_cells = set(full_body if ate_food else body_without_tail)
         if use_full:
-            area_count = game._reachable_cell_count(new_head, blocked_cells)
+            area_count = self._reachable_space_size_independent(new_head, blocked_cells, board_size)
             area_ratio = area_count / float(board_cells)
-            food_reachable = 1.0 if game._has_path(new_head, game.food, blocked_cells) else 0.0
+            food_reachable = 1.0 if self._has_path_independent(new_head, game.food, blocked_cells, board_size) else 0.0
 
             if len(snake) <= 1:
                 tail_target = new_head
@@ -208,7 +250,7 @@ class SmartH5Agent:
             tail_blocked = set(blocked_cells)
             if not ate_food:
                 tail_blocked.discard(tail_target)
-            tail_reachable = 1.0 if game._has_path(new_head, tail_target, tail_blocked) else 0.0
+            tail_reachable = 1.0 if self._has_path_independent(new_head, tail_target, tail_blocked, board_size) else 0.0
         else:
             area_ratio = self._quick_local_area_ratio_fast(board_size, new_head, blocked_cells)
             food_reachable = 1.0
