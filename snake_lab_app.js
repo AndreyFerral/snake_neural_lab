@@ -1405,7 +1405,7 @@ class SnakeLabApp {
       {
         title: "Хвост",
         rows: [
-          ["tail_ahead", "tail_left", "tail_right"]
+          ["tail_ahead", "tail_left", "tail_right", "tail_behind"]
         ]
       },
       {

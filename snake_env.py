@@ -109,6 +109,10 @@ class SnakeEnv:
     def _clear_path_cache(self) -> None:
         self._path_cache.clear()
 
+    def _clear_observation_cache(self) -> None:
+        self._obs_cache_step = -1
+        self._obs_cache_vec = None
+
     def _check_cache_size(self) -> None:
         if len(self._path_cache) > self._path_cache_max_size:
             self._path_cache.clear()
@@ -119,6 +123,7 @@ class SnakeEnv:
 
     def reset(self) -> np.ndarray:
         self._clear_path_cache()
+        self._clear_observation_cache()
         # Безопасно сохраняем значение ДО сброса (0 при первом запуске, реальное число при смерти)
         self.last_steps_without_food = getattr(self, 'steps_without_food', 0)
         center = self.board_size // 2
@@ -202,7 +207,7 @@ class SnakeEnv:
     ) -> tuple[np.ndarray, float, bool, StepFullInfo]:
         if self.done:
             return (
-                np.empty((0,), dtype=np.float32),
+                self.get_observation_grid(),
                 self.last_reward,
                 True,
                 {"score": self.score, "steps": self.step_count, "reason": self.last_reason},  # type: ignore[typeddict-item]
@@ -217,8 +222,7 @@ class SnakeEnv:
         will_eat = next_head == self.food
 
         # В начале step(), до self.step_count += 1:
-        self._obs_cache_step = -1
-        self._obs_cache_vec = None
+        self._clear_observation_cache()
 
         reward = 0.0
         reason = "step"
@@ -285,8 +289,9 @@ class SnakeEnv:
         self.last_penalty_reasons = penalty_reasons
         self._check_cache_size()
 
+        observation = self.get_observation_grid()
         return (
-            np.empty((0,), dtype=np.float32),
+            observation,
             reward,
             self.done,
             {
@@ -336,10 +341,18 @@ class SnakeEnv:
         hits_wall = not (0 <= next_head[0] < self.board_size and 0 <= next_head[1] < self.board_size)
         if hits_wall or self._would_hit_self(next_head, will_eat):
             return 1.0
-        # Хвост до хода: при обычном ходе освобождается, при еде остаётся на месте.
-        # blocked = тело без хвоста — next_head и tail_target гарантированно не входят.
-        tail_target = self.snake[-1]
-        blocked = set(self.snake[:-1])
+
+        # Симулируем тело после хода: при обычном ходе хвост освобождается,
+        # при яблоке остаётся на месте и продолжает блокировать клетку.
+        if will_eat:
+            simulated_snake = [next_head] + self.snake
+        else:
+            simulated_snake = [next_head] + self.snake[:-1]
+
+        tail_target = simulated_snake[-1]
+        blocked = set(simulated_snake[1:])
+        if not will_eat:
+            blocked.discard(tail_target)
         has_path = self._has_path(next_head, tail_target, blocked)
         return 0.0 if has_path else 1.0
 
@@ -357,7 +370,7 @@ class SnakeEnv:
             simulated_snake = [next_head] + self.snake[:-1]
         blocked = set(simulated_snake[1:])
         space_size = self._reachable_space_size(next_head, blocked)
-        return 1.0 if space_size < len(self.snake) else 0.0
+        return 1.0 if space_size < len(simulated_snake) else 0.0
 
 
 
@@ -392,31 +405,34 @@ class SnakeEnv:
         else:
             t_fwd, t_rgt = -tx, -ty
 
+        # Порядок относительных сигналов синхронизирован с MODEL_ACTION_LABELS:
+        # forward, left, right. Behind-сигналы идут после этих направлений.
         signals = [
             1.0 if fwd > 0 else 0.0,
-            1.0 if rgt > 0 else 0.0,
             1.0 if rgt < 0 else 0.0,
+            1.0 if rgt > 0 else 0.0,
             1.0 if fwd < 0 else 0.0,  # food_behind
 
             1.0 if self._next_head_for_direction(relative_to_absolute(self.direction, 0)) == self.food else 0.0,
-            1.0 if self._next_head_for_direction(relative_to_absolute(self.direction, 2)) == self.food else 0.0,
             1.0 if self._next_head_for_direction(relative_to_absolute(self.direction, 1)) == self.food else 0.0,
+            1.0 if self._next_head_for_direction(relative_to_absolute(self.direction, 2)) == self.food else 0.0,
 
             self._danger_for_relative_action(0),
-            self._danger_for_relative_action(2),
             self._danger_for_relative_action(1),
+            self._danger_for_relative_action(2),
 
             1.0 if t_fwd > 0 else 0.0,  # tail_ahead
-            1.0 if t_rgt > 0 else 0.0,  # tail_right
             1.0 if t_rgt < 0 else 0.0,  # tail_left
+            1.0 if t_rgt > 0 else 0.0,  # tail_right
+            1.0 if t_fwd < 0 else 0.0,  # tail_behind
 
             self._is_tail_blocked_after_relative_action(0),  # tail_blocked_forward
-            self._is_tail_blocked_after_relative_action(2),  # tail_blocked_right
             self._is_tail_blocked_after_relative_action(1),  # tail_blocked_left
+            self._is_tail_blocked_after_relative_action(2),  # tail_blocked_right
 
             self._is_space_tight_after_relative_action(0),  # space_tight_forward
-            self._is_space_tight_after_relative_action(2),  # space_tight_right
             self._is_space_tight_after_relative_action(1),  # space_tight_left
+            self._is_space_tight_after_relative_action(2),  # space_tight_right
         ]
         self._obs_cache_step = self.step_count
         self._obs_cache_vec = np.array(signals, dtype=np.float32)
@@ -466,6 +482,7 @@ class SnakeEnv:
             self.recent_turns = deque([int(t) for t in rt], maxlen=8)
 
             self._clear_path_cache()
+            self._clear_observation_cache()
             return self.get_observation_grid(target_size)
         except Exception:
             return self.reset()
