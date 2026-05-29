@@ -5,26 +5,33 @@ BOARD_SIZES = (10, 15, 20, 25, 30, 35)
 AGENT_KINDS = ("evolution", "dqn")
 MODEL_ACTION_LABELS = ("Вперед", "Влево", "Вправо")
 
+# Версия схемы входных сигналов. Увеличивайте при изменении порядка или смысла
+# признаков, даже если количество входов осталось прежним.
+GLOBAL_SIGNAL_SCHEMA_VERSION = 2
+
+# Все относительные группы используют единый порядок действий:
+# forward, left, right. Behind-сигналы идут после этих направлений.
 GLOBAL_SIGNAL_LABELS = (
     "food_ahead",
-    "food_right",
     "food_left",
+    "food_right",
     "food_behind",
     "apple_step_forward",
-    "apple_step_right",
     "apple_step_left",
+    "apple_step_right",
     "danger_forward",
-    "danger_right",
     "danger_left",
+    "danger_right",
     "tail_ahead",
-    "tail_right",
     "tail_left",
+    "tail_right",
+    "tail_behind",
     "tail_blocked_forward",
-    "tail_blocked_right",
     "tail_blocked_left",
+    "tail_blocked_right",
     "space_tight_forward",
-    "space_tight_right",
     "space_tight_left",
+    "space_tight_right",
 )
 DIRECTIONS = (
     (0, -1),
@@ -97,24 +104,25 @@ REASON_LABELS = {
 
 SIGNAL_LABELS = {
     "food_ahead": "🍎↑",
-    "food_right": "🍎→",
     "food_left": "🍎←",
+    "food_right": "🍎→",
     "food_behind": "🍎↓",
-    "danger_forward": "💀 ↑",
-    "danger_right": "💀 →",
-    "danger_left": "💀 ←",
     "apple_step_forward": "🍎+↑",
-    "apple_step_right": "🍎+→",
     "apple_step_left": "🍎+←",
+    "apple_step_right": "🍎+→",
+    "danger_forward": "💀 ↑",
+    "danger_left": "💀 ←",
+    "danger_right": "💀 →",
     "tail_ahead": "🐍↑",
-    "tail_right": "🐍→",
     "tail_left": "🐍←",
+    "tail_right": "🐍→",
+    "tail_behind": "🐍↓",
     "tail_blocked_forward": "⛔↑",
-    "tail_blocked_right": "⛔→",
     "tail_blocked_left": "⛔←",
+    "tail_blocked_right": "⛔→",
     "space_tight_forward": "⚠️↑",
-    "space_tight_right": "⚠️→",
     "space_tight_left": "⚠️←",
+    "space_tight_right": "⚠️→",
 }
 
 TERMINAL_REASONS = (

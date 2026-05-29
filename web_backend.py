@@ -33,6 +33,7 @@ from backend_config import (
     DIRECTIONS,
     EPISODE_TRANSITION_LIMIT,
     GLOBAL_SIGNAL_LABELS,
+    GLOBAL_SIGNAL_SCHEMA_VERSION,
     HIDDEN_LAYER_1,
     HIDDEN_LAYER_2,
     HISTORY_LIMIT,
@@ -67,7 +68,7 @@ def safe_hunger_budget_for(score: int, board_size: int) -> float:
 # =========================================================================
 GLOBAL_SIGNAL_COUNT = len(GLOBAL_SIGNAL_LABELS)
 # Подпись меняется автоматически при изменении количества сигналов или размеров слоёв
-ARCH_SIGNATURE = f"sig_{GLOBAL_SIGNAL_COUNT}_{HIDDEN_LAYER_1}_{HIDDEN_LAYER_2}"
+ARCH_SIGNATURE = f"sig_v{GLOBAL_SIGNAL_SCHEMA_VERSION}_{GLOBAL_SIGNAL_COUNT}_{HIDDEN_LAYER_1}_{HIDDEN_LAYER_2}"
 # =========================================================================
 
 STATIC_ROOT = Path(__file__).resolve().parent
