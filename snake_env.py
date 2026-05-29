@@ -180,17 +180,17 @@ class SnakeEnv:
             "forward": {
                 "danger": self._danger_for_relative_action(0),
                 "tail_blocked": self._is_tail_blocked_after_relative_action(0),
-                "trap": self._is_trap_after_relative_action(0),
+                "space_tight": self._is_space_tight_after_relative_action(0),
             },
             "left": {
                 "danger": self._danger_for_relative_action(1),
                 "tail_blocked": self._is_tail_blocked_after_relative_action(1),
-                "trap": self._is_trap_after_relative_action(1),
+                "space_tight": self._is_space_tight_after_relative_action(1),
             },
             "right": {
                 "danger": self._danger_for_relative_action(2),
                 "tail_blocked": self._is_tail_blocked_after_relative_action(2),
-                "trap": self._is_trap_after_relative_action(2),
+                "space_tight": self._is_space_tight_after_relative_action(2),
             },
         }
 
@@ -336,16 +336,15 @@ class SnakeEnv:
         hits_wall = not (0 <= next_head[0] < self.board_size and 0 <= next_head[1] < self.board_size)
         if hits_wall or self._would_hit_self(next_head, will_eat):
             return 1.0
-        if will_eat:
-            simulated_snake = [next_head] + self.snake
-        else:
-            simulated_snake = [next_head] + self.snake[:-1]
-        tail_target = simulated_snake[-1]
-        blocked = set(simulated_snake[1:-1])
+        # Хвост до хода: при обычном ходе освобождается, при еде остаётся на месте.
+        # blocked = тело без хвоста — next_head и tail_target гарантированно не входят.
+        tail_target = self.snake[-1]
+        blocked = set(self.snake[:-1])
         has_path = self._has_path(next_head, tail_target, blocked)
         return 0.0 if has_path else 1.0
 
-    def _is_trap_after_relative_action(self, relative_action: int) -> float:
+    def _is_space_tight_after_relative_action(self, relative_action: int) -> float:
+        """Возвращает 1.0 если доступное пространство после хода меньше длины змеи."""
         absolute_direction = relative_to_absolute(self.direction, relative_action)
         next_head = self._next_head_for_direction(absolute_direction)
         will_eat = next_head == self.food
@@ -358,11 +357,9 @@ class SnakeEnv:
             simulated_snake = [next_head] + self.snake[:-1]
         blocked = set(simulated_snake[1:])
         space_size = self._reachable_space_size(next_head, blocked)
-        tail_target = simulated_snake[-1]
-        tail_blocked = set(simulated_snake[1:-1])
-        tail_reachable = self._has_path(next_head, tail_target, tail_blocked)
-        is_trapped = (space_size < len(self.snake)) and not tail_reachable
-        return 1.0 if is_trapped else 0.0
+        return 1.0 if space_size < len(self.snake) else 0.0
+
+
 
     def get_extra_signals(self, target_size: int = STARTUP_BOARD_SIZE) -> np.ndarray:
         # Кэш на текущий шаг: если фронтенд или логгер вызовут метод повторно,
@@ -417,9 +414,9 @@ class SnakeEnv:
             self._is_tail_blocked_after_relative_action(2),  # tail_blocked_right
             self._is_tail_blocked_after_relative_action(1),  # tail_blocked_left
 
-            self._is_trap_after_relative_action(0),  # trap_ahead
-            self._is_trap_after_relative_action(2),  # trap_right
-            self._is_trap_after_relative_action(1),  # trap_left
+            self._is_space_tight_after_relative_action(0),  # space_tight_forward
+            self._is_space_tight_after_relative_action(2),  # space_tight_right
+            self._is_space_tight_after_relative_action(1),  # space_tight_left
         ]
         self._obs_cache_step = self.step_count
         self._obs_cache_vec = np.array(signals, dtype=np.float32)

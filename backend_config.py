@@ -22,9 +22,9 @@ GLOBAL_SIGNAL_LABELS = (
     "tail_blocked_forward",
     "tail_blocked_right",
     "tail_blocked_left",
-    "trap_ahead",
-    "trap_right",
-    "trap_left",
+    "space_tight_forward",
+    "space_tight_right",
+    "space_tight_left",
 )
 DIRECTIONS = (
     (0, -1),
@@ -112,9 +112,9 @@ SIGNAL_LABELS = {
     "tail_blocked_forward": "⛔↑",
     "tail_blocked_right": "⛔→",
     "tail_blocked_left": "⛔←",
-    "trap_ahead": "⚠️↑",
-    "trap_right": "⚠️→",
-    "trap_left": "⚠️←",
+    "space_tight_forward": "⚠️↑",
+    "space_tight_right": "⚠️→",
+    "space_tight_left": "⚠️←",
 }
 
 TERMINAL_REASONS = (

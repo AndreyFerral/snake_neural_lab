@@ -205,7 +205,7 @@ def prune_model_stats_store(models: dict[str, Any], *, keep_keys: set[str], smar
 
 
 def load_aux_stats_store() -> dict[str, Any]:
-    default_store: dict[str, Any] = {"schema_version": 1, "models": {}}
+    default_store: dict[str, Any] = {"models": {}}
     if not AUX_STATS_PATH.exists():
         return default_store
     try:
@@ -216,7 +216,6 @@ def load_aux_stats_store() -> dict[str, Any]:
         return default_store
     models = payload.get("models", {})
     return {
-        "schema_version": int(payload.get("schema_version", 1)),
         "models": models if isinstance(models, dict) else {},
     }
 
@@ -236,7 +235,7 @@ def save_aux_stats_store(store: dict[str, Any]) -> None:
 
 
 def clear_aux_stats_store() -> None:
-    save_aux_stats_store({"schema_version": 1, "models": {}})
+    save_aux_stats_store({"models": {}})
 
 
 def resolve_device(mode: str) -> tuple[torch.device, str, str]:
@@ -1149,7 +1148,6 @@ class SnakeWebBackend:
 
     def _active_context_payload(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
             "agent_kind": self.agent_kind,
             "mode": self.mode,
             "board_size": int(self.game.board_size),
@@ -1272,23 +1270,22 @@ class SnakeWebBackend:
     # =========================================================================
     def _pack_aux_stats(self) -> dict[str, Any]:
         return {
-            "v": 1,
             "ep": self.episode_counter,
             "bs": self.best_score,
             "bbs": {str(k): v for k, v in self.board_best_scores.items()},
-            "fit": self.fitness_ema,
+            "fit": round(self.fitness_ema, 3),
             "hist": [
-                {
-                    "e": i.episode,
-                    "s": i.score,
-                    "st": i.steps,
-                    "r": i.reason,
-                    "f": i.fitness,
-                    "rw": i.reward,
-                    "m": i.mutation,
-                    "l": i.loss,
-                    "b": i.best_score,
-                }
+                [
+                    i.episode,
+                    i.score,
+                    i.steps,
+                    i.reason,
+                    round(i.fitness, 3),
+                    round(i.reward, 3),
+                    round(i.mutation, 4),
+                    round(i.loss, 4),
+                    i.best_score,
+                ]
                 for i in self.history
             ],
             "ds": {
@@ -1331,30 +1328,33 @@ class SnakeWebBackend:
         
         self.history.clear()
         for item in payload.get("hist", []):
-            if isinstance(item, dict):
-                try:
-                    episode = int(item.get("e", item.get("episode", 0)))
-                    score = int(item.get("s", item.get("score", 0)))
-                    steps = int(item.get("st", item.get("steps", 0)))
-                    reason = str(item.get("r", item.get("reason", "new_game")))
-                    fitness = float(item.get("f", item.get("fitness", 0.0)))
-                    reward = float(item.get("rw", item.get("reward", 0.0)))
-                    mutation = float(item.get("m", item.get("mutation", 0.0)))
-                    loss = float(item.get("l", item.get("loss", 0.0)))
-                    best_score = int(item.get("b", item.get("best_score", self.best_score)))
-                    self.history.append(EpisodeStats(
-                        episode=episode,
-                        score=score,
-                        reward=reward,
-                        mutation=mutation,
-                        fitness=fitness,
-                        steps=steps,
-                        best_score=best_score,
-                        reason=reason,
-                        loss=loss,
-                    ))
-                except (KeyError, TypeError, ValueError):
+            try:
+                if isinstance(item, list) and len(item) >= 9:
+                    episode = int(item[0])
+                    score = int(item[1])
+                    steps = int(item[2])
+                    reason = str(item[3])
+                    fitness = float(item[4])
+                    reward = float(item[5])
+                    mutation = float(item[6])
+                    loss = float(item[7])
+                    best_score = int(item[8])
+                else:
                     continue
+                
+                self.history.append(EpisodeStats(
+                    episode=episode,
+                    score=score,
+                    reward=reward,
+                    mutation=mutation,
+                    fitness=fitness,
+                    steps=steps,
+                    best_score=best_score,
+                    reason=reason,
+                    loss=loss,
+                ))
+            except (KeyError, TypeError, ValueError, IndexError):
+                continue
         if len(self.history) > HISTORY_LIMIT:
             self.history = self.history[-HISTORY_LIMIT:]
 
@@ -1425,7 +1425,6 @@ class SnakeWebBackend:
         self._save_active_context()
         torch.save(checkpoint_payload, checkpoint_path)
         store = load_aux_stats_store()
-        store["active_context"] = self._active_context_payload()
         models = store.setdefault("models", {})
         if isinstance(models, dict):
             if self.mode != "smart":

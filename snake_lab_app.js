@@ -969,13 +969,13 @@ class SnakeLabApp {
         return {
           danger: percent(raw.danger),
           tail_blocked: percent(raw.tail_blocked),
-          trap: percent(raw.trap)
+          space_tight: percent(raw.space_tight)
         };
       }
       return {
         danger: percent(raw),
         tail_blocked: "-",
-        trap: "-"
+        space_tight: "-"
       };
     };
 
@@ -992,14 +992,14 @@ class SnakeLabApp {
         `<td>${label}</td>`,
         `<td>${vals.danger}</td>`,
         `<td>${vals.tail_blocked}</td>`,
-        `<td>${vals.trap}</td>`,
+        `<td>${vals.space_tight}</td>`,
         "</tr>"
       ].join("");
     }).join("");
     
     this.setHtml(
       this.deathRiskTable,
-      `<table class="death-risk-table"><thead><tr><th>ход</th><th>СТЕНА</th><th>ХВОСТ</th><th>ТУПИК</th></tr></thead><tbody>${rows}</tbody></table>`
+      `<table class="death-risk-table"><thead><tr><th>ход</th><th>СТЕНА</th><th>ХВОСТ</th><th>ТЕСНО</th></tr></thead><tbody>${rows}</tbody></table>`
     );
   }
 
@@ -1413,7 +1413,7 @@ class SnakeLabApp {
         rows: [
           ["danger_forward", "danger_left", "danger_right"],
           ["tail_blocked_forward", "tail_blocked_left", "tail_blocked_right"],
-          ["trap_ahead", "trap_left", "trap_right"]
+          ["space_tight_forward", "space_tight_left", "space_tight_right"]
         ]
       }
     ].map((group) => {
