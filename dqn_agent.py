@@ -219,7 +219,6 @@ class DQNAgent:
         training: bool = True,
         *,
         snake_length: int = 1,
-        endgame: bool = False,
     ) -> tuple[int, np.ndarray, bool, int]:
         state_tensor = self._array_to_float_tensor(state)
         with torch.inference_mode():
@@ -229,8 +228,8 @@ class DQNAgent:
         action = random.randrange(len(MODEL_ACTION_LABELS)) if was_random else greedy_action
         return action, q_values.detach().cpu().numpy(), was_random, greedy_action
 
-    def select_best_action(self, state: np.ndarray, *, endgame: bool = False) -> tuple[int, np.ndarray, bool, int]:
-        return self.select_action(state, training=False, endgame=endgame)
+    def select_best_action(self, state: np.ndarray) -> tuple[int, np.ndarray, bool, int]:
+        return self.select_action(state, training=False)
 
     def remember(self, state: np.ndarray, action: int, reward: float, next_state: np.ndarray, done: bool, *, priority_scale: float = 1.0) -> None:
         self.replay_buffer.push(state, action, reward, next_state, done, priority_scale=priority_scale)

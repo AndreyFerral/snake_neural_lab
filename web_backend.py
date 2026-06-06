@@ -33,7 +33,6 @@ from backend_config import (
     DIRECTIONS,
     EPISODE_TRANSITION_LIMIT,
     GLOBAL_SIGNAL_LABELS,
-    GLOBAL_SIGNAL_SCHEMA_VERSION,
     HIDDEN_LAYER_1,
     HIDDEN_LAYER_2,
     HISTORY_LIMIT,
@@ -52,6 +51,7 @@ from backend_config import (
     TERMINAL_REASONS,
     REWARD_CATALOG,
     hunger_budget_for,
+    TAIL_LOSS_PENALTY,
 )
 
 from dqn_agent import DQNAgent
@@ -68,7 +68,7 @@ def safe_hunger_budget_for(score: int, board_size: int) -> float:
 # =========================================================================
 GLOBAL_SIGNAL_COUNT = len(GLOBAL_SIGNAL_LABELS)
 # Подпись меняется автоматически при изменении количества сигналов или размеров слоёв
-ARCH_SIGNATURE = f"sig_v{GLOBAL_SIGNAL_SCHEMA_VERSION}_{GLOBAL_SIGNAL_COUNT}_{HIDDEN_LAYER_1}_{HIDDEN_LAYER_2}"
+ARCH_SIGNATURE = f"sig_{GLOBAL_SIGNAL_COUNT}_{HIDDEN_LAYER_1}_{HIDDEN_LAYER_2}"
 # =========================================================================
 
 STATIC_ROOT = Path(__file__).resolve().parent
@@ -657,15 +657,13 @@ class SnakeWebBackend:
             self._ensure_runtime_consistency()
         if self.mode == "smart" and not training_mode:
             return self.smart_agent.select_action(self.game)
-        endgame = self.game._is_endgame()
         with self.agent_lock:
             if self.mode == "ai" and not training_mode:
-                return self.agent.select_best_action(state, endgame=endgame)
+                return self.agent.select_best_action(state)
             return self.agent.select_action(
                 state,
                 training=training_mode,
                 snake_length=len(self.game.snake),
-                endgame=endgame,
             )
 
     def _training_burst(self) -> int:
@@ -828,7 +826,6 @@ class SnakeWebBackend:
         _, self.last_q_values, _, self.last_greedy_action = self.agent.select_individual_action(
             self.training_display_index,
             self.last_state,
-            endgame=self.game._is_endgame(),
         )
         display_inference_ms = (time.perf_counter() - display_inference_started_at) * 1000.0
         self.last_action = self.last_greedy_action
@@ -891,9 +888,23 @@ class SnakeWebBackend:
             greedy_action=greedy_action,
         )
 
+        # Check if the tail is blocked in the CURRENT state before taking a step
+        current_head = self.game.snake[0]
+        current_tail = self.game.snake[-1]
+        current_blocked = set(self.game.snake[1:-1]) # Body without tail
+        current_tail_blocked = not self.game._has_path(current_head, current_tail, current_blocked)
+
+        # Check if the chosen move results in tail loss
+        next_tail_blocked = self.game._is_tail_blocked_after_relative_action(visible_action) > 0.5
+        
+        is_transition_to_tail_loss = (not current_tail_blocked) and next_tail_blocked
+
         _, reward, done, info = self.game.step(absolute_direction)
         reason = str(info["reason"])
         next_state = self._current_observation()
+
+        if is_transition_to_tail_loss:
+            reward -= TAIL_LOSS_PENALTY
 
         self.last_state = next_state
         self.last_q_values = q_values
@@ -904,6 +915,9 @@ class SnakeWebBackend:
         self.last_greedy_action = greedy_action
         self.last_reason = reason
         self.last_penalty_reasons = [str(item) for item in info.get("penalty_reasons", [])]
+        if is_transition_to_tail_loss:
+            self.last_penalty_reasons.append("tail_loss")
+            
         train_reward = reward
         step_number = int(info.get("steps", self.game.step_count))
         if step_number == 1:

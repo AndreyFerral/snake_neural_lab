@@ -19,6 +19,7 @@ except ImportError:
 from backend_config import (
     MODEL_ACTION_LABELS,
     GLOBAL_SIGNAL_LABELS,
+    TAIL_LOSS_PENALTY,
 )
 from networks import PolicyNetwork
 from snake_env import relative_to_absolute
@@ -144,12 +145,12 @@ class EvolutionAgent:
             idx += numel
         return genome
 
-    def select_action(self, state: np.ndarray, training: bool = True, *, snake_length: int = 1, endgame: bool = False) -> tuple[int, np.ndarray, bool, int]:
+    def select_action(self, state: np.ndarray, training: bool = True, *, snake_length: int = 1) -> tuple[int, np.ndarray, bool, int]:
         return self._select_action_with_network(state, self.online_net)
 
-    def select_best_action(self, state: np.ndarray, *, endgame: bool = False) -> tuple[int, np.ndarray, bool, int]:
+    def select_best_action(self, state: np.ndarray) -> tuple[int, np.ndarray, bool, int]:
         if self.best_genome is None:
-            return self.select_action(state, training=False, endgame=endgame)
+            return self.select_action(state, training=False)
         return self._select_action_with_genome(state, self.best_genome)
 
     def _select_action_with_network(self, state: np.ndarray, network: nn.Module) -> tuple[int, np.ndarray, bool, int]:
@@ -166,9 +167,9 @@ class EvolutionAgent:
         action = int(torch.argmax(action_scores).item())
         return action, action_scores.cpu().numpy(), False, action
 
-    def select_individual_action(self, index: int, state: np.ndarray, *, endgame: bool = False) -> tuple[int, np.ndarray, bool, int]:
+    def select_individual_action(self, index: int, state: np.ndarray) -> tuple[int, np.ndarray, bool, int]:
         if not self.population:
-            return self.select_action(state, training=True, endgame=endgame)
+            return self.select_action(state, training=True)
         safe_index = max(0, min(index, len(self.population) - 1))
         return self._select_action_with_genome(state, self.population[safe_index].genome)
 
@@ -181,8 +182,8 @@ class EvolutionAgent:
             self._load_current_genome()
         return fitness
 
-    def finish_individual(self, index: int, *, score: int, reward: float, steps: int, reason: str, board_size: int, max_steps_without_food: int = 0) -> float:
-        fitness = self._fitness(score=score, reward=reward, steps=steps, reason=reason, board_size=board_size, max_steps_without_food=max_steps_without_food)
+    def finish_individual(self, index: int, *, score: int, reward: float, steps: int, reason: str, board_size: int, max_steps_without_food: int = 0, tail_blocked_steps: int = 0) -> float:
+        fitness = self._fitness(score=score, reward=reward, steps=steps, reason=reason, board_size=board_size, max_steps_without_food=max_steps_without_food, tail_blocked_steps=tail_blocked_steps)
         safe_index = max(0, min(index, len(self.population) - 1))
         individual = self.population[safe_index]
         individual.fitness = fitness
@@ -209,11 +210,13 @@ class EvolutionAgent:
         self.victory_archive.append(self._clone_individual(individual))
         self.victory_archive = sorted(self.victory_archive, key=lambda item: (float(item.fitness if item.fitness is not None else float("-inf")), int(item.score), -int(item.steps)), reverse=True)[:EVOLUTION_VICTORY_ARCHIVE_SIZE]
 
-    def _fitness(self, *, score: int, reward: float, steps: int, reason: str, board_size: int, max_steps_without_food: int = 0) -> float:
+    def _fitness(self, *, score: int, reward: float, steps: int, reason: str, board_size: int, max_steps_without_food: int = 0, tail_blocked_steps: int = 0) -> float:
         # Улучшенная стабильная формула:
         # Приоритет отдается яблокам (score), но и время жизни (steps) вносит свой вклад.
         # Исключает риск числового переполнения float32 при высоких счетах.
-        return float(steps) + (float(score) ** 2.0) * 100.0
+        base_fitness = float(steps) + (float(score) ** 2.0) * 100.0
+        # Subtract tail blocked steps penalty
+        return max(0.1, base_fitness - float(tail_blocked_steps) * TAIL_LOSS_PENALTY * 4.0)
 
     def evolve_generation(self) -> None:
         evaluated = [ind for ind in self.population if ind.fitness is not None]
@@ -494,19 +497,40 @@ class ParallelEvolutionRunner:
             greedy_action = action
 
             absolute_direction = relative_to_absolute(env.direction, action)
+            
+            # Check if the tail is blocked in the CURRENT state before taking a step
+            current_head = env.snake[0]
+            current_tail = env.snake[-1]
+            current_blocked = set(env.snake[1:-1]) # Body without tail
+            current_tail_blocked = not env._has_path(current_head, current_tail, current_blocked)
+
+            # Check if the chosen move results in tail loss
+            next_tail_blocked = env._is_tail_blocked_after_relative_action(action) > 0.5
+            
+            is_transition_to_tail_loss = (not current_tail_blocked) and next_tail_blocked
+
             env_start = time.perf_counter()
             _, reward, done, info = env.step(absolute_direction)
             env_step_ms += (time.perf_counter() - env_start) * 1000.0
+
+            if is_transition_to_tail_loss:
+                reward -= TAIL_LOSS_PENALTY
 
             book_start = time.perf_counter()
             self.episode_rewards[env_idx] += reward
             step_number = int(info.get("steps", env.step_count))
             if step_number <= 1:
                 self.step_logs[env_idx].clear()
-            self.step_logs[env_idx].append({"step": step_number, "reward": float(reward), "train_reward": float(reward), "action": int(action), "action_label": self.action_labels[action] if 0 <= action < len(self.action_labels) else "-", "reason": str(info.get("reason", env.last_reason)), "penalties": [str(item) for item in info.get("penalty_reasons", [])], "random": bool(was_random), "individual": env_idx + 1, "apple_opportunity": None})
+            
+            step_penalties = [str(item) for item in info.get("penalty_reasons", [])]
+            if is_transition_to_tail_loss:
+                step_penalties.append("tail_loss")
+                
+            self.step_logs[env_idx].append({"step": step_number, "reward": float(reward), "train_reward": float(reward), "action": int(action), "action_label": self.action_labels[action] if 0 <= action < len(self.action_labels) else "-", "reason": str(info.get("reason", env.last_reason)), "penalties": step_penalties, "random": bool(was_random), "individual": env_idx + 1, "apple_opportunity": None})
             if done:
                 reason = str(info.get("reason", env.last_reason))
-                fitness = agent.finish_individual(env_idx, score=env.score, reward=self.episode_rewards[env_idx], steps=env.step_count, reason=reason, board_size=env.board_size, max_steps_without_food=env.max_steps_without_food)
+                tail_blocked_steps = sum(1 for entry in self.step_logs[env_idx] if "tail_loss" in entry.get("penalties", []))
+                fitness = agent.finish_individual(env_idx, score=env.score, reward=self.episode_rewards[env_idx], steps=env.step_count, reason=reason, board_size=env.board_size, max_steps_without_food=env.max_steps_without_food, tail_blocked_steps=tail_blocked_steps)
                 self.last_fitnesses[env_idx] = fitness
                 self.done[env_idx] = True
                 self.completed_count += 1

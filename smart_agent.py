@@ -3,14 +3,29 @@ from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 import numpy as np
-from backend_config import DIRECTIONS, MODEL_ACTION_LABELS
+# =========================================================================
+# АРХИТЕКТУРНЫЙ СТАНДАРТ: ПОЛНАЯ САМОДОСТАТОЧНОСТЬ (SELF-CONTAINED MODULE)
+# Данный модуль спроектирован так, чтобы быть на 100% изолированным и 
+# независимым от других файлов проекта (включая backend_config.py). 
+# Это позволяет переносить, тестировать или использовать smart_agent.py 
+# в других окружениях без необходимости копирования сопутствующих зависимостей.
+# =========================================================================
 
+DIRECTIONS = (
+    (0, -1),
+    (1, 0),
+    (0, 1),
+    (-1, 0),
+)
+
+MODEL_ACTION_LABELS = ("Вперед", "Влево", "Вправо")
 if TYPE_CHECKING:
     from snake_env import SnakeEnv
 
 SMART_MODEL_GLOBS = ("*.h5", "*.keras")
 SMART_STATE_SIZE = 40
 SMART_LONG_SNAKE_FILL_THRESHOLD = 0.35
+ENDGAME_FILL_RATIO = 0.70
 
 def clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
@@ -178,7 +193,7 @@ class SmartH5Agent:
         if body is None:
             body = set(snake[1:])
         fill_ratio = len(snake) / max(1.0, float(board_size * board_size))
-        if fill_ratio >= SMART_LONG_SNAKE_FILL_THRESHOLD * 0.70:
+        if fill_ratio >= ENDGAME_FILL_RATIO:
             return True
 
         direction = game.direction
@@ -240,8 +255,7 @@ class SmartH5Agent:
             else:
                 tail_target = snake[-2]
             tail_blocked = set(blocked_cells)
-            if not ate_food:
-                tail_blocked.discard(tail_target)
+            tail_blocked.discard(tail_target)
             tail_reachable = 1.0 if self._has_path_independent(new_head, tail_target, tail_blocked, board_size) else 0.0
         else:
             area_ratio = self._quick_local_area_ratio_fast(board_size, new_head, blocked_cells)

@@ -5,10 +5,6 @@ BOARD_SIZES = (10, 15, 20, 25, 30, 35)
 AGENT_KINDS = ("evolution", "dqn")
 MODEL_ACTION_LABELS = ("Вперед", "Влево", "Вправо")
 
-# Версия схемы входных сигналов. Увеличивайте при изменении порядка или смысла
-# признаков, даже если количество входов осталось прежним.
-GLOBAL_SIGNAL_SCHEMA_VERSION = 2
-
 # Все относительные группы используют единый порядок действий:
 # forward, left, right. Behind-сигналы идут после этих направлений.
 GLOBAL_SIGNAL_LABELS = (
@@ -46,8 +42,8 @@ AVERAGE_SCORE_WINDOW_RATIO = 0.25
 SAVE_THROTTLE_SECONDS = 8.0
 APPLE_REWARD = 4.0
 DEATH_PENALTY = 8.0
+TAIL_LOSS_PENALTY = 12.0
 EPISODE_TRANSITION_LIMIT = 2_000
-ENDGAME_FILL_RATIO = 0.70
 
 CPU_BATCH_SIZE = 128
 HIDDEN_LAYER_1 = 32
@@ -79,6 +75,7 @@ NETWORK_INPUT_PAD_VALUE = 0.0
 PENALTY_CATALOG = {
     "death": {"label": "Смерть", "short_label": "Смерть", "value": -DEATH_PENALTY},
     "looping": {"label": "Цикл", "short_label": "Цикл", "value": "до -0.35"},
+    "tail_loss": {"label": "Потеря хвоста", "short_label": "Хвост", "value": -TAIL_LOSS_PENALTY},
 }
 
 REWARD_CATALOG = {
@@ -100,6 +97,7 @@ REASON_LABELS = {
     "body_collision": "Смерть: тело",
     "starvation": "Смерть: голод",
     "death": "Смерть",
+    "tail_loss": "Потеря хвоста",
 }
 
 SIGNAL_LABELS = {

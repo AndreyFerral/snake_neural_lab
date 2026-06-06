@@ -1235,10 +1235,11 @@ class SnakeLabApp {
       const logText = headerParts.join(" ") + (extraParts.length ? " • " + extraParts.join(" • ") : "");
 
       const isCollision = penalties.includes("wall_collision") || penalties.includes("body_collision");
+      const isTailLoss = penalties.includes("tail_loss");
       const tookApple = entry.reason === "apple";
 
       let rowClass = "step-log-line log-yellow";
-      if (isCollision || reward < -1.0) {
+      if (isCollision || isTailLoss || reward < -1.0) {
         rowClass = "step-log-line log-red";
       } else if (tookApple || reward > 1.0) {
         rowClass = "step-log-line log-green";

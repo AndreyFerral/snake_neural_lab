@@ -9,7 +9,6 @@ from backend_config import (
     APPLE_REWARD,
     STARTUP_BOARD_SIZE,
     DIRECTIONS,
-    ENDGAME_FILL_RATIO,
     DEATH_PENALTY,
     hunger_budget_for,
 )
@@ -199,12 +198,39 @@ class SnakeEnv:
             },
         }
 
-    def _is_endgame(self) -> bool:
-        return len(self.snake) >= self.board_size * self.board_size * ENDGAME_FILL_RATIO
+
 
     def step(
         self, direction: int
     ) -> tuple[np.ndarray, float, bool, StepFullInfo]:
+        """
+        Выполняет один шаг игры. Возвращает базовую награду среды (яблоко, шаг, смерть).
+        
+        АРХИТЕКТУРНЫЙ СТАНДАРТ ФОРМИРОВАНИЯ НАГРАД (REWARD SHAPING):
+        Физика игровой среды (SnakeEnv) должна оставаться «чистой» и независимой от специфики 
+        обучения ИИ. Все дополнительные штрафы и бонусы для агентов (DQN, Evolution) 
+        формируются по следующему единому принципу:
+        
+        1. Определение константы:
+           Любой новый штраф или награда (например, TAIL_LOSS_PENALTY = 0.50) ДОЛЖНЫ быть объявлены 
+           как централизованная константа в `backend_config.py` рядом с остальными наградами.
+           
+        2. Регистрация в UI:
+           Добавьте описание и значение в PENALTY_CATALOG или REWARD_CATALOG в `backend_config.py`, 
+           используя созданную константу, чтобы интерфейс (Лог лидера, правила) отображал её автоматически.
+           
+        3. Импорт и Применение в Агентах:
+           Импортируйте константу из `backend_config.py` в модули агентов/раннеров (например, 
+           в `web_backend.py` для DQN или в `evolution_agent.py` для Evolution).
+           
+        4. Расчет рисков:
+           Оцените состояние ДО вызова step() с помощью аналитических методов среды:
+             - self.relative_move_risks() — возвращает опасности каждого относительного действия.
+             - self._is_tail_blocked_after_relative_action(action) — проверяет доступность хвоста.
+             - self._is_space_tight_after_relative_action(action) — проверяет тесноту пространства.
+           И примените импортированный штраф (например, `reward -= NEW_PENALTY`) к результирующей 
+           награде, чтобы она зафиксировалась в логах лидера и использовалась для обучения.
+        """
         if self.done:
             return (
                 self.get_observation_grid(),
@@ -351,8 +377,7 @@ class SnakeEnv:
 
         tail_target = simulated_snake[-1]
         blocked = set(simulated_snake[1:])
-        if not will_eat:
-            blocked.discard(tail_target)
+        blocked.discard(tail_target)
         has_path = self._has_path(next_head, tail_target, blocked)
         return 0.0 if has_path else 1.0
 
