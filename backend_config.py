@@ -15,6 +15,7 @@ GLOBAL_SIGNAL_LABELS = (
     "apple_step_forward",
     "apple_step_left",
     "apple_step_right",
+    "food_reachable",
     "danger_forward",
     "danger_left",
     "danger_right",
@@ -51,7 +52,7 @@ DEATH_PENALTY = 8.0
 TAIL_LOSS_PENALTY = 12.0
 TAIL_CLOSE_PENALTY = 1.2
 PARTITION_PENALTY_LARGE = 1.5
-PARTITION_PENALTY_SMALL = 0.05
+PARTITION_PENALTY_SMALL = 0.15
 EPISODE_TRANSITION_LIMIT = 2_000
 
 CPU_BATCH_SIZE = 128
@@ -121,6 +122,7 @@ SIGNAL_LABELS = {
     "apple_step_forward": "🍎+↑",
     "apple_step_left": "🍎+←",
     "apple_step_right": "🍎+→",
+    "food_reachable": "🍎🟢",
     "danger_forward": "💀 ↑",
     "danger_left": "💀 ←",
     "danger_right": "💀 →",
@@ -137,6 +139,9 @@ SIGNAL_LABELS = {
     "tail_close_forward": "🐍🤏↑",
     "tail_close_left": "🐍🤏←",
     "tail_close_right": "🐍🤏→",
+    "partition_forward": "🧩↑",
+    "partition_left": "🧩←",
+    "partition_right": "🧩→",
 }
 
 TERMINAL_REASONS = (
@@ -149,4 +154,22 @@ TERMINAL_REASONS = (
 def hunger_budget_for(score: int, board_size: int) -> float:
     board_cells = max(1, board_size * board_size)
     snake_length = min(float(score + 3), float(board_cells))
-    return board_size * 4.0 + snake_length * 2.0
+    base_budget = board_size * 4.0 + snake_length * 2.0
+    
+    fill_ratio = snake_length / board_cells
+    if fill_ratio > 0.8:
+        # Мягкий нелинейный коэффициент: растет до х2.0 при заполнении 100%
+        scale_factor = 1.0 + (fill_ratio - 0.8) * 5.0
+        return float(round(base_budget * scale_factor))
+    return base_budget
+
+
+# Динамические индексы признаков для исключения магических чисел в коде
+try:
+    TAIL_BLOCKED_START_IDX = GLOBAL_SIGNAL_LABELS.index("tail_blocked_forward")
+    TAIL_CLOSE_START_IDX = GLOBAL_SIGNAL_LABELS.index("tail_close_forward")
+    PARTITION_START_IDX = GLOBAL_SIGNAL_LABELS.index("partition_forward")
+except ValueError:
+    TAIL_BLOCKED_START_IDX = 15
+    TAIL_CLOSE_START_IDX = 21
+    PARTITION_START_IDX = 24

@@ -37,11 +37,26 @@ class BaseSignalNetwork(nn.Module):
                 out_feat, in_feat = curr_val.shape
                 s_out_feat, s_in_feat = val.shape
                 if out_feat == s_out_feat:
-                    new_weight = curr_val.clone()
-                    copy_cols = min(in_feat, s_in_feat)
-                    new_weight[:, :copy_cols] = val[:, :copy_cols]
-                    if in_feat > s_in_feat:
-                        new_weight[:, s_in_feat:] = 0.0
+                    if s_in_feat == 26 and in_feat == 27:
+                        # 26 -> 27 adaptation (inserting food_reachable at index 7)
+                        new_weight = curr_val.clone()
+                        new_weight[:, :7] = val[:, :7]
+                        new_weight[:, 7] = 0.0
+                        new_weight[:, 8:] = val[:, 7:]
+                    elif s_in_feat == 23 and in_feat == 27:
+                        # 23 -> 27 adaptation (no partition, no food_reachable)
+                        new_weight = curr_val.clone()
+                        new_weight.fill_(0.0)
+                        new_weight[:, :7] = val[:, :7]
+                        new_weight[:, 8:24] = val[:, 7:23]
+                    else:
+                        # Default fallback
+                        new_weight = curr_val.clone()
+                        copy_cols = min(in_feat, s_in_feat)
+                        new_weight[:, :copy_cols] = val[:, :copy_cols]
+                        if in_feat > s_in_feat:
+                            new_weight[:, s_in_feat:] = 0.0
+                    
                     state_dict[key] = new_weight
                     if not self._adapter_warning_emitted:
                         print(f"[network] Adapted hidden1_layer.weight from loaded shape {tuple(val.shape)} to target shape {tuple(curr_val.shape)}")

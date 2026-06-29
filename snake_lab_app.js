@@ -1421,7 +1421,7 @@ class SnakeLabApp {
         title: "Еда",
         rows: [
           ["food_ahead", "food_left", "food_right", "food_behind"],
-          ["apple_step_forward", "apple_step_left", "apple_step_right"]
+          ["apple_step_forward", "apple_step_left", "apple_step_right", "food_reachable"]
         ]
       },
       {
@@ -1436,7 +1436,8 @@ class SnakeLabApp {
         rows: [
           ["danger_forward", "danger_left", "danger_right"],
           ["tail_blocked_forward", "tail_blocked_left", "tail_blocked_right"],
-          ["space_tight_forward", "space_tight_left", "space_tight_right"]
+          ["space_tight_forward", "space_tight_left", "space_tight_right"],
+          ["partition_forward", "partition_left", "partition_right"]
         ]
       }
     ].map((group) => {

@@ -436,6 +436,25 @@ class SnakeEnv:
                                     queue.append(n_cell)
         return False
 
+    def _is_food_reachable(self) -> float:
+        """Возвращает 1.0, если путь от головы до еды существует, иначе 0.0."""
+        head = self.snake[0]
+        food = self.food
+        blocked = set(self.snake[1:])  # Body is blocked
+        if head == food:
+            return 1.0
+        visited = {head}
+        queue = deque([head])
+        while queue:
+            curr = queue.popleft()
+            if curr == food:
+                return 1.0
+            for next_cell in self._neighbors_for(curr):
+                if next_cell not in visited and next_cell not in blocked:
+                    visited.add(next_cell)
+                    queue.append(next_cell)
+        return 0.0
+
     def _is_space_partitioned_after_relative_action(self, relative_action: int) -> float:
         """Возвращает 1.0 если после хода свободное пространство делится на изолированные компоненты."""
         absolute_direction = relative_to_absolute(self.direction, relative_action)
@@ -576,6 +595,8 @@ class SnakeEnv:
             1.0 if self._next_head_for_direction(relative_to_absolute(self.direction, 0)) == self.food else 0.0,
             1.0 if self._next_head_for_direction(relative_to_absolute(self.direction, 1)) == self.food else 0.0,
             1.0 if self._next_head_for_direction(relative_to_absolute(self.direction, 2)) == self.food else 0.0,
+
+            self._is_food_reachable(),
 
             self._danger_for_relative_action(0),
             self._danger_for_relative_action(1),

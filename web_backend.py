@@ -56,6 +56,7 @@ from backend_config import (
     TAIL_CLOSE_PENALTY,
     PARTITION_PENALTY_LARGE,
     PARTITION_PENALTY_SMALL,
+    PARTITION_START_IDX,
 )
 
 from dqn_agent import DQNAgent
@@ -937,7 +938,7 @@ class SnakeWebBackend:
         current_partition = self.game._is_currently_partitioned()
 
         # Check if the chosen move results in partition
-        next_partition = state[23 + visible_action] > 0.5
+        next_partition = state[PARTITION_START_IDX + visible_action] > 0.5
         is_transition_to_partition = (not current_partition) and next_partition
 
         _, reward, done, info = self.game.step(absolute_direction)

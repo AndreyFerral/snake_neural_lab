@@ -23,6 +23,9 @@ from backend_config import (
     TAIL_CLOSE_PENALTY,
     PARTITION_PENALTY_LARGE,
     PARTITION_PENALTY_SMALL,
+    TAIL_BLOCKED_START_IDX,
+    TAIL_CLOSE_START_IDX,
+    PARTITION_START_IDX,
 )
 from networks import PolicyNetwork
 from snake_env import relative_to_absolute
@@ -510,8 +513,7 @@ class ParallelEvolutionRunner:
             absolute_direction = relative_to_absolute(env.direction, action)
             
             # Get cached values directly from the already generated observation (states_np)
-            # observation layout: tail_blocked is at indices 14, 15, 16. tail_close is at 20, 21, 22. partition is at 23, 24, 25.
-            next_tail_blocked = states_np[i][14 + action] > 0.5
+            next_tail_blocked = states_np[i][TAIL_BLOCKED_START_IDX + action] > 0.5
             
             tail_path = env._shortest_path_to_tail()
             tail_dist = len(tail_path) if tail_path else -1
@@ -519,10 +521,10 @@ class ParallelEvolutionRunner:
 
             is_transition_to_tail_loss = (not current_tail_blocked) and next_tail_blocked
 
-            is_tail_close = states_np[i][20 + action] > 0.5
+            is_tail_close = states_np[i][TAIL_CLOSE_START_IDX + action] > 0.5
 
             current_partition = env._is_currently_partitioned()
-            next_partition = states_np[i][23 + action] > 0.5
+            next_partition = states_np[i][PARTITION_START_IDX + action] > 0.5
             is_transition_to_partition = (not current_partition) and next_partition
 
             env_start = time.perf_counter()
