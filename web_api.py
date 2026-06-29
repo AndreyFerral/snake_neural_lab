@@ -60,8 +60,9 @@ class SnakeRequestHandler(SimpleHTTPRequestHandler):
     # Кэширование статических ресурсов при отправке заголовков
     def end_headers(self) -> None:
         if not self.path.startswith("/api/"):
-            # Кэшируем фронтенд в браузере для избежания повторных чтений с диска
-            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
         super().end_headers()
 
     def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:

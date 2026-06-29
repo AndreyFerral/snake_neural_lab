@@ -26,8 +26,12 @@ def load_matching_state(module: nn.Module, saved_state: dict[str, torch.Tensor] 
     current_state = module.state_dict()
     matched: dict[str, torch.Tensor] = {}
     for key, value in saved_state.items():
-        if key in current_state and current_state[key].shape == value.shape:
-            matched[key] = value.to(dtype=current_state[key].dtype)
+        if key in current_state:
+            if current_state[key].shape == value.shape:
+                matched[key] = value.to(dtype=current_state[key].dtype)
+            elif key == "hidden1_layer.weight" and current_state[key].dim() == 2 and value.dim() == 2:
+                if current_state[key].shape[0] == value.shape[0]:
+                    matched[key] = value.to(dtype=current_state[key].dtype)
     current_state.update(matched)
     module.load_state_dict(current_state)
     return len(matched)

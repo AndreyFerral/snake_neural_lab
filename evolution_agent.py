@@ -20,6 +20,9 @@ from backend_config import (
     MODEL_ACTION_LABELS,
     GLOBAL_SIGNAL_LABELS,
     TAIL_LOSS_PENALTY,
+    TAIL_CLOSE_PENALTY,
+    PARTITION_PENALTY_LARGE,
+    PARTITION_PENALTY_SMALL,
 )
 from networks import PolicyNetwork
 from snake_env import relative_to_absolute
@@ -182,8 +185,8 @@ class EvolutionAgent:
             self._load_current_genome()
         return fitness
 
-    def finish_individual(self, index: int, *, score: int, reward: float, steps: int, reason: str, board_size: int, max_steps_without_food: int = 0, tail_blocked_steps: int = 0) -> float:
-        fitness = self._fitness(score=score, reward=reward, steps=steps, reason=reason, board_size=board_size, max_steps_without_food=max_steps_without_food, tail_blocked_steps=tail_blocked_steps)
+    def finish_individual(self, index: int, *, score: int, reward: float, steps: int, reason: str, board_size: int, max_steps_without_food: int = 0, tail_blocked_steps: int = 0, tail_close_steps: int = 0) -> float:
+        fitness = self._fitness(score=score, reward=reward, steps=steps, reason=reason, board_size=board_size, max_steps_without_food=max_steps_without_food, tail_blocked_steps=tail_blocked_steps, tail_close_steps=tail_close_steps)
         safe_index = max(0, min(index, len(self.population) - 1))
         individual = self.population[safe_index]
         individual.fitness = fitness
@@ -210,13 +213,14 @@ class EvolutionAgent:
         self.victory_archive.append(self._clone_individual(individual))
         self.victory_archive = sorted(self.victory_archive, key=lambda item: (float(item.fitness if item.fitness is not None else float("-inf")), int(item.score), -int(item.steps)), reverse=True)[:EVOLUTION_VICTORY_ARCHIVE_SIZE]
 
-    def _fitness(self, *, score: int, reward: float, steps: int, reason: str, board_size: int, max_steps_without_food: int = 0, tail_blocked_steps: int = 0) -> float:
+    def _fitness(self, *, score: int, reward: float, steps: int, reason: str, board_size: int, max_steps_without_food: int = 0, tail_blocked_steps: int = 0, tail_close_steps: int = 0) -> float:
         # Улучшенная стабильная формула:
         # Приоритет отдается яблокам (score), но и время жизни (steps) вносит свой вклад.
         # Исключает риск числового переполнения float32 при высоких счетах.
         base_fitness = float(steps) + (float(score) ** 2.0) * 100.0
-        # Subtract tail blocked steps penalty
-        return max(0.1, base_fitness - float(tail_blocked_steps) * TAIL_LOSS_PENALTY * 4.0)
+        # Subtract tail blocked steps penalty and tail close steps penalty
+        penalty = float(tail_blocked_steps) * TAIL_LOSS_PENALTY * 4.0 + float(tail_close_steps) * TAIL_CLOSE_PENALTY * 4.0
+        return max(0.1, base_fitness - penalty)
 
     def evolve_generation(self) -> None:
         evaluated = [ind for ind in self.population if ind.fitness is not None]
@@ -323,9 +327,12 @@ class EvolutionAgent:
         self._load_current_genome()
 
     def export_checkpoint(self) -> dict[str, object]:
-        ranked = self._ranked_population()
-        best_individual = ranked[0] if ranked else None
-        return {"checkpoint_mode": "elite", "elites": [] if best_individual is None else [self._individual_payload(best_individual)], "victory_archive": [], "best_genome": None if self.best_genome is None else self._serialized_genome(self.best_genome)}
+        return {
+            "checkpoint_mode": "population",
+            "population": [self._individual_payload(ind) for ind in self.population],
+            "victory_archive": [self._individual_payload(ind) for ind in self.victory_archive],
+            "best_genome": None if self.best_genome is None else self._serialized_genome(self.best_genome)
+        }
 
     def import_checkpoint(self, payload: dict[str, object]) -> None:
         loaded_population: list[EvolutionIndividual] = []
@@ -338,11 +345,14 @@ class EvolutionAgent:
                 if individual is not None:
                     loaded_population.append(individual)
         if loaded_population:
-            ranked_loaded = sorted(loaded_population, key=lambda item: float(item.fitness if item.fitness is not None else float("-inf")), reverse=True)
-            self.population = [self._clone_individual(item) for item in ranked_loaded[: self.elite_count]]
-            while len(self.population) < self.population_size:
-                parent = random.choice(ranked_loaded)
-                self.population.append(EvolutionIndividual(self._mutate(parent.genome)))
+            if len(loaded_population) == self.population_size:
+                self.population = [self._clone_individual(item) for item in loaded_population]
+            else:
+                ranked_loaded = sorted(loaded_population, key=lambda item: float(item.fitness if item.fitness is not None else float("-inf")), reverse=True)
+                self.population = [self._clone_individual(item) for item in ranked_loaded[: self.elite_count]]
+                while len(self.population) < self.population_size:
+                    parent = random.choice(ranked_loaded)
+                    self.population.append(EvolutionIndividual(self._mutate(parent.genome)))
         loaded_victories: list[EvolutionIndividual] = []
         raw_victory_archive = payload.get("victory_archive")
         if isinstance(raw_victory_archive, list):
@@ -394,6 +404,7 @@ class ParallelEvolutionRunner:
         self.leader_index = -1
         self.completed_count = 0
         self.last_profile_ms = {}
+        self.replay_histories = [[] for _ in range(self.population_size)]
 
     def alive_count(self) -> int: return sum(1 for item in self.done if not item)
     def all_done(self) -> bool: return self.alive_count() == 0
@@ -498,16 +509,21 @@ class ParallelEvolutionRunner:
 
             absolute_direction = relative_to_absolute(env.direction, action)
             
-            # Check if the tail is blocked in the CURRENT state before taking a step
-            current_head = env.snake[0]
-            current_tail = env.snake[-1]
-            current_blocked = set(env.snake[1:-1]) # Body without tail
-            current_tail_blocked = not env._has_path(current_head, current_tail, current_blocked)
-
-            # Check if the chosen move results in tail loss
-            next_tail_blocked = env._is_tail_blocked_after_relative_action(action) > 0.5
+            # Get cached values directly from the already generated observation (states_np)
+            # observation layout: tail_blocked is at indices 14, 15, 16. tail_close is at 20, 21, 22. partition is at 23, 24, 25.
+            next_tail_blocked = states_np[i][14 + action] > 0.5
             
+            tail_path = env._shortest_path_to_tail()
+            tail_dist = len(tail_path) if tail_path else -1
+            current_tail_blocked = (tail_path is None)
+
             is_transition_to_tail_loss = (not current_tail_blocked) and next_tail_blocked
+
+            is_tail_close = states_np[i][20 + action] > 0.5
+
+            current_partition = env._is_currently_partitioned()
+            next_partition = states_np[i][23 + action] > 0.5
+            is_transition_to_partition = (not current_partition) and next_partition
 
             env_start = time.perf_counter()
             _, reward, done, info = env.step(absolute_direction)
@@ -515,6 +531,11 @@ class ParallelEvolutionRunner:
 
             if is_transition_to_tail_loss:
                 reward -= TAIL_LOSS_PENALTY
+            if is_tail_close and tail_dist != -1:
+                reward -= (3 - tail_dist) * TAIL_CLOSE_PENALTY
+            if is_transition_to_partition:
+                penalty_val = PARTITION_PENALTY_LARGE if len(env.snake) >= 20 else PARTITION_PENALTY_SMALL
+                reward -= penalty_val
 
             book_start = time.perf_counter()
             self.episode_rewards[env_idx] += reward
@@ -525,12 +546,31 @@ class ParallelEvolutionRunner:
             step_penalties = [str(item) for item in info.get("penalty_reasons", [])]
             if is_transition_to_tail_loss:
                 step_penalties.append("tail_loss")
+            if is_tail_close and tail_dist != -1:
+                step_penalties.append("tail_close")
+            if is_transition_to_partition:
+                step_penalties.append("partition")
                 
             self.step_logs[env_idx].append({"step": step_number, "reward": float(reward), "train_reward": float(reward), "action": int(action), "action_label": self.action_labels[action] if 0 <= action < len(self.action_labels) else "-", "reason": str(info.get("reason", env.last_reason)), "penalties": step_penalties, "random": bool(was_random), "individual": env_idx + 1, "apple_opportunity": None})
+            
+            # Record replay frame
+            self.replay_histories[env_idx].append({
+                "step": step_number,
+                "snake": [[int(coord[0]), int(coord[1])] for coord in env.snake],
+                "food": [int(env.food[0]), int(env.food[1])],
+                "direction": int(env.direction),
+                "action": int(action),
+                "reward": float(reward),
+                "reason": str(info.get("reason", env.last_reason)),
+                "penalties": list(step_penalties)
+            })
+            if len(self.replay_histories[env_idx]) > 500:
+                self.replay_histories[env_idx].pop(0)
             if done:
                 reason = str(info.get("reason", env.last_reason))
                 tail_blocked_steps = sum(1 for entry in self.step_logs[env_idx] if "tail_loss" in entry.get("penalties", []))
-                fitness = agent.finish_individual(env_idx, score=env.score, reward=self.episode_rewards[env_idx], steps=env.step_count, reason=reason, board_size=env.board_size, max_steps_without_food=env.max_steps_without_food, tail_blocked_steps=tail_blocked_steps)
+                tail_close_steps = sum(1 for entry in self.step_logs[env_idx] if "tail_close" in entry.get("penalties", []))
+                fitness = agent.finish_individual(env_idx, score=env.score, reward=self.episode_rewards[env_idx], steps=env.step_count, reason=reason, board_size=env.board_size, max_steps_without_food=env.max_steps_without_food, tail_blocked_steps=tail_blocked_steps, tail_close_steps=tail_close_steps)
                 self.last_fitnesses[env_idx] = fitness
                 self.done[env_idx] = True
                 self.completed_count += 1

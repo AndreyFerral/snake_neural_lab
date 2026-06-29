@@ -1,8 +1,29 @@
-# Python
+# Python bytecode and cache
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 *.pid
 
-# Logs and model files
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Logs and runtime databases
 .runtime/
-.gitignore
+*.log
+
+# IDEs and editors configuration
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# OS generated files
+.DS_Store
+Thumbs.db

@@ -103,6 +103,8 @@ class SnakeEnv:
         self._path_cache_max_size = 10000
         self._obs_cache_step: int = -1
         self._obs_cache_vec: np.ndarray | None = None
+        self._shortest_path_cache_step: int = -1
+        self._shortest_path_cache_val: list[tuple[int, int]] | None = None
         self.reset()
 
     def _clear_path_cache(self) -> None:
@@ -111,6 +113,8 @@ class SnakeEnv:
     def _clear_observation_cache(self) -> None:
         self._obs_cache_step = -1
         self._obs_cache_vec = None
+        self._shortest_path_cache_step = -1
+        self._shortest_path_cache_val = None
 
     def _check_cache_size(self) -> None:
         if len(self._path_cache) > self._path_cache_max_size:
@@ -134,8 +138,9 @@ class SnakeEnv:
         self.done = False
         self.last_reward = 0.0
         self.last_reason = "new_game"
-        self.last_penalty_reasons: list[str] = []
-        self.eaten_food_trail: Deque[tuple[int, int]] = deque(maxlen=24)
+        self.last_penalty_reasons = []
+        self.eaten_food_trail = deque(maxlen=24)
+        self.tail_track = deque(maxlen=4)
         self.snake = [(center, center), (center - 1, center), (center - 2, center)]
         self.recent_heads = deque([self.snake[0]], maxlen=18)
         self.recent_turns = deque(maxlen=8)
@@ -289,6 +294,7 @@ class SnakeEnv:
                     self.food = self._spawn_food()
             else:
                 tail = self.snake.pop()
+                self.tail_track.append(tail)
                 if tail in self.eaten_food_trail:
                     self.eaten_food_trail.remove(tail)
 
@@ -347,12 +353,14 @@ class SnakeEnv:
                     queue.append(next_cell)
         return False
 
-    def _reachable_space_size(self, start: tuple[int, int], blocked: set[tuple[int, int]]) -> int:
+    def _reachable_space_size(self, start: tuple[int, int], blocked: set[tuple[int, int]], limit: int | None = None) -> int:
         if start in blocked:
             return 0
         visited = {start}
         queue = deque([start])
         while queue:
+            if limit is not None and len(visited) >= limit:
+                return len(visited)
             curr = queue.popleft()
             for next_cell in self._neighbors_for(curr):
                 if next_cell not in visited and next_cell not in blocked:
@@ -382,7 +390,7 @@ class SnakeEnv:
         return 0.0 if has_path else 1.0
 
     def _is_space_tight_after_relative_action(self, relative_action: int) -> float:
-        """Возвращает 1.0 если доступное пространство после хода меньше длины змеи."""
+        """Возвращает 1.0 если доступное пространство после хода меньше динамического порога."""
         absolute_direction = relative_to_absolute(self.direction, relative_action)
         next_head = self._next_head_for_direction(absolute_direction)
         will_eat = next_head == self.food
@@ -394,8 +402,135 @@ class SnakeEnv:
         else:
             simulated_snake = [next_head] + self.snake[:-1]
         blocked = set(simulated_snake[1:])
-        space_size = self._reachable_space_size(next_head, blocked)
-        return 1.0 if space_size < len(simulated_snake) else 0.0
+        
+        free_cells = (self.board_size * self.board_size) - len(simulated_snake)
+        threshold = min(len(simulated_snake), free_cells)
+        
+        space_size = self._reachable_space_size(next_head, blocked, limit=threshold)
+        return 1.0 if space_size < threshold else 0.0
+
+    def _is_currently_partitioned(self) -> bool:
+        """Возвращает True, если текущее свободное пространство поля разделено на изолированные компоненты."""
+        blocked = set(self.snake)
+        visited = set()
+        components = 0
+        for y in range(self.board_size):
+            for x in range(self.board_size):
+                cell = (x, y)
+                if cell not in blocked and cell not in visited:
+                    components += 1
+                    if components > 1:
+                        return True
+                    # BFS to mark component
+                    queue = deque([cell])
+                    visited.add(cell)
+                    while queue:
+                        curr = queue.popleft()
+                        cx, cy = curr
+                        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                            nx, ny = cx + dx, cy + dy
+                            n_cell = (nx, ny)
+                            if 0 <= nx < self.board_size and 0 <= ny < self.board_size:
+                                if n_cell not in blocked and n_cell not in visited:
+                                    visited.add(n_cell)
+                                    queue.append(n_cell)
+        return False
+
+    def _is_space_partitioned_after_relative_action(self, relative_action: int) -> float:
+        """Возвращает 1.0 если после хода свободное пространство делится на изолированные компоненты."""
+        absolute_direction = relative_to_absolute(self.direction, relative_action)
+        next_head = self._next_head_for_direction(absolute_direction)
+        will_eat = next_head == self.food
+        hits_wall = not (0 <= next_head[0] < self.board_size and 0 <= next_head[1] < self.board_size)
+        if hits_wall or self._would_hit_self(next_head, will_eat):
+            return 1.0
+        if will_eat:
+            simulated_snake = [next_head] + self.snake
+        else:
+            simulated_snake = [next_head] + self.snake[:-1]
+        blocked = set(simulated_snake)
+
+        visited = set()
+        components = 0
+        for y in range(self.board_size):
+            for x in range(self.board_size):
+                cell = (x, y)
+                if cell not in blocked and cell not in visited:
+                    components += 1
+                    if components > 1:
+                        return 1.0
+                    # BFS to mark component
+                    queue = deque([cell])
+                    visited.add(cell)
+                    while queue:
+                        curr = queue.popleft()
+                        cx, cy = curr
+                        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                            nx, ny = cx + dx, cy + dy
+                            n_cell = (nx, ny)
+                            if 0 <= nx < self.board_size and 0 <= ny < self.board_size:
+                                if n_cell not in blocked and n_cell not in visited:
+                                    visited.add(n_cell)
+                                    queue.append(n_cell)
+        return 0.0
+
+    def _shortest_path_to_tail(self) -> list[tuple[int, int]] | None:
+        if self.step_count == self._shortest_path_cache_step:
+            return self._shortest_path_cache_val
+
+        head = self.snake[0]
+        tail = self.snake[-1]
+        blocked = set(self.snake[1:-1])  # Body without tail
+        if head == tail:
+            self._shortest_path_cache_step = self.step_count
+            self._shortest_path_cache_val = []
+            return []
+        visited = {head}
+        queue = deque([(head, [])])
+        path_found = None
+        while queue:
+            curr, path = queue.popleft()
+            if curr == tail:
+                path_found = path
+                break
+            for next_cell in self._neighbors_for(curr):
+                if next_cell not in visited and next_cell not in blocked:
+                    visited.add(next_cell)
+                    queue.append((next_cell, path + [next_cell]))
+        self._shortest_path_cache_step = self.step_count
+        self._shortest_path_cache_val = path_found
+        return path_found
+
+    def _is_tail_close_after_relative_action(self, relative_action: int) -> float:
+        absolute_direction = relative_to_absolute(self.direction, relative_action)
+        next_head = self._next_head_for_direction(absolute_direction)
+        
+        # Наказываем, если следующая клетка головы — это текущий хвост ИЛИ лежит на недавних следах хвоста
+        if next_head != self.snake[-1] and next_head not in self.tail_track:
+            return 0.0
+            
+        path = self._shortest_path_to_tail()
+        if not path or len(path) >= 3:
+            return 0.0
+            
+        head = self.snake[0]
+        p_1 = path[0]
+        dx = p_1[0] - head[0]
+        dy = p_1[1] - head[1]
+        path_direction = DIRECTIONS.index((dx, dy))
+        
+        if absolute_direction == path_direction:
+            # Не штрафуем, если нет безопасных альтернатив (вынужденный ход для выживания)
+            alternatives = [a for a in (0, 1, 2) if a != relative_action]
+            has_safe_alternative = False
+            for alt_act in alternatives:
+                if self._danger_for_relative_action(alt_act) < 0.5:
+                    has_safe_alternative = True
+                    break
+            if not has_safe_alternative:
+                return 0.0
+            return 1.0
+        return 0.0
 
 
 
@@ -458,6 +593,12 @@ class SnakeEnv:
             self._is_space_tight_after_relative_action(0),  # space_tight_forward
             self._is_space_tight_after_relative_action(1),  # space_tight_left
             self._is_space_tight_after_relative_action(2),  # space_tight_right
+            self._is_tail_close_after_relative_action(0),   # tail_close_forward
+            self._is_tail_close_after_relative_action(1),   # tail_close_left
+            self._is_tail_close_after_relative_action(2),   # tail_close_right
+            self._is_space_partitioned_after_relative_action(0),  # partition_forward
+            self._is_space_partitioned_after_relative_action(1),  # partition_left
+            self._is_space_partitioned_after_relative_action(2),  # partition_right
         ]
         self._obs_cache_step = self.step_count
         self._obs_cache_vec = np.array(signals, dtype=np.float32)
@@ -481,6 +622,7 @@ class SnakeEnv:
             "last_reason": self.last_reason,
             "last_penalty_reasons": list(self.last_penalty_reasons),
             "eaten_food_trail": [[x, y] for x, y in self.eaten_food_trail],
+            "tail_track": [[x, y] for x, y in self.tail_track],
             "snake": [[x, y] for x, y in self.snake],
             "food": [self.food[0], self.food[1]],
             "recent_heads": [[x, y] for x, y in self.recent_heads],
@@ -501,6 +643,8 @@ class SnakeEnv:
 
             eft = payload.get("eaten_food_trail", [])
             self.eaten_food_trail = deque([(int(p[0]), int(p[1])) for p in eft], maxlen=24)
+            tt = payload.get("tail_track", [])
+            self.tail_track = deque([(int(p[0]), int(p[1])) for p in tt], maxlen=4)
             rh = payload.get("recent_heads", [])
             self.recent_heads = deque([(int(p[0]), int(p[1])) for p in rh], maxlen=18)
             rt = payload.get("recent_turns", [])

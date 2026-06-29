@@ -62,17 +62,23 @@ function Get-PythonLaunch {
     if ($UseAllowGpu) { $arguments += "--allow-gpu" }
 
     if (-not $script:PythonExecutable) {
-        $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
-        if ($pythonCmd) {
-            $script:PythonExecutable = $pythonCmd.Source
+        $venvPython = Join-Path $ProjectRoot "venv\Scripts\python.exe"
+        if (Test-Path $venvPython) {
+            $script:PythonExecutable = $venvPython
             $script:UsePyLauncher = $false
         } else {
-            $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
-            if ($pyLauncher) {
-                $script:PythonExecutable = $pyLauncher.Source
-                $script:UsePyLauncher = $true
+            $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+            if ($pythonCmd) {
+                $script:PythonExecutable = $pythonCmd.Source
+                $script:UsePyLauncher = $false
             } else {
-                throw "Python not found. Install Python or add to PATH."
+                $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+                if ($pyLauncher) {
+                    $script:PythonExecutable = $pyLauncher.Source
+                    $script:UsePyLauncher = $true
+                } else {
+                    throw "Python not found. Install Python or add to PATH."
+                }
             }
         }
     }
@@ -101,17 +107,31 @@ function Request-BackendShutdown { param([string]$TargetUrl)
 }
 
 function Stop-BackendFromPidFile { param([string]$Path)
-    if (-not (Test-Path $Path)) { return $false }
-    $rawPid = Get-Content -Path $Path -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($rawPid -notmatch '^\d+$') { return $false }
-    $processId = [int]$rawPid
+    $resolvedPath = $Path
+    if (-not (Test-Path $resolvedPath)) {
+        $parent = Split-Path $Path -Parent
+        $leaf = Split-Path $Path -Leaf
+        if (-not $leaf.StartsWith(".")) {
+            $dotPath = Join-Path $parent ".$leaf"
+            if (Test-Path $dotPath) {
+                $resolvedPath = $dotPath
+            }
+        }
+    }
+    if (-not (Test-Path $resolvedPath)) { return $false }
+    $rawPid = Get-Content -Path $resolvedPath -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($rawPid -match '(\d+)') {
+        $processId = [int]$Matches[1]
+    } else {
+        return $false
+    }
     $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
     if (-not $process) {
-        Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $resolvedPath -Force -ErrorAction SilentlyContinue
         return $false
     }
     Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $resolvedPath -Force -ErrorAction SilentlyContinue
     return $true
 }
 

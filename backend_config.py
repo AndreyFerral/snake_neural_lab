@@ -28,6 +28,12 @@ GLOBAL_SIGNAL_LABELS = (
     "space_tight_forward",
     "space_tight_left",
     "space_tight_right",
+    "tail_close_forward",
+    "tail_close_left",
+    "tail_close_right",
+    "partition_forward",
+    "partition_left",
+    "partition_right",
 )
 DIRECTIONS = (
     (0, -1),
@@ -43,6 +49,9 @@ SAVE_THROTTLE_SECONDS = 8.0
 APPLE_REWARD = 4.0
 DEATH_PENALTY = 8.0
 TAIL_LOSS_PENALTY = 12.0
+TAIL_CLOSE_PENALTY = 1.2
+PARTITION_PENALTY_LARGE = 1.5
+PARTITION_PENALTY_SMALL = 0.05
 EPISODE_TRANSITION_LIMIT = 2_000
 
 CPU_BATCH_SIZE = 128
@@ -76,6 +85,8 @@ PENALTY_CATALOG = {
     "death": {"label": "Смерть", "short_label": "Смерть", "value": -DEATH_PENALTY},
     "looping": {"label": "Цикл", "short_label": "Цикл", "value": "до -0.35"},
     "tail_loss": {"label": "Потеря хвоста", "short_label": "Хвост", "value": -TAIL_LOSS_PENALTY},
+    "tail_close": {"label": "Близко к хвосту", "short_label": "Близко", "value": f"до -{2 * TAIL_CLOSE_PENALTY:.2g}"},
+    "partition": {"label": "Разрыв поля", "short_label": "Разрыв", "value": f"до -{PARTITION_PENALTY_LARGE:.2g}"},
 }
 
 REWARD_CATALOG = {
@@ -90,6 +101,7 @@ REASON_LABELS = {
     "apple": "Яблоко",
     "victory": "Победа",
     "looping": "Ходит по кругу",
+    "partition": "Разрыв поля",
     "blocked": "ход заблокирован",
     "safe": "безопасно",
     "none": "нет",
@@ -98,6 +110,7 @@ REASON_LABELS = {
     "starvation": "Смерть: голод",
     "death": "Смерть",
     "tail_loss": "Потеря хвоста",
+    "tail_close": "Близко к хвосту",
 }
 
 SIGNAL_LABELS = {
@@ -121,6 +134,9 @@ SIGNAL_LABELS = {
     "space_tight_forward": "⚠️↑",
     "space_tight_left": "⚠️←",
     "space_tight_right": "⚠️→",
+    "tail_close_forward": "🐍🤏↑",
+    "tail_close_left": "🐍🤏←",
+    "tail_close_right": "🐍🤏→",
 }
 
 TERMINAL_REASONS = (
@@ -133,4 +149,4 @@ TERMINAL_REASONS = (
 def hunger_budget_for(score: int, board_size: int) -> float:
     board_cells = max(1, board_size * board_size)
     snake_length = min(float(score + 3), float(board_cells))
-    return board_size * 4.0 + snake_length * 1.0
+    return board_size * 4.0 + snake_length * 2.0

@@ -4,11 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Snake Neural Lab</title>
-    <link
-      rel="icon"
-      type="image/svg+xml"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d1e29'/%3E%3Ccircle cx='20' cy='34' r='8' fill='%235cd6ad'/%3E%3Ccircle cx='32' cy='34' r='8' fill='%235cd6ad'/%3E%3Ccircle cx='44' cy='34' r='8' fill='%23d7fff4'/%3E%3Ccircle cx='46' cy='31' r='1.9' fill='%2308131d'/%3E%3Ccircle cx='46' cy='37' r='1.9' fill='%2308131d'/%3E%3Ccircle cx='47' cy='17' r='7' fill='%23df2338'/%3E%3Cpath d='M46 10c1 1 2 2 2 4' stroke='%236b4728' stroke-width='2.4' stroke-linecap='round' fill='none'/%3E%3Cpath d='M50 10c3 0 5 2 5 4-3 0-5-1-6-3' fill='%235ba93a'/%3E%3C/svg%3E"
-    />
+    <link rel="icon" type="image/x-icon" href="snake.ico" />
     <link rel="stylesheet" href="styles.css" />
 
   </head>
@@ -18,15 +14,16 @@
         <div>
           <p class="eyebrow">Snake + Reinforcement Learning</p>
           <h1>Змейка с обучением нейросети</h1>
-          <p class="hero-copy">
-            Интерфейс работает в браузере, а сама нейросеть и цикл обучения выполняются в Python backend.
-            Размер входа модели можно переключать отдельно от игрового поля, и для каждого входа хранится своя обученная модель.
-          </p>
           <div class="hero-actions">
             <button id="restartBackend">Перезапуск backend</button>
             <button id="shutdownBackend" class="danger">Выход</button>
+            <label class="switch-container">
+              <span class="switch-label">Реплеи</span>
+              <input type="checkbox" id="recordReplays" checked />
+              <span class="switch-slider"></span>
+            </label>
             <label class="smart-model-control" id="smartModelControl" hidden>
-              Файл Zmey-smart
+              Модель
               <select id="smartModel">
                 <option value="">Нет .h5</option>
               </select>
@@ -66,7 +63,7 @@
               </select>
               </label>
               <label>
-                Размер карты
+                Карта
               <select id="boardSize">
                 <option value="10" selected>10x10</option>
                 <option value="15">15x15</option>
@@ -83,11 +80,11 @@
             </div>
           </div>
 
-          <canvas id="gameCanvas" width="720" height="720"></canvas>
+          <canvas id="gameCanvas" class="snake-canvas" width="720" height="720"></canvas>
           <div class="legend">
             <div class="step-review">
               <div class="step-review-head">
-                <strong>Лог лидера</strong>
+                <strong>Журнал</strong>
                 <div class="step-review-controls">
                   <span id="stepReviewLabel" class="step-review-label">Нет шагов</span>
                   <div class="step-review-tabs">
@@ -215,10 +212,10 @@
             </article>
 
             <article class="viz-card death-snapshot">
-              <h3>Итог</h3>
-              <canvas id="deathSnapshotCanvas" width="520" height="260"></canvas>
-              <div id="deathStepTimeline" class="viz-note"></div>
-              <p id="deathSnapshotMeta" class="viz-note">Снимок появится после первого эпизода.</p>
+              <h3>Итог игры</h3>
+              <canvas id="deathSnapshotCanvas" class="snake-canvas" width="500" height="500"></canvas>
+              <div id="deathStepTimeline"></div>
+              <p id="deathSnapshotMeta" class="viz-note"></p>
               <div id="deathChoiceMeta" hidden></div>
               <div id="deathRiskTable"></div>
             </article>

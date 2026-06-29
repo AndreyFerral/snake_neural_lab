@@ -23,6 +23,7 @@ class SnakeLabApp {
     this.resetAgentButton = document.getElementById("resetAgent");
     this.restartBackendButton = document.getElementById("restartBackend");
     this.shutdownBackendButton = document.getElementById("shutdownBackend");
+    this.recordReplaysCheckbox = document.getElementById("recordReplays");
 
     this.networkPanel = document.getElementById("networkPanel");
     this.networkGraphCard = document.getElementById("networkGraphCard");
@@ -471,10 +472,10 @@ class SnakeLabApp {
 
   drawSnakeScene(ctx, width, height, scene, options = {}) {
     const deathPreset = options.variant === "death" ? {
-      boardPadding: 14,
-      frameOptions: { glow: 5, outerLineWidth: 1.25, innerLineWidth: 1 },
+      boardPadding: 2,
+      frameOptions: { glow: 0, outerLineWidth: 1.25, innerLineWidth: 1 },
       clearOccupiedCells: true,
-      clearCellOptions: { fill: "rgba(13, 30, 41, 0.98)", insetRatio: 0, rounded: false },
+      clearCellOptions: { fill: "rgba(13, 30, 41, 0.96)", insetRatio: 0.05, rounded: false },
       bodyOptions: { minLineWidth: 4, lineRatio: 0.54, minRadius: 6, radiusRatio: 0.38 },
       trailOptions: { baseAlpha: 0.24, alphaScale: 0.30, baseSizeRatio: 0.28, sizeScale: 0.14, strokeRgb: "255, 233, 237", strokeAlphaScale: 0.92, minLineWidth: 1.2, lineRatio: 0.04 },
       headOptions: { minRadius: 6, radiusRatio: 0.4 }
@@ -507,7 +508,7 @@ class SnakeLabApp {
 
     if (food) this.fillBoardCell(ctx, boardX, boardY, cell, food.x, food.y, sceneOptions.foodCellOptions ?? { insetRatio: 0.08, radiusRatio: 0.24 });
     if (sceneOptions.clearOccupiedCells) {
-      const clearOptions = sceneOptions.clearCellOptions ?? { fill: "rgba(13, 30, 41, 0.98)", insetRatio: 0, rounded: false };
+      const clearOptions = sceneOptions.clearCellOptions ?? { fill: "rgba(13, 30, 41, 0.96)", insetRatio: 0.05, rounded: false };
       if (food) this.fillBoardCell(ctx, boardX, boardY, cell, food.x, food.y, clearOptions);
       snake.forEach((segment) => this.fillBoardCell(ctx, boardX, boardY, cell, segment.x, segment.y, clearOptions));
     } else {
@@ -569,6 +570,9 @@ class SnakeLabApp {
     this.resetAgentButton?.addEventListener("click", () => { if (this.resetAgentButton.disabled) return; this.sendCommand("reset_agent"); });
     this.restartBackendButton?.addEventListener("click", () => this.restartBackend());
     this.shutdownBackendButton?.addEventListener("click", () => this.shutdownBackend());
+    this.recordReplaysCheckbox?.addEventListener("change", () => {
+      this.sendCommand("set_record_replays", this.recordReplaysCheckbox.checked);
+    });
     this.deathStepTimeline?.addEventListener("click", (event) => {
       const button = event.target instanceof Element ? event.target.closest("button[data-death-step]") : null;
       if (!button) return;
@@ -855,6 +859,11 @@ class SnakeLabApp {
     this.syncSmartModelSelect();
     if (this.boardSizeSelect) { const nextBoardSize = String(this.state.game.size); if (this.boardSizeSelect.value !== nextBoardSize) this.boardSizeSelect.value = nextBoardSize; }
     if (this.speedRange) { const nextSpeed = String(this.state.speed); if (this.speedRange.value !== nextSpeed) this.speedRange.value = nextSpeed; }
+    if (this.recordReplaysCheckbox && typeof this.state.record_replays === "boolean") {
+      if (this.recordReplaysCheckbox.checked !== this.state.record_replays) {
+        this.recordReplaysCheckbox.checked = this.state.record_replays;
+      }
+    }
     const isSmartMode = this.smartContextActive;
     this.setText(this.runToggle, this.state.running ? "Пауза" : "Старт");
     this.setText(this.trainToggle, this.state.training ? "Обучение: вкл" : "Обучение: выкл");
@@ -984,9 +993,31 @@ class SnakeLabApp {
       { action: 1, key: "left" },
       { action: 2, key: "right" }
     ].map(({ action, key }) => {
-      const label = this.arrowForAction(action);
+      const arrow = this.arrowForAction(action);
       const vals = getRiskValues(key);
-      const rowClass = (selectedStep && Number.isInteger(selectedStep.action) && action === Number(selectedStep.action)) ? ' class="is-selected"' : "";
+      
+      const isRandom = selectedStep && selectedStep.action_random === true;
+      const isChosenAction = selectedStep && Number.isInteger(selectedStep.action) && action === Number(selectedStep.action);
+      const isGreedyAction = selectedStep && Number.isInteger(selectedStep.greedy_action) && action === Number(selectedStep.greedy_action);
+
+      let rowClass = "";
+      let label = arrow;
+
+      if (isRandom) {
+        if (isChosenAction) {
+          rowClass = ' class="is-selected-random"';
+          const tooltip = isGreedyAction ? "Случайный ход (совпал с выбором сети)" : "Случайный ход (исследование)";
+          label = `${arrow} <span style="cursor: help; margin-left: 4px; font-size: 0.85rem;" title="${tooltip}">🎲</span>`;
+        } else if (isGreedyAction) {
+          rowClass = ' class="is-greedy-choice"';
+          label = `${arrow} <span style="cursor: help; margin-left: 4px; font-size: 0.85rem;" title="Выбор нейросети">🧠</span>`;
+        }
+      } else {
+        if (isChosenAction) {
+          rowClass = ' class="is-selected"';
+        }
+      }
+
       return [
         `<tr${rowClass}>`,
         `<td>${label}</td>`,
@@ -999,7 +1030,7 @@ class SnakeLabApp {
     
     this.setHtml(
       this.deathRiskTable,
-      `<table class="death-risk-table"><thead><tr><th>ход</th><th>СТЕНА</th><th>ХВОСТ</th><th>ТЕСНО</th></tr></thead><tbody>${rows}</tbody></table>`
+      `<table class="death-risk-table"><thead><tr><th>выбор</th><th>СТЕНА</th><th>ХВОСТ</th><th>ТЕСНО</th></tr></thead><tbody>${rows}</tbody></table>`
     );
   }
 
@@ -1072,15 +1103,9 @@ class SnakeLabApp {
     const { selectedStep, selectedIndex } = this.getSelectedDeathStep(snapshot);
     this.renderDeathStepTimeline(snapshot);
     this.renderDeathRiskTable(selectedStep);
-    const stepOffset = selectedIndex - this.getDeathSteps(snapshot).length;
     const outcomeReason = selectedStep?.outcome_reason ?? selectedStep?.reason ?? snapshot?.reason;
-    const outcomeTarget = outcomeReason === "victory" ? "победы" : "исхода";
-    const stepLabel = `Ход ${stepOffset} до ${outcomeTarget}`;
     ctx.clearRect(0, 0, width, height);
-    const background = ctx.createLinearGradient(0, 0, width, height);
-    background.addColorStop(0, "#09131b");
-    background.addColorStop(1, "#143244");
-    ctx.fillStyle = background;
+    ctx.fillStyle = "#0c1924";
     ctx.fillRect(0, 0, width, height);
     if (!selectedStep || !Array.isArray(selectedStep.snake) || !selectedStep.food) {
       this.renderDeathRiskTable(null);
@@ -1094,7 +1119,7 @@ class SnakeLabApp {
       ctx.font = "500 14px Aptos, Trebuchet MS, sans-serif";
       drawCanvasLines(ctx, ["После первого эпизода", "здесь появится карта."], width / 2, height / 2 + 18, 18);
       ctx.textAlign = "start";
-      this.setText(this.deathSnapshotMeta, "Снимок появится после первого эпизода.");
+      this.setText(this.deathSnapshotMeta, "");
       return;
     }
     const size = Number(selectedStep.size ?? 0) || 1;
@@ -1122,15 +1147,14 @@ class SnakeLabApp {
       ctx.beginPath(); ctx.moveTo(endX, endY); ctx.lineTo(endX - headLength * Math.cos(angle - Math.PI / 6), endY - headLength * Math.sin(angle - Math.PI / 6)); ctx.lineTo(endX - headLength * Math.cos(angle + Math.PI / 6), endY - headLength * Math.sin(angle + Math.PI / 6)); ctx.closePath(); ctx.fill();
       ctx.restore();
     }
-    const actionIndex = Number.isInteger(selectedStep.action) ? selectedStep.action : null;
-    const greedyIndex = Number.isInteger(selectedStep.greedy_action) ? selectedStep.greedy_action : null;
-    const actionArrow = actionIndex === null ? "-" : this.arrowForAction(actionIndex);
-    const greedyArrow = greedyIndex === null ? "-" : this.arrowForAction(greedyIndex);
-    const choiceLine = actionIndex === null ? null : selectedStep.action_random ? `Выбор: случайный ${actionArrow}; сеть выбрала бы ${greedyArrow}` : `Выбранный ход сети: ${actionArrow}`;
-    this.setText(this.deathChoiceMeta, choiceLine ?? "");
-    this.setHidden(this.deathChoiceMeta, !choiceLine);
+    this.setText(this.deathChoiceMeta, "");
+    this.setHidden(this.deathChoiceMeta, true);
 
-    this.setText(this.deathSnapshotMeta, [`${stepLabel}`, `Итог: ${formatReason(outcomeReason)}`, `Счет: ${selectedStep.score ?? 0} • Шагов: ${selectedStep.step_count ?? 0} • Длина: ${snake.length}`].filter(Boolean).join("\n"));
+    const statsLines = [
+      `Итог: ${formatReason(outcomeReason)}`,
+      `Счет: ${selectedStep.score ?? 0} • Шагов: ${selectedStep.step_count ?? 0} • Длина: ${snake.length}`
+    ];
+    this.setText(this.deathSnapshotMeta, statsLines.join("\n"));
   }
 
   renderRewardRules() {
@@ -1205,7 +1229,7 @@ class SnakeLabApp {
     const shouldUpdateDuringTraining = selectedHistory || !this.state?.training || !this.state?.running || stepReviewSource === "current" || isDeathLog || TERMINAL_REASONS.has(lastStep.reason);
     if (!force && this.state?.training && !shouldUpdateDuringTraining && this.lastStepReviewSignature) { this.setText(this.stepReviewLabel, `${visibleSteps.length} строк • последний шаг ${lastStep.step} • обновление на паузе/смерти`); return; }
     if (!force && signature === this.lastStepReviewSignature && lastStep.reason === this.lastStepReviewReason) return;
-    const stepReasonLabel = (reason) => { if (reason === "apple") return "яблоко"; if (reason === "victory") return "win"; if (TERMINAL_REASONS.has(reason)) return formatReason(reason).toLowerCase(); return "  "; };
+    const stepReasonLabel = (reason) => { if (reason === "apple") return "яблоко"; if (reason === "victory") return "победа"; if (TERMINAL_REASONS.has(reason)) return formatReason(reason).toLowerCase(); return "  "; };
     const forceScroll = this.forceStepLogScroll;
     const nearBottom = this.stepReviewBody.scrollHeight - this.stepReviewBody.scrollTop - this.stepReviewBody.clientHeight < 24;
     this.setText(this.stepReviewLabel, `${visibleSteps.length} строк • последний шаг ${steps[steps.length - 1].step}${sourceLabel}`);
@@ -1260,11 +1284,8 @@ class SnakeLabApp {
   drawStaticBackground(ctx, width, height, size) {
     ctx.clearRect(0, 0, width, height);
     
-    // Рисование градиентного фона
-    const background = ctx.createLinearGradient(0, 0, width, height);
-    background.addColorStop(0, "#09131b");
-    background.addColorStop(1, "#143244");
-    ctx.fillStyle = background;
+    // Рисование однотонного фона
+    ctx.fillStyle = "#0c1924";
     ctx.fillRect(0, 0, width, height);
 
     // Рисование сетки и рамки
@@ -1406,7 +1427,8 @@ class SnakeLabApp {
       {
         title: "Хвост",
         rows: [
-          ["tail_ahead", "tail_left", "tail_right", "tail_behind"]
+          ["tail_ahead", "tail_left", "tail_right", "tail_behind"],
+          ["tail_close_forward", "tail_close_left", "tail_close_right"]
         ]
       },
       {
@@ -1423,8 +1445,10 @@ class SnakeLabApp {
         .filter((row) => row.length > 0);
       return { ...group, rows: filteredRows };
     }).filter((group) => group.rows.length > 0);
-    const inputWidth = Math.max(220, Math.min(255, width * 0.27)); const inputX = padX; const inputY = contentTop + 4;
-    const hidden1X = Math.max(inputX + inputWidth + 76, width * 0.44); const hidden2X = Math.max(hidden1X + 160, width * 0.62); const outputX = width - padX - 74;
+    const inputWidth = Math.max(180, Math.min(250, width * 0.25)); const inputX = padX; const inputY = contentTop + 4;
+    const outputX = width - padX - 74;
+    const hidden1X = inputX + inputWidth + (outputX - (inputX + inputWidth)) * 0.28;
+    const hidden2X = inputX + inputWidth + (outputX - (inputX + inputWidth)) * 0.60;
     const hidden1Indices = this.pickTopIndices(hidden1, 14); const hidden2Indices = this.pickTopIndices(hidden2, 10);
     const outputIndices = this.outputDisplayOrder(labels).filter((index) => index < output.length);
     const hidden1Positions = this.createColumnPositions(hidden1X, contentTop + contentHeight / 2, hidden1Indices.length, Math.min(32, contentHeight / Math.max(1, hidden1Indices.length)));
@@ -1476,7 +1500,25 @@ class SnakeLabApp {
       posRgb: "92, 214, 173", negRgb: "255, 179, 71"
     });
     this.drawIndexedLayer(ctx, hidden1Indices, hidden1Positions, hidden1, 10, "H1"); this.drawIndexedLayer(ctx, hidden2Indices, hidden2Positions, hidden2, 12, "H2"); this.drawOutputLayer(ctx, outputIndices, outputPositions, output, labels, "q");
-    ctx.fillStyle = "#edf6f9"; ctx.font = "600 14px Aptos, Trebuchet MS, sans-serif"; ctx.fillText("Актуальные сигналы", inputX - 2, titleY); ctx.fillText("Активные нейроны H1", hidden1X - 44, titleY); ctx.fillText("Активные нейроны H2", hidden2X - 42, titleY); ctx.fillText("Решения", outputX - 18, titleY);
+    const isMobile = width < 680;
+    const headerInput = isMobile ? "Вход" : "Входные признаки";
+    const headerH1 = isMobile ? "H1" : "Скрытый H1";
+    const headerH2 = isMobile ? "H2" : "Скрытый H2";
+    const headerOutput = isMobile ? "Выход" : "Решения";
+
+    ctx.fillStyle = "#edf6f9";
+    ctx.font = "600 13.5px Aptos, Trebuchet MS, sans-serif";
+    
+    // Входные признаки выравниваем по левому краю (начало блока)
+    ctx.textAlign = "start";
+    ctx.fillText(headerInput, inputX - 2, titleY);
+    
+    // H1, H2 и Решения центрируем над их колонками
+    ctx.textAlign = "center";
+    ctx.fillText(headerH1, hidden1X, titleY);
+    ctx.fillText(headerH2, hidden2X, titleY);
+    ctx.fillText(headerOutput, outputX + 16, titleY);
+    ctx.textAlign = "start";
   }
 
   createColumnPositions(centerX, centerY, count, spacing) { const positions = []; const startY = centerY - ((count - 1) * spacing) / 2; for (let index = 0; index < count; index += 1) positions.push({ x: centerX, y: startY + index * spacing }); return positions; }

@@ -28,6 +28,26 @@ class BaseSignalNetwork(nn.Module):
         self.hidden1_layer = nn.Linear(self.input_size, HIDDEN_LAYER_1)
         self.hidden2_layer = nn.Linear(HIDDEN_LAYER_1, HIDDEN_LAYER_2)
 
+    def load_state_dict(self, state_dict, strict=True):
+        key = "hidden1_layer.weight"
+        if key in state_dict:
+            val = state_dict[key]
+            curr_val = self.state_dict()[key]
+            if val.shape != curr_val.shape and val.dim() == 2 and curr_val.dim() == 2:
+                out_feat, in_feat = curr_val.shape
+                s_out_feat, s_in_feat = val.shape
+                if out_feat == s_out_feat:
+                    new_weight = curr_val.clone()
+                    copy_cols = min(in_feat, s_in_feat)
+                    new_weight[:, :copy_cols] = val[:, :copy_cols]
+                    if in_feat > s_in_feat:
+                        new_weight[:, s_in_feat:] = 0.0
+                    state_dict[key] = new_weight
+                    if not self._adapter_warning_emitted:
+                        print(f"[network] Adapted hidden1_layer.weight from loaded shape {tuple(val.shape)} to target shape {tuple(curr_val.shape)}")
+                        self._adapter_warning_emitted = True
+        return super().load_state_dict(state_dict, strict=strict)
+
     def _prepare_inputs(self, inputs: torch.Tensor) -> torch.Tensor:
         if inputs.dim() == 1:
             inputs = inputs.unsqueeze(0)

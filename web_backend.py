@@ -12,6 +12,7 @@ os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
 from collections import deque
 from dataclasses import asdict, dataclass
+import gzip
 import json
 from pathlib import Path
 import re
@@ -52,6 +53,9 @@ from backend_config import (
     REWARD_CATALOG,
     hunger_budget_for,
     TAIL_LOSS_PENALTY,
+    TAIL_CLOSE_PENALTY,
+    PARTITION_PENALTY_LARGE,
+    PARTITION_PENALTY_SMALL,
 )
 
 from dqn_agent import DQNAgent
@@ -318,6 +322,19 @@ class EpisodeStats:
     reason: str
     loss: float = 0.0
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "episode": self.episode,
+            "score": self.score,
+            "reward": self.reward,
+            "mutation": self.mutation,
+            "fitness": self.fitness,
+            "steps": self.steps,
+            "best_score": self.best_score,
+            "reason": self.reason,
+            "loss": self.loss,
+        }
+
 
 @dataclass
 class AgentSlot:
@@ -395,6 +412,9 @@ class SnakeWebBackend:
         self.step_review_history: Deque[dict[str, Any]] = deque(maxlen=1)
         self.current_episode_transitions: Deque[tuple[np.ndarray, int, float, np.ndarray, bool, float]] = deque(maxlen=EPISODE_TRANSITION_LIMIT)
         self.training_display_index = 0
+        self.current_replay_steps: list[dict[str, Any]] = []
+        self.replays_dir = RUNTIME_DIR / "replays"
+        self.record_replays = True
 
         self._sync_network_source()
         self._load_active_context()
@@ -803,6 +823,18 @@ class SnakeWebBackend:
 
         evolve_ms = 0.0
         if self.training_runner.all_done():
+            # Save replay for best completed evolution individual in this generation
+            best_completed = self.training_runner.best_completed
+            if isinstance(best_completed, dict) and "index" in best_completed:
+                idx = best_completed["index"]
+                best_env = best_completed["env"]
+                if 0 <= idx < len(self.training_runner.replay_histories):
+                    self._save_replay(
+                        self.training_runner.replay_histories[idx],
+                        best_env.score,
+                        best_completed.get("reason", "unknown"),
+                        prefix=f"evolution_gen_{self.agent.generation}"
+                    )
             evolve_started_at = time.perf_counter()
             self.agent.evolve_generation()
             self.training_runner.reset_generation(board_size=self.game.board_size)
@@ -866,14 +898,12 @@ class SnakeWebBackend:
         self._ensure_runtime_consistency()
         state = self._current_observation()
         predicted_action, q_values, was_random, greedy_action = self._select_current_action(state, training_mode)
-        if (
-            training_mode
-            and self.agent_kind == "dqn"
-            and was_random
-            and self.game._danger_for_relative_action(predicted_action) >= 0.5
-        ):
-            predicted_action = greedy_action
-            was_random = False
+        if training_mode and self.agent_kind == "dqn" and was_random:
+            leads_to_collision = self.game._danger_for_relative_action(predicted_action) >= 0.5
+            leads_to_tail_loss = self.game._is_tail_blocked_after_relative_action(predicted_action) > 0.5
+            if leads_to_collision or leads_to_tail_loss:
+                predicted_action = greedy_action
+                was_random = False
         if self.mode == "manual" and not self.training:
             absolute_direction = self.pending_manual_direction
             visible_action = predicted_action
@@ -896,8 +926,19 @@ class SnakeWebBackend:
 
         # Check if the chosen move results in tail loss
         next_tail_blocked = self.game._is_tail_blocked_after_relative_action(visible_action) > 0.5
-        
         is_transition_to_tail_loss = (not current_tail_blocked) and next_tail_blocked
+
+        # Check if the chosen move results in tail close penalty
+        is_tail_close = self.game._is_tail_close_after_relative_action(visible_action) > 0.5
+        tail_path = self.game._shortest_path_to_tail()
+        tail_dist = len(tail_path) if tail_path else -1
+
+        # Check if the space is partitioned in the CURRENT state before taking a step
+        current_partition = self.game._is_currently_partitioned()
+
+        # Check if the chosen move results in partition
+        next_partition = state[23 + visible_action] > 0.5
+        is_transition_to_partition = (not current_partition) and next_partition
 
         _, reward, done, info = self.game.step(absolute_direction)
         reason = str(info["reason"])
@@ -905,6 +946,13 @@ class SnakeWebBackend:
 
         if is_transition_to_tail_loss:
             reward -= TAIL_LOSS_PENALTY
+
+        if is_tail_close and tail_dist != -1:
+            reward -= (3 - tail_dist) * TAIL_CLOSE_PENALTY
+
+        if is_transition_to_partition:
+            penalty_val = PARTITION_PENALTY_LARGE if len(self.game.snake) >= 20 else PARTITION_PENALTY_SMALL
+            reward -= penalty_val
 
         self.last_state = next_state
         self.last_q_values = q_values
@@ -917,6 +965,10 @@ class SnakeWebBackend:
         self.last_penalty_reasons = [str(item) for item in info.get("penalty_reasons", [])]
         if is_transition_to_tail_loss:
             self.last_penalty_reasons.append("tail_loss")
+        if is_transition_to_partition:
+            self.last_penalty_reasons.append("partition")
+        if is_tail_close and tail_dist != -1:
+            self.last_penalty_reasons.append("tail_close")
             
         train_reward = reward
         step_number = int(info.get("steps", self.game.step_count))
@@ -943,6 +995,20 @@ class SnakeWebBackend:
         pre_step_snapshot["steps_without_food"] = int(self.game.steps_without_food)
         pre_step_snapshot["max_steps_without_food"] = int(self.game.max_steps_without_food)
         self.recent_step_snapshots.append(pre_step_snapshot)
+
+        # Record replay step
+        self.current_replay_steps.append({
+            "step": int(self.game.step_count),
+            "snake": [[int(coord[0]), int(coord[1])] for coord in self.game.snake],
+            "food": [int(self.game.food[0]), int(self.game.food[1])],
+            "direction": int(self.game.direction),
+            "action": int(visible_action),
+            "reward": float(reward),
+            "reason": str(reason),
+            "penalties": list(self.last_penalty_reasons)
+        })
+        if len(self.current_replay_steps) > 500:
+            self.current_replay_steps.pop(0)
 
         if training_mode and self.agent_kind == "dqn":
             self.agent.remember(state, visible_action, reward, next_state, done)
@@ -1004,6 +1070,10 @@ class SnakeWebBackend:
             board_size=self.game.board_size,
             max_steps_without_food=self.game.max_steps_without_food,
         ) if training_mode else float(getattr(self.agent, "last_fitness", 0.0))
+
+        # Save replay for individual game
+        self._save_replay(self.current_replay_steps, self.game.score, reason, prefix="live")
+        self.current_replay_steps = []
         
         if training_mode:
             self.fitness_ema = fitness if self.fitness_ema == 0 else self.fitness_ema * 0.85 + fitness * 0.15
@@ -1070,8 +1140,127 @@ class SnakeWebBackend:
         self.recent_step_snapshots.clear()
         self.step_review_entries.clear()
         self.current_episode_transitions.clear()
+        self.current_replay_steps.clear()
         self.last_state = self._current_observation()
         _, self.last_q_values, _, self.last_greedy_action = self._select_current_action(self.last_state, False)
+
+    def _save_replay(self, steps: list[dict[str, Any]], score: int, reason: str, prefix: str) -> None:
+        if not self.record_replays:
+            return
+        if not steps:
+            return
+        
+        # Copy steps list to make it thread-safe for background worker
+        steps_copy = list(steps)
+        board_size = self.game.board_size
+        episode_counter = self.episode_counter
+        agent_kind = self.agent_kind
+        
+        threading.Thread(
+            target=self._save_replay_worker,
+            args=(steps_copy, score, reason, prefix, board_size, episode_counter, agent_kind),
+            daemon=True
+        ).start()
+
+    def _save_replay_worker(self, steps: list[dict[str, Any]], score: int, reason: str, prefix: str, board_size: int, episode_counter: int, agent_kind: str) -> None:
+        started_at = time.perf_counter()
+        # Prepare replay JSON
+        replay_data = {
+            "agent_kind": agent_kind,
+            "board_size": board_size,
+            "final_score": score,
+            "final_reason": reason,
+            "steps": steps
+        }
+        
+        replays_dir = RUNTIME_DIR / "replays"
+        replays_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Восстанавливаем README.md если он отсутствует
+        readme_path = replays_dir / "README.md"
+        if not readme_path.exists():
+            try:
+                readme_content = (
+                    "# Папка реплеев / Replays Folder\n\n"
+                    "Здесь сохраняются JSON-записи сыгранных игр для последующего анализа.\n\n"
+                    "## Как запустить анализатор:\n\n"
+                    "Все инструменты лежат в папке `analyzer/` в корне проекта.\n\n"
+                    "1. **Запуск комплексного анализа всех реплеев:**\n"
+                    "   ```bash\n"
+                    "   python analyzer/run_analysis.py\n"
+                    "   ```\n\n"
+                    "2. **Визуализация шагов конкретного реплея:**\n"
+                    "   ```bash\n"
+                    "   python analyzer/visualize_steps.py .runtime/replays/last_replay.json.gz\n"
+                    "   ```\n"
+                )
+                readme_path.write_text(readme_content, encoding="utf-8")
+            except OSError:
+                pass
+        
+        # Save last_replay.json.gz
+        last_path = replays_dir / "last_replay.json.gz"
+        try:
+            with gzip.open(last_path, "wt", encoding="utf-8") as f:
+                json.dump(replay_data, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"Error saving last_replay.json.gz: {e}")
+            
+        # Save archived game (all games are saved, to allow recent failures analysis)
+        timestamp = int(time.time())
+        filename = f"replay_score_{score}_ep_{episode_counter}_{prefix}_{timestamp}.json.gz"
+        archive_path = replays_dir / filename
+        try:
+            with gzip.open(archive_path, "wt", encoding="utf-8") as f:
+                json.dump(replay_data, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"Error saving archived replay: {e}")
+        self._prune_replays()
+            
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        if elapsed_ms >= SLOW_API_MS:
+            log_perf("slow_save_replay", elapsed_ms, steps=len(steps), score=score, reason=reason)
+
+    def _prune_replays(self) -> None:
+        replays_dir = RUNTIME_DIR / "replays"
+        if not replays_dir.is_dir():
+            return
+        
+        # Get all files except last_replay.json.gz
+        files = []
+        for p in replays_dir.glob("replay_score_*.json.gz"):
+            try:
+                mtime = p.stat().st_mtime
+                files.append((mtime, p))
+            except OSError:
+                continue  # File was deleted by another thread, skip it
+                
+        # Sort by mtime descending (most recent first)
+        files.sort(key=lambda x: x[0], reverse=True)
+        
+        # Keep only top 10 files
+        keep_count = 10
+        if len(files) > keep_count:
+            for _, path in files[keep_count:]:
+                try:
+                    # check if file still exists before unlinking
+                    if path.is_file():
+                        path.unlink()
+                except OSError as e:
+                    # Ignore file not found errors, as another thread might have deleted it
+                    import errno
+                    if getattr(e, 'errno', None) != errno.ENOENT:
+                        print(f"Error deleting old replay {path.name}: {e}")
+
+    def _clear_replays_directory(self) -> None:
+        replays_dir = RUNTIME_DIR / "replays"
+        if replays_dir.is_dir():
+            for p in replays_dir.glob("*.json*"):
+                try:
+                    if p.is_file():
+                        p.unlink()
+                except OSError:
+                    pass
 
     def _build_recent_step_snapshot(
         self,
@@ -1168,6 +1357,7 @@ class SnakeWebBackend:
             "board_size": int(self.game.board_size),
             "smart_model": self.smart_agent.model_path.name if self.smart_agent.model_path else "",
             "speed": self.speed,
+            "record_replays": self.record_replays,
         }
 
     def _save_active_context(self) -> None:
@@ -1231,11 +1421,51 @@ class SnakeWebBackend:
         except (TypeError, ValueError):
             pass
 
+        self.record_replays = bool(payload.get("record_replays", True))
+
         self.agent = self._create_native_agent(self.agent_kind)
         self._reset_training_runner(self.game.board_size)
         self._sync_network_source()
         return True
 
+    def _agent_state_payload(self) -> dict[str, Any]:
+        if self.agent_kind == "dqn":
+            return {
+                "epsilon": float(getattr(self.agent, "epsilon", 1.0)),
+                "total_updates": int(getattr(self.agent, "total_updates", 0)),
+                "last_loss": float(getattr(self.agent, "last_loss", 0.0)),
+                "best_score": int(getattr(self.agent, "best_score", 0)),
+                "best_fitness": float(getattr(self.agent, "best_fitness", float("-inf"))),
+                "last_fitness": float(getattr(self.agent, "last_fitness", 0.0)),
+            }
+        else:
+            return {
+                "generation": int(getattr(self.agent, "generation", 1)),
+                "current_index": int(getattr(self.agent, "current_index", 0)),
+                "best_fitness": float(getattr(self.agent, "best_fitness", float("-inf"))),
+                "best_score": int(getattr(self.agent, "best_score", 0)),
+                "last_fitness": float(getattr(self.agent, "last_fitness", 0.0)),
+                "last_generation_average": float(getattr(self.agent, "last_generation_average", 0.0)),
+                "completed_evaluations": int(getattr(self.agent, "completed_evaluations", 0)),
+            }
+
+    def _runtime_payload(self) -> dict[str, Any]:
+        return {
+            "game": self.game.export_state(),
+            "running": bool(self.running),
+            "mode": str(self.mode),
+            "speed": int(self.speed),
+            "pending_manual_direction": int(self.pending_manual_direction),
+            "live_reward": float(self.live_reward),
+            "episode_reward": float(self.episode_reward),
+            "last_action": int(self.last_action),
+            "last_action_random": bool(self.last_action_random),
+            "last_greedy_action": int(self.last_greedy_action),
+            "last_reason": str(self.last_reason),
+            "last_outcome_reason": str(self.last_outcome_reason),
+            "last_penalty_reasons": list(self.last_penalty_reasons),
+            "record_replays": bool(self.record_replays),
+        }
 
     def _load_agent_state_payload(self, payload: dict[str, Any] | None) -> None:
         payload = payload if isinstance(payload, dict) else {}
@@ -1307,7 +1537,9 @@ class SnakeWebBackend:
                 "c": {"a": self.decision_stats["choices"]["all"], "r": list(self.decision_stats["choices"]["recent"])},
                 "s": {"a": self.decision_stats["steps"]["all"], "r": list(self.decision_stats["steps"]["recent"])},
                 "d": {"a": self.decision_stats["deaths"]["all"], "r": list(self.decision_stats["deaths"]["recent"])},
-            }
+            },
+            "ag": self._agent_state_payload(),
+            "rt": self._runtime_payload(),
         }
 
     def _unpack_aux_stats(self, payload: dict[str, Any], *, include_runtime: bool = False) -> None:
@@ -1977,6 +2209,15 @@ class SnakeWebBackend:
             self.lock.acquire()
             acquired = True
         try:
+            # Under lock, check if we already have this snapshot cached for the current frame
+            cached = self._snapshot_cache.get((include_network, include_details))
+            if cached is not None:
+                cache_used = True
+                elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+                if elapsed_ms >= SLOW_API_MS:
+                    log_perf("slow_state_snapshot", elapsed_ms, cache=cache_used, network=include_network, details=include_details, running=self.running, training=self.training)
+                return dict(cached)
+                
             self._ensure_runtime_consistency()
             self._sync_network_source()
             payload = {
@@ -2012,6 +2253,7 @@ class SnakeWebBackend:
                 "last_outcome_reason": self.last_outcome_reason,
                 "last_penalty_reasons": list(self.last_penalty_reasons),
                 "persistence_enabled": self.persistence_enabled,
+                "record_replays": self.record_replays,
                 "game": {
                     "size": self.game.board_size,
                     "score": self.game.score,
@@ -2054,7 +2296,7 @@ class SnakeWebBackend:
                     },
                     "last_death_snapshot": self.last_death_snapshot,
                     "decision_stats": export_decision_stats(self.decision_stats),
-                    "history": [asdict(item) for item in self.history],
+                    "history": [item.to_dict() for item in self.history],
                 })
             self._snapshot_cache[(include_network, include_details)] = payload
             elapsed_ms = (time.perf_counter() - started_at) * 1000.0
@@ -2175,9 +2417,22 @@ class SnakeWebBackend:
                 ok, message = self._set_device_mode(value)
                 if not ok:
                     return {"ok": False, "error": message}
+            elif command == "set_record_replays":
+                if not isinstance(value, bool):
+                    return {"ok": False, "error": "Value must be a boolean"}
+                self.record_replays = value
+                self._save_active_context()
+                return {"ok": True}
             elif command == "reset_agent":
+                self._clear_replays_directory()
                 if self.mode == "smart":
-                    self._clear_aux_stats_json()
+                    store = load_aux_stats_store()
+                    models = store.get("models", {})
+                    if isinstance(models, dict):
+                        models.pop(self._active_aux_stats_key(), None)
+                        if self.smart_agent.model_path:
+                            models.pop(self.smart_agent.model_path.stem, None)
+                    save_aux_stats_store(store)
                     self._clear_runtime_review_state()
                     self.fitness_ema = 0.0
                     self.best_score = 0
@@ -2221,7 +2476,7 @@ class SnakeWebBackend:
             if command in {
                 "set_agent_kind", "set_mode", "set_smart_model", "set_board_size",
                 "cycle_board_size", "set_speed", "reset_agent",
-                "restart_server", "shutdown_server",
+                "restart_server", "shutdown_server", "set_record_replays",
             }:
                 self._save_active_context()
             self._update_frame_cache()
