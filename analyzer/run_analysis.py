@@ -44,6 +44,28 @@ def get_empty_connected_components(board_size, snake):
                                 queue.append((nx, ny))
     return components
 
+def is_food_reachable_bfs(board_size, snake, food):
+    if not snake:
+        return False
+    head = tuple(snake[0])
+    target = tuple(food)
+    if head == target:
+        return True
+    snake_set = set(tuple(p) for p in snake[1:])
+    visited = {head}
+    queue = deque([head])
+    while queue:
+        cx, cy = queue.popleft()
+        if (cx, cy) == target:
+            return True
+        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nx, ny = cx + dx, cy + dy
+            if 0 <= nx < board_size and 0 <= ny < board_size:
+                if (nx, ny) not in snake_set and (nx, ny) not in visited:
+                    visited.add((nx, ny))
+                    queue.append((nx, ny))
+    return False
+
 def analyze_replay_file(file_path):
     if file_path.suffix == ".gz":
         with gzip.open(file_path, "rt", encoding="utf-8") as f:
@@ -71,7 +93,9 @@ def analyze_replay_file(file_path):
         "partition_ratio": 0.0,
         "max_components": 1,
         "partition_start_score": None,
-        "trapped_events": 0
+        "trapped_events": 0,
+        "food_reachable_ratio": 1.0,
+        "classification": "Неизвестно"
     }
     
     if not steps:
@@ -83,6 +107,7 @@ def analyze_replay_file(file_path):
     dist_count = 0
     state_history = []
     partition_steps = 0
+    food_reachable_steps = 0
     
     for i, step_data in enumerate(steps):
         snake = step_data.get("snake", [])
@@ -122,6 +147,10 @@ def analyze_replay_file(file_path):
         compactness = (adj_segments / 2.0 - (len(snake) - 1)) / max(1, len(snake))
         coiling_compactness.append(compactness)
         
+        # Reachable food check
+        if is_food_reachable_bfs(board_size, snake, food):
+            food_reachable_steps += 1
+            
         # Reachable ratio in final 50 steps
         if len(steps) - i <= 50:
             reachable = bfs_reachable_space(board_size, snake, head)
@@ -139,6 +168,24 @@ def analyze_replay_file(file_path):
         analysis["avg_final_reachable_ratio"] = sum(final_steps_reachable_ratio) / len(final_steps_reachable_ratio)
         
     analysis["partition_ratio"] = partition_steps / len(steps)
+    analysis["food_reachable_ratio"] = food_reachable_steps / len(steps)
+    
+    # Classification logic
+    if reason == "victory":
+        analysis["classification"] = "Победа"
+    elif reason == "wall_collision":
+        analysis["classification"] = "Смерть: Стена"
+    elif reason == "body_collision":
+        analysis["classification"] = "Смерть: Тело (Хвост)"
+    elif reason == "starvation":
+        # If food was reachable in at least 40% of the steps, it starved by avoiding food (Reward Trap)
+        if analysis["food_reachable_ratio"] > 0.4:
+            analysis["classification"] = "Ловушка наград"
+        else:
+            analysis["classification"] = "Заперта в кармане"
+    else:
+        analysis["classification"] = reason
+        
     return analysis
 
 def main():
@@ -159,8 +206,10 @@ def main():
         print("=" * 60)
         print(f"АНАЛИЗ ФАЙЛА: {res['filename']}")
         print(f"Агент: {res['agent']} | Счет: {res['score']} | Результат: {res['reason']}")
+        print(f"Классификация: {res['classification']}")
         print(f"Всего шагов: {res['total_steps']}")
         print("-" * 60)
+        print(f"Доля шагов с доступной едой: {res['food_reachable_ratio']*100:.1f}%")
         print(f"Средняя компактность скручивания: {res['avg_compactness']:.3f}")
         print(f"Среднее расстояние до еды: {res['avg_distance_to_food']:.2f}")
         print(f"Количество циклов (зацикливаний): {res['loops_detected']}")
@@ -183,43 +232,34 @@ def main():
         print("Папка с реплеями пуста.")
         sys.exit(0)
         
-    print(f"Найдено {len(files)} файлов для сравнения в {replays_dir.name}:\n")
+    analyses = [analyze_replay_file(f) for f in files]
     
-    winning_runs = []
-    starved_runs = []
-    
-    for f in files:
-        res = analyze_replay_file(f)
-        if res["reason"] == "victory":
-            winning_runs.append(res)
-        elif res["reason"] == "starvation":
-            starved_runs.append(res)
-            
-    print(f"Побед: {len(winning_runs)} | Голод: {len(starved_runs)}")
-    print("=" * 70)
-    print(f"{'Показатель':<40} | {'Победа':<10} | {'Голод':<10} | {'Разница':<10}")
-    print("-" * 70)
-    
-    def print_row(label, key, format_str="{:.3f}"):
-        win_vals = [r[key] for r in winning_runs if r[key] is not None]
-        starve_vals = [r[key] for r in starved_runs if r[key] is not None]
-        
-        win_avg = sum(win_vals) / len(win_vals) if win_vals else 0.0
-        starve_avg = sum(starve_vals) / len(starve_vals) if starve_vals else 0.0
-        diff = win_avg - starve_avg
-        
-        diff_str = f"+{format_str.format(diff)}" if diff > 0 else format_str.format(diff)
-        print(f"{label:<40} | {format_str.format(win_avg):<10} | {format_str.format(starve_avg):<10} | {diff_str:<10}")
-        
-    print_row("Средний счет (яблоки)", "score", "{:.2f}")
-    print_row("Среднее число шагов", "total_steps", "{:.1f}")
-    print_row("Компактность скручивания (coiling)", "avg_compactness", "{:.3f}")
-    print_row("Расстояние до еды (Manhattan)", "avg_distance_to_food", "{:.2f}")
-    print_row("Обнаружено зацикливаний", "loops_detected", "{:.1f}")
-    print_row("Доля шагов с разрывом поля", "partition_ratio", "{:.3f}")
-    print_row("Макс. число изолированных карманов", "max_components", "{:.1f}")
-    print_row("Доступное поле в конце (ratio)", "avg_final_reachable_ratio", "{:.3f}")
-    print("=" * 70)
+    # Print detailed table
+    print(f"Найдено {len(analyses)} файлов реплеев в {replays_dir.name}:\n")
+    print("=" * 115)
+    print(f"{'Имя файла':<45} | {'Результат':<15} | {'Счет':<6} | {'Шагов':<6} | {'Циклы':<5} | {'Доступ еды':<10} | {'Классификация':<20}")
+    print("-" * 115)
+    for res in sorted(analyses, key=lambda x: x["score"], reverse=True):
+        print(f"{res['filename'][:43]:<45} | {res['reason']:<15} | {res['score']:<6} | {res['total_steps']:<6} | {res['loops_detected']:<5} | {res['food_reachable_ratio']*100:>8.1f}% | {res['classification']:<20}")
+    print("=" * 115)
+    print()
+
+    # Summary comparing Victory vs Starvation vs Collisions
+    grouped = {}
+    for res in analyses:
+        cls = res["classification"]
+        grouped.setdefault(cls, []).append(res)
+
+    print("СВОДНАЯ СТАТИСТИКА ПО КЛАССАМ ИСХОДОВ:")
+    print("=" * 80)
+    print(f"{'Классификация':<25} | {'Кол-во':<6} | {'Ср. счет':<10} | {'Ср. шаги':<10} | {'Ср. компактность':<18}")
+    print("-" * 80)
+    for cls, runs in sorted(grouped.items(), key=lambda x: len(x[1]), reverse=True):
+        avg_score = sum(r["score"] for r in runs) / len(runs)
+        avg_steps = sum(r["total_steps"] for r in runs) / len(runs)
+        avg_comp = sum(r["avg_compactness"] for r in runs) / len(runs)
+        print(f"{cls:<25} | {len(runs):<6} | {avg_score:<10.2f} | {avg_steps:<10.1f} | {avg_comp:<18.3f}")
+    print("=" * 80)
 
 if __name__ == "__main__":
     main()

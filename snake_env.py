@@ -460,6 +460,8 @@ class SnakeEnv:
         absolute_direction = relative_to_absolute(self.direction, relative_action)
         next_head = self._next_head_for_direction(absolute_direction)
         will_eat = next_head == self.food
+        if will_eat:
+            return 0.0
         hits_wall = not (0 <= next_head[0] < self.board_size and 0 <= next_head[1] < self.board_size)
         if hits_wall or self._would_hit_self(next_head, will_eat):
             return 1.0
@@ -492,6 +494,52 @@ class SnakeEnv:
                                     visited.add(n_cell)
                                     queue.append(n_cell)
         return 0.0
+
+    def _get_space_size_for_relative_action(self, relative_action: int) -> int:
+        """Возвращает количество свободных клеток, доступных после относительного хода.
+        Если ход ведет к мгновенной смерти (стена или тело), возвращает -1."""
+        absolute_direction = relative_to_absolute(self.direction, relative_action)
+        next_head = self._next_head_for_direction(absolute_direction)
+        hits_wall = not (0 <= next_head[0] < self.board_size and 0 <= next_head[1] < self.board_size)
+        will_eat = next_head == self.food
+        if hits_wall or self._would_hit_self(next_head, will_eat):
+            return -1
+        
+        if will_eat:
+            simulated_snake = [next_head] + self.snake
+        else:
+            simulated_snake = [next_head] + self.snake[:-1]
+            
+        blocked = set(simulated_snake[1:])
+        return self._reachable_space_size(next_head, blocked)
+
+    def _empty_space_center_mass(self) -> tuple[float, float]:
+        """Возвращает относительный вектор до центра масс всех пустых клеток на поле."""
+        empty_cells = []
+        blocked = set(self.snake)
+        for y in range(self.board_size):
+            for x in range(self.board_size):
+                if (x, y) not in blocked:
+                    empty_cells.append((x, y))
+                    
+        if not empty_cells:
+            return 0.0, 0.0
+            
+        cx = sum(c[0] for c in empty_cells) / len(empty_cells)
+        cy = sum(c[1] for c in empty_cells) / len(empty_cells)
+        head_x, head_y = self.snake[0]
+        dx, dy = cx - head_x, cy - head_y
+        
+        if self.direction == 0:
+            fwd, rgt = -dy, dx
+        elif self.direction == 1:
+            fwd, rgt = dx, dy
+        elif self.direction == 2:
+            fwd, rgt = dy, -dx
+        else:
+            fwd, rgt = -dx, -dy
+            
+        return fwd, rgt
 
     def _shortest_path_to_tail(self) -> list[tuple[int, int]] | None:
         if self.step_count == self._shortest_path_cache_step:

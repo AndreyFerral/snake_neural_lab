@@ -125,6 +125,33 @@ def list_available_devices() -> list[dict[str, str]]:
     return [{"id": "cpu", "label": "CPU"}]
 
 
+# Словари сжатия для экономии места в snake_model_stats.json
+CHOICE_TO_SYMBOL = {
+    "Вперед": "^",
+    "Влево": "<",
+    "Вправо": ">"
+}
+SYMBOL_TO_CHOICE = {v: k for k, v in CHOICE_TO_SYMBOL.items()}
+
+STEP_TO_SYMBOL = {
+    "step": "s",
+    "apple": "a",
+    "looping": "l",
+    "wall_collision": "w",
+    "body_collision": "b",
+    "victory": "v"
+}
+SYMBOL_TO_STEP = {v: k for k, v in STEP_TO_SYMBOL.items()}
+
+DEATH_TO_SYMBOL = {
+    "victory": "v",
+    "wall_collision": "w",
+    "body_collision": "b",
+    "starvation": "s"
+}
+SYMBOL_TO_DEATH = {v: k for k, v in DEATH_TO_SYMBOL.items()}
+
+
 def make_decision_stat_bucket(initial_keys: tuple[str, ...]) -> dict[str, Any]:
     return {
         "all": {key: 0 for key in initial_keys},
@@ -689,7 +716,7 @@ class SnakeWebBackend:
 
     def _training_burst(self) -> int:
         speed = max(1, int(self.speed))
-        return max(1, min(4, speed))
+        return max(1, min(16, speed))
 
     def _simulation_loop(self) -> None:
         last_tick = time.perf_counter()
@@ -1013,10 +1040,12 @@ class SnakeWebBackend:
 
         if training_mode and self.agent_kind == "dqn":
             self.agent.remember(state, visible_action, reward, next_state, done)
-            loss = self.agent.optimize()
-            if loss is not None:
-                loss_fitness = -float(loss)
-                self.fitness_ema = loss_fitness if self.fitness_ema == 0 else self.fitness_ema * 0.92 + loss_fitness * 0.08
+            # Optimize once every 8 steps (or when done) to reduce CPU bottleneck and accelerate training
+            if step_number % 8 == 0 or done:
+                loss = self.agent.optimize()
+                if loss is not None:
+                    loss_fitness = -float(loss)
+                    self.fitness_ema = loss_fitness if self.fitness_ema == 0 else self.fitness_ema * 0.92 + loss_fitness * 0.08
 
         if done:
             self._finish_episode(str(info["reason"]), training_mode=training_mode)
@@ -1199,23 +1228,24 @@ class SnakeWebBackend:
             except OSError:
                 pass
         
-        # Save last_replay.json.gz
-        last_path = replays_dir / "last_replay.json.gz"
+        # Compress once in memory with level 1 (fastest) to avoid GIL latency spikes
         try:
-            with gzip.open(last_path, "wt", encoding="utf-8") as f:
-                json.dump(replay_data, f, ensure_ascii=False)
+            json_str = json.dumps(replay_data, ensure_ascii=False)
+            compressed_bytes = gzip.compress(json_str.encode("utf-8"), compresslevel=1)
         except Exception as e:
-            print(f"Error saving last_replay.json.gz: {e}")
-            
-        # Save archived game (all games are saved, to allow recent failures analysis)
-        timestamp = int(time.time())
-        filename = f"replay_score_{score}_ep_{episode_counter}_{prefix}_{timestamp}.json.gz"
-        archive_path = replays_dir / filename
-        try:
-            with gzip.open(archive_path, "wt", encoding="utf-8") as f:
-                json.dump(replay_data, f, ensure_ascii=False)
-        except Exception as e:
-            print(f"Error saving archived replay: {e}")
+            print(f"Error serializing/compressing replay data: {e}")
+            compressed_bytes = None
+
+        if compressed_bytes is not None:
+            # Save archived game (all games are saved, to allow recent failures analysis)
+            timestamp = int(time.time())
+            filename = f"replay_score_{score}_ep_{episode_counter}_{prefix}_{timestamp}.json.gz"
+            archive_path = replays_dir / filename
+            try:
+                archive_path.write_bytes(compressed_bytes)
+            except Exception as e:
+                print(f"Error saving archived replay: {e}")
+
         self._prune_replays()
             
         elapsed_ms = (time.perf_counter() - started_at) * 1000.0
@@ -1515,6 +1545,10 @@ class SnakeWebBackend:
     # ОПТИМИЗИРОВАННАЯ СЕРИАЛИЗАЦИЯ СТАТИСТИКИ (КОМПАКТНЫЙ JSON)
     # =========================================================================
     def _pack_aux_stats(self) -> dict[str, Any]:
+        packed_choices = [CHOICE_TO_SYMBOL.get(x, x) for x in self.decision_stats["choices"]["recent"]]
+        packed_steps = [STEP_TO_SYMBOL.get(x, x) for x in self.decision_stats["steps"]["recent"]]
+        packed_deaths = [DEATH_TO_SYMBOL.get(x, x) for x in self.decision_stats["deaths"]["recent"]]
+        
         return {
             "ep": self.episode_counter,
             "bs": self.best_score,
@@ -1525,7 +1559,7 @@ class SnakeWebBackend:
                     i.episode,
                     i.score,
                     i.steps,
-                    i.reason,
+                    DEATH_TO_SYMBOL.get(i.reason, i.reason),
                     round(i.fitness, 3),
                     round(i.reward, 3),
                     round(i.mutation, 4),
@@ -1535,9 +1569,9 @@ class SnakeWebBackend:
                 for i in self.history
             ],
             "ds": {
-                "c": {"a": self.decision_stats["choices"]["all"], "r": list(self.decision_stats["choices"]["recent"])},
-                "s": {"a": self.decision_stats["steps"]["all"], "r": list(self.decision_stats["steps"]["recent"])},
-                "d": {"a": self.decision_stats["deaths"]["all"], "r": list(self.decision_stats["deaths"]["recent"])},
+                "c": {"a": self.decision_stats["choices"]["all"], "r": packed_choices},
+                "s": {"a": self.decision_stats["steps"]["all"], "r": packed_steps},
+                "d": {"a": self.decision_stats["deaths"]["all"], "r": packed_deaths},
             },
             "ag": self._agent_state_payload(),
             "rt": self._runtime_payload(),
@@ -1581,7 +1615,7 @@ class SnakeWebBackend:
                     episode = int(item[0])
                     score = int(item[1])
                     steps = int(item[2])
-                    reason = str(item[3])
+                    reason = SYMBOL_TO_DEATH.get(str(item[3]), str(item[3]))
                     fitness = float(item[4])
                     reward = float(item[5])
                     mutation = float(item[6])
@@ -1609,7 +1643,11 @@ class SnakeWebBackend:
         ds = payload.get("ds", {})
         self._reset_decision_stats()
         if isinstance(ds, dict):
-            for section, code in {"choices": "c", "steps": "s", "deaths": "d"}.items():
+            for section, code, symbol_map in [
+                ("choices", "c", SYMBOL_TO_CHOICE),
+                ("steps", "s", SYMBOL_TO_STEP),
+                ("deaths", "d", SYMBOL_TO_DEATH)
+            ]:
                 section_payload = ds.get(code, {})
                 if not isinstance(section_payload, dict):
                     continue
@@ -1621,7 +1659,7 @@ class SnakeWebBackend:
                 recent_payload = section_payload.get("r", [])
                 if isinstance(recent_payload, list):
                     bucket["recent"] = deque(
-                        (str(i) for i in recent_payload[-DECISION_STATS_WINDOW:]),
+                        (symbol_map.get(str(i), str(i)) for i in recent_payload[-DECISION_STATS_WINDOW:]),
                         maxlen=DECISION_STATS_WINDOW
                     )
 
@@ -2407,7 +2445,7 @@ class SnakeWebBackend:
                 self._cycle_board_size()
             elif command == "set_speed":
                 if isinstance(value, int):
-                    self.speed = max(1, min(16, value))
+                    self.speed = max(1, min(64, value))
                     self._save_active_context()
             elif command == "manual_action":
                 if isinstance(value, int) and 0 <= value < 4:

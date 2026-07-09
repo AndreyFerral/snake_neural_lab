@@ -1474,9 +1474,11 @@ class SnakeLabApp {
             const x = inputX + groupPadding + colIndex * (pillWidth + pillGap); const y = currentY + 21 + rowIndex * pillRowGap;
             const value = globalSignalValues[signalIndex] ?? 0; this.roundedRect(ctx, x, y, pillWidth, pillHeight, 7);
             ctx.fillStyle = value > 0.66 ? "rgba(255, 179, 71, 0.24)" : value > 0.05 ? "rgba(92, 214, 173, 0.18)" : "rgba(255,255,255,0.06)"; ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,0.055)"; ctx.stroke();
-            ctx.fillStyle = "#edf6f9"; ctx.font = "700 11px Aptos, Trebuchet MS, sans-serif";
             const displayValue = Math.abs(value - Math.round(value)) < 0.005 ? String(Math.round(value)) : value.toFixed(2);
-            ctx.fillText(`${formatSignalLabel(label)} ${displayValue}`, x + 5, y + 13); signalMap.set(signalIndex, { x: x + pillWidth, y: y + pillHeight / 2 });
+            ctx.fillStyle = "#edf6f9";
+            ctx.font = "700 11px Aptos, Trebuchet MS, sans-serif";
+            ctx.fillText(`${formatSignalLabel(label)} ${displayValue}`, x + 5, y + 13);
+            signalMap.set(signalIndex, { x: x + pillWidth, y: y + pillHeight / 2 });
           });
         });
         currentY += groupHeight + groupGap;

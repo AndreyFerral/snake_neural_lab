@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+# ==============================================================================
+# 💡 ИНСТРУКЦИЯ ПО ДОБАВЛЕНИЮ НОВЫХ ДАТЧИКОВ (FEATURES) В НЕЙРОСЕТЬ:
+# Если вы добавляете новый датчик, вам необходимо обновить 3 места в коде:
+# 1. `backend_config.py`: Добавить имя датчика в список `GLOBAL_SIGNAL_LABELS`
+#    и его короткую иконку/название в словарь `SIGNAL_LABELS`.
+# 2. `snake_env.py`: Рассчитать датчик в методе `get_extra_signals()`
+#    и добавить его в список `signals` на ту же позицию.
+# 3. `snake_lab_app.js`: Зарегистрировать датчик в массиве `signalGroups`
+#    в нужной вам группе для отрисовки на визуальном графе сети.
+# ==============================================================================
+
 STARTUP_BOARD_SIZE = 10
 BOARD_SIZES = (10, 15, 20, 25, 30, 35)
 AGENT_KINDS = ("evolution", "dqn")
@@ -55,18 +66,20 @@ PARTITION_PENALTY_LARGE = 1.5
 PARTITION_PENALTY_SMALL = 0.15
 EPISODE_TRANSITION_LIMIT = 2_000
 
-CPU_BATCH_SIZE = 128
-HIDDEN_LAYER_1 = 32
-HIDDEN_LAYER_2 = 16
+CPU_BATCH_SIZE = 64
+HIDDEN_LAYER_1 = 64
+HIDDEN_LAYER_2 = 32
 
 
 STEP_REASON_ORDER = (
     "step",
+    "turn",
     "apple",
-    "looping",
-    "wall_collision",
-    "body_collision",
     "victory",
+    "looping",
+    "partition",
+    "blocked",
+    "safe",
 )
 DEATH_REASON_ORDER = (
     "victory",

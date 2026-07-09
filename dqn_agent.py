@@ -160,11 +160,11 @@ class DQNAgent:
         gamma: float = 0.96,
         learning_rate: float = 0.0008,
         batch_size: int = CPU_BATCH_SIZE,
-        buffer_size: int = 20_000,
+        buffer_size: int = 100_000,
         epsilon_start: float = 1.0,
         epsilon_min: float = 0.08,
         epsilon_decay: float = 0.9997,
-        target_sync_interval: int = 160,
+        target_sync_interval: int = 800,
     ) -> None:
         self.device = device
         self.global_signal_count = len(GLOBAL_SIGNAL_LABELS)
@@ -237,6 +237,7 @@ class DQNAgent:
 
     def remember(self, state: np.ndarray, action: int, reward: float, next_state: np.ndarray, done: bool, *, priority_scale: float = 1.0) -> None:
         self.replay_buffer.push(state, action, reward, next_state, done, priority_scale=priority_scale)
+        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
 
 
 
@@ -274,7 +275,6 @@ class DQNAgent:
         self.total_updates += 1
         if self.total_updates % self.target_sync_interval == 0:
             self.target_net.load_state_dict(self.online_net.state_dict())
-        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
         self.last_loss = float(loss.item())
         return self.last_loss
 
