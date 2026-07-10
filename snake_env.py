@@ -286,6 +286,12 @@ class SnakeEnv:
                 reason = "apple"
                 self.eaten_food_trail.append(self.food)
                 self.recent_turns.clear()
+                
+                # Dynamic recent_heads history size based on snake length (multiplier 2.5 to fit loops twice)
+                new_maxlen = max(18, int(len(self.snake) * 2.5))
+                if self.recent_heads.maxlen != new_maxlen:
+                    self.recent_heads = deque(self.recent_heads, maxlen=new_maxlen)
+
                 if len(self.snake) >= self.board_size * self.board_size:
                     self.done = True
                     reward = reward + 10.0

@@ -170,6 +170,7 @@ def main():
             env.snake = [(p[0], p[1]) for p in snake]
             env.food = (food[0], food[1])
             env.direction = direction
+            env._clear_observation_cache()
             observation = env.get_observation_grid().tolist()
             
         print(f"\n--- ШАГ {step_num} | Направление: {direction} | Действие: {action_label} (отн: {action}) ---")

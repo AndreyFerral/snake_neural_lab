@@ -1039,7 +1039,21 @@ class SnakeWebBackend:
             self.current_replay_steps.pop(0)
 
         if training_mode and self.agent_kind == "dqn":
-            self.agent.remember(state, visible_action, reward, next_state, done)
+            # Вычисление priority_scale для обучения на ошибках (PER Boost)
+            priority_scale = 1.0
+            if done:
+                priority_scale = 5.0
+            elif is_transition_to_tail_loss:
+                priority_scale = 3.0
+
+            self.agent.remember(
+                state,
+                visible_action,
+                reward,
+                next_state,
+                done,
+                priority_scale=priority_scale,
+            )
             # Optimize once every 8 steps (or when done) to reduce CPU bottleneck and accelerate training
             if step_number % 8 == 0 or done:
                 loss = self.agent.optimize()

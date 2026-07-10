@@ -57,6 +57,12 @@ class ReplayBuffer:
         self.beta_increment = float(beta_increment)
         self.priority_epsilon = float(priority_epsilon)
         self._priority_cap = float(np.finfo(np.float32).max)
+        
+        # Постоянная память критических ситуаций (смерть, потеря хвоста)
+        self.permanent_buffer: list[tuple[np.ndarray, int, float, np.ndarray, bool, float]] = []
+        self.permanent_priorities = np.empty(0, dtype=np.float32)
+        self.permanent_position = 0
+        self.permanent_capacity = 2000
 
     def __len__(self) -> int:
         return len(self.buffer)
@@ -97,6 +103,23 @@ class ReplayBuffer:
         self.max_priority = max(min(base_priority, self._priority_cap), safe_priority)
         self.position = (index + 1) % self.capacity
 
+        # Дублируем критические переходы (смерть или потеря хвоста) в постоянную память
+        is_permanent = done or priority_scale == 3.0
+        if is_permanent:
+            perm_priority = safe_priority
+            if len(self.permanent_buffer) < self.permanent_capacity:
+                self.permanent_buffer.append(item)
+                new_priorities = np.empty(len(self.permanent_buffer), dtype=np.float32)
+                if len(self.permanent_priorities) > 0:
+                    new_priorities[:-1] = self.permanent_priorities
+                new_priorities[-1] = perm_priority
+                self.permanent_priorities = new_priorities
+            else:
+                idx = self.permanent_position
+                self.permanent_buffer[idx] = item
+                self.permanent_priorities[idx] = perm_priority
+                self.permanent_position = (idx + 1) % self.permanent_capacity
+
     def sample(
         self,
         batch_size: int,
@@ -104,7 +127,13 @@ class ReplayBuffer:
         size = len(self.buffer)
         if size <= 0:
             raise ValueError("cannot sample from an empty replay buffer")
-        safe_batch_size = min(max(1, int(batch_size)), size)
+        
+        perm_size_available = len(self.permanent_buffer)
+        # До 12.5% батча (например, 8 из 64) отдаем под permanent buffer
+        target_perm_size = min(int(batch_size * 0.125), perm_size_available)
+        regular_batch_size = max(1, batch_size - target_perm_size)
+        
+        # 1. Сэмплируем из обычного буфера
         priorities = self.priorities[:size].astype(np.float64, copy=False)
         scaled = np.power(np.maximum(priorities, self.priority_epsilon), self.alpha)
         total = float(scaled.sum())
@@ -112,21 +141,57 @@ class ReplayBuffer:
             probabilities = np.full(size, 1.0 / size, dtype=np.float64)
         else:
             probabilities = scaled / total
-        indices = np.random.choice(size, size=safe_batch_size, replace=False, p=probabilities)
-        states, actions, rewards, next_states, dones, priority_scales = zip(*(self.buffer[int(index)] for index in indices))
-        weights = np.power(size * probabilities[indices], -self.beta)
-        max_weight = float(weights.max())
+        
+        regular_indices = np.random.choice(size, size=regular_batch_size, replace=False, p=probabilities)
+        regular_weights = np.power(size * probabilities[regular_indices], -self.beta)
+        
+        # 2. Сэмплируем из постоянного буфера (если есть)
+        final_indices = regular_indices.tolist()
+        final_weights = regular_weights.tolist()
+        
+        if target_perm_size > 0:
+            perm_priorities = self.permanent_priorities.astype(np.float64, copy=False)
+            perm_scaled = np.power(np.maximum(perm_priorities, self.priority_epsilon), self.alpha)
+            perm_total = float(perm_scaled.sum())
+            if perm_total <= 0.0 or not np.isfinite(perm_total):
+                perm_probs = np.full(perm_size_available, 1.0 / perm_size_available, dtype=np.float64)
+            else:
+                perm_probs = perm_scaled / perm_total
+            
+            perm_indices = np.random.choice(perm_size_available, size=target_perm_size, replace=False, p=perm_probs)
+            perm_weights = np.power(perm_size_available * perm_probs[perm_indices], -self.beta)
+            
+            # Кодируем permanent-индексы отрицательными числами: index_mapped = -(index + 1)
+            mapped_perm_indices = (-(perm_indices + 1)).tolist()
+            final_indices.extend(mapped_perm_indices)
+            final_weights.extend(perm_weights.tolist())
+            
+        # Сборка общего батча
+        batch_items = []
+        for idx in final_indices:
+            if idx >= 0:
+                batch_items.append(self.buffer[idx])
+            else:
+                batch_items.append(self.permanent_buffer[abs(idx) - 1])
+                
+        states, actions, rewards, next_states, dones, priority_scales = zip(*batch_items)
+        
+        # Нормализация весов важности
+        weights_arr = np.array(final_weights, dtype=np.float32)
+        max_weight = float(weights_arr.max())
         if max_weight > 0.0 and np.isfinite(max_weight):
-            weights /= max_weight
+            weights_arr /= max_weight
+            
         self.beta = min(1.0, self.beta + self.beta_increment)
+        
         return (
             np.stack(states),
             np.asarray(actions, dtype=np.int64),
             np.asarray(rewards, dtype=np.float32),
             np.stack(next_states),
             np.asarray(dones, dtype=np.float32),
-            np.asarray(indices, dtype=np.int64),
-            weights.astype(np.float32, copy=False),
+            np.asarray(final_indices, dtype=np.int64),
+            weights_arr,
             np.asarray(priority_scales, dtype=np.float32),
         )
 
@@ -134,10 +199,10 @@ class ReplayBuffer:
         if priority_scales is None:
             priority_scales = np.ones_like(priorities, dtype=np.float32)
         size = len(self.buffer)
+        perm_size = len(self.permanent_buffer)
+        
         for index, priority, scale in zip(indices.tolist(), priorities.tolist(), priority_scales.tolist()):
             index = int(index)
-            if not 0 <= index < size:
-                continue
             safe_scale = max(1.0, float(scale))
             if not np.isfinite(safe_scale):
                 safe_scale = 1.0
@@ -148,7 +213,15 @@ class ReplayBuffer:
             if not np.isfinite(boosted):
                 boosted = self._priority_cap
             clipped = min(max(boosted, self.priority_epsilon), self._priority_cap)
-            self.priorities[index] = clipped
+            
+            if index >= 0:
+                if 0 <= index < size:
+                    self.priorities[index] = clipped
+            else:
+                perm_idx = abs(index) - 1
+                if 0 <= perm_idx < perm_size:
+                    self.permanent_priorities[perm_idx] = clipped
+                    
             self.max_priority = max(min(self.max_priority, self._priority_cap), clipped)
 
 
@@ -157,7 +230,7 @@ class DQNAgent:
         self,
         device: torch.device,
         *,
-        gamma: float = 0.96,
+        gamma: float = 0.97,
         learning_rate: float = 0.0008,
         batch_size: int = CPU_BATCH_SIZE,
         buffer_size: int = 100_000,
