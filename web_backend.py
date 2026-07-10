@@ -929,7 +929,18 @@ class SnakeWebBackend:
         if training_mode and self.agent_kind == "dqn" and was_random:
             leads_to_collision = self.game._danger_for_relative_action(predicted_action) >= 0.5
             leads_to_tail_loss = self.game._is_tail_blocked_after_relative_action(predicted_action) > 0.5
-            if leads_to_collision or leads_to_tail_loss:
+            # Не тратим random на пропуск еды, если greedy её бы съел
+            greedy_eats_food = (
+                self.game._next_head_for_direction(
+                    relative_to_absolute(self.game.direction, greedy_action)
+                ) == self.game.food
+            )
+            random_skips_food = greedy_eats_food and (
+                self.game._next_head_for_direction(
+                    relative_to_absolute(self.game.direction, predicted_action)
+                ) != self.game.food
+            )
+            if leads_to_collision or leads_to_tail_loss or random_skips_food:
                 predicted_action = greedy_action
                 was_random = False
         if self.mode == "manual" and not self.training:

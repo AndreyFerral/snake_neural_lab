@@ -105,6 +105,7 @@ class SnakeEnv:
         self._obs_cache_vec: np.ndarray | None = None
         self._shortest_path_cache_step: int = -1
         self._shortest_path_cache_val: list[tuple[int, int]] | None = None
+        self._space_size_cache: dict[int, int] = {}
         self.reset()
 
     def _clear_path_cache(self) -> None:
@@ -115,6 +116,7 @@ class SnakeEnv:
         self._obs_cache_vec = None
         self._shortest_path_cache_step = -1
         self._shortest_path_cache_val = None
+        self._space_size_cache = {}
 
     def _check_cache_size(self) -> None:
         if len(self._path_cache) > self._path_cache_max_size:
@@ -396,51 +398,34 @@ class SnakeEnv:
         return 0.0 if has_path else 1.0
 
     def _is_space_tight_after_relative_action(self, relative_action: int) -> float:
-        """Возвращает 1.0 если доступное пространство после хода меньше динамического порога."""
+        """Возвращает 1.0 если доступное пространство после хода меньше динамического порога (с ограничением снизу)."""
         absolute_direction = relative_to_absolute(self.direction, relative_action)
         next_head = self._next_head_for_direction(absolute_direction)
         will_eat = next_head == self.food
         hits_wall = not (0 <= next_head[0] < self.board_size and 0 <= next_head[1] < self.board_size)
         if hits_wall or self._would_hit_self(next_head, will_eat):
             return 1.0
+            
         if will_eat:
             simulated_snake = [next_head] + self.snake
         else:
             simulated_snake = [next_head] + self.snake[:-1]
+            
         blocked = set(simulated_snake[1:])
         
         free_cells = (self.board_size * self.board_size) - len(simulated_snake)
-        threshold = min(len(simulated_snake), free_cells)
+        # Динамический порог с вычитанием 6 клеток и ограничением снизу в 6 клеток
+        thresh = max(6, len(simulated_snake) - 6)
+        threshold = min(thresh, free_cells)
         
         space_size = self._reachable_space_size(next_head, blocked, limit=threshold)
         return 1.0 if space_size < threshold else 0.0
 
     def _is_currently_partitioned(self) -> bool:
-        """Возвращает True, если текущее свободное пространство поля разделено на изолированные компоненты."""
-        blocked = set(self.snake)
-        visited = set()
-        components = 0
-        for y in range(self.board_size):
-            for x in range(self.board_size):
-                cell = (x, y)
-                if cell not in blocked and cell not in visited:
-                    components += 1
-                    if components > 1:
-                        return True
-                    # BFS to mark component
-                    queue = deque([cell])
-                    visited.add(cell)
-                    while queue:
-                        curr = queue.popleft()
-                        cx, cy = curr
-                        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                            nx, ny = cx + dx, cy + dy
-                            n_cell = (nx, ny)
-                            if 0 <= nx < self.board_size and 0 <= ny < self.board_size:
-                                if n_cell not in blocked and n_cell not in visited:
-                                    visited.add(n_cell)
-                                    queue.append(n_cell)
-        return False
+        """Возвращает True, если еда недоступна из головы в текущем состоянии."""
+        head = self.snake[0]
+        blocked = set(self.snake[1:])  # тело без головы
+        return not self._has_path(head, self.food, blocked)
 
     def _is_food_reachable(self) -> float:
         """Возвращает 1.0, если путь от головы до еды существует, иначе 0.0."""
@@ -462,7 +447,7 @@ class SnakeEnv:
         return 0.0
 
     def _is_space_partitioned_after_relative_action(self, relative_action: int) -> float:
-        """Возвращает 1.0 если после хода свободное пространство делится на изолированные компоненты."""
+        """Возвращает 1.0 если после хода еда становится недоступна из головы."""
         absolute_direction = relative_to_absolute(self.direction, relative_action)
         next_head = self._next_head_for_direction(absolute_direction)
         will_eat = next_head == self.food
@@ -471,34 +456,10 @@ class SnakeEnv:
         hits_wall = not (0 <= next_head[0] < self.board_size and 0 <= next_head[1] < self.board_size)
         if hits_wall or self._would_hit_self(next_head, will_eat):
             return 1.0
-        if will_eat:
-            simulated_snake = [next_head] + self.snake
-        else:
-            simulated_snake = [next_head] + self.snake[:-1]
-        blocked = set(simulated_snake)
-
-        visited = set()
-        components = 0
-        for y in range(self.board_size):
-            for x in range(self.board_size):
-                cell = (x, y)
-                if cell not in blocked and cell not in visited:
-                    components += 1
-                    if components > 1:
-                        return 1.0
-                    # BFS to mark component
-                    queue = deque([cell])
-                    visited.add(cell)
-                    while queue:
-                        curr = queue.popleft()
-                        cx, cy = curr
-                        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                            nx, ny = cx + dx, cy + dy
-                            n_cell = (nx, ny)
-                            if 0 <= nx < self.board_size and 0 <= ny < self.board_size:
-                                if n_cell not in blocked and n_cell not in visited:
-                                    visited.add(n_cell)
-                                    queue.append(n_cell)
+        simulated_snake = [next_head] + self.snake[:-1]
+        blocked = set(simulated_snake[1:])  # тело без головы
+        if not self._has_path(next_head, self.food, blocked):
+            return 1.0
         return 0.0
 
     def _get_space_size_for_relative_action(self, relative_action: int) -> int:
