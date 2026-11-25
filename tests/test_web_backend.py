@@ -95,6 +95,27 @@ class TestWebBackendAndApi(unittest.TestCase):
                     self.assertEqual(backend.best_score, 0)
                     self.assertEqual(len(backend.history), 0)
 
+                    # PPO showcase death populates last_death_snapshot with recent_steps & move_risks
+                    # without inflating honest episode stats, and background completions do not overwrite it
+                    with backend.lock:
+                        backend.game.score = 12
+                        backend.game.snake = [(9, 0), (8, 0), (8, 1), (9, 1), (9, 2)]
+                        backend.game.direction = 1
+                        backend.game.food = (0, 9)
+                        backend.game._clear_observation_cache()
+                        backend._perform_ppo_showcase_step()
+                        self.assertEqual(backend.episode_counter, 0)
+                        self.assertIsNotNone(backend.last_death_snapshot)
+                        self.assertEqual(backend.last_death_snapshot["score"], 12)
+                        self.assertGreaterEqual(len(backend.last_death_snapshot["recent_steps"]), 1)
+                        self.assertIn("move_risks", backend.last_death_snapshot["recent_steps"][-1])
+                        backend._record_training_completion(
+                            {"score": 99, "step_count": 200, "reason": "wall_collision"},
+                            update_death_snapshot=False,
+                        )
+                        self.assertEqual(backend.last_death_snapshot["score"], 12)
+                        self.assertEqual(backend.episode_counter, 1)
+
                     # Changing board size clears PPO failure replay buffer
                     res_board = backend.handle_command({"type": "set_board_size", "value": 15})
                     self.assertTrue(res_board["ok"])

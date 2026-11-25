@@ -610,7 +610,7 @@ class SnakeWebBackend:
                     if self.agent is agent_ref and self.training_runner is runner_ref:
                         new_best_policy = False
                         for item in completed:
-                            self._record_training_completion(item)
+                            self._record_training_completion(item, update_death_snapshot=False)
                             if isinstance(agent_ref, PPOAgent):
                                 if agent_ref.record_full_episode(int(item.get("score", 0)), str(item.get("reason", ""))):
                                     new_best_policy = True
@@ -643,6 +643,12 @@ class SnakeWebBackend:
         ego_map = self.game.get_egocentric_map()
         act, probs, _, greedy = self.agent.select_showcase_action(state, ego_map=ego_map)
 
+        pre_step_snapshot = self._build_recent_step_snapshot(
+            absolute_direction=relative_to_absolute(self.game.direction, act),
+            action=act,
+            action_random=False,
+            greedy_action=greedy,
+        )
         pre_step_risks = evaluate_pre_step_risks(self.game, state, act)
         is_endgame = float(state[ENDGAME_IDX]) > 0.5
         is_pocket_split = float(state[POCKET_SPLIT_START_IDX + act]) > 0.5
@@ -666,6 +672,7 @@ class SnakeWebBackend:
         step_num = int(info.get("steps", self.game.step_count))
         if step_num == 1:
             self.step_review_entries.clear()
+            self.recent_step_snapshots.clear()
         self.step_review_entries.append({
             "step": step_num,
             "reward": float(shaped_reward),
@@ -678,6 +685,11 @@ class SnakeWebBackend:
             "steps_without_food": int(self.game.steps_without_food),
             "max_steps_without_food": int(self.game.max_steps_without_food),
         })
+        pre_step_snapshot["outcome_reason"] = reason
+        pre_step_snapshot["penalty_reasons"] = list(all_penalties)
+        pre_step_snapshot["steps_without_food"] = int(self.game.steps_without_food)
+        pre_step_snapshot["max_steps_without_food"] = int(self.game.max_steps_without_food)
+        self.recent_step_snapshots.append(pre_step_snapshot)
 
         self.last_q_values = probs
         self.last_action = act
@@ -690,8 +702,33 @@ class SnakeWebBackend:
         self._record_decision_stat("choices", MODEL_ACTION_LABELS[act])
 
         if done:
+            recent_steps = self._recent_unique_death_steps(limit=8)
+            self.last_death_snapshot = {
+                "reason": reason,
+                "size": self.game.board_size,
+                "score": self.game.score,
+                "step_count": self.game.step_count,
+                "steps_without_food": self.game.steps_without_food,
+                "direction": self.game.direction,
+                "snake": [{"x": x, "y": y} for x, y in self.game.snake],
+                "food": {"x": self.game.food[0], "y": self.game.food[1]},
+                "eaten_food_trail": [{"x": x, "y": y} for x, y in self.game.eaten_food_trail],
+                "recent_steps": recent_steps,
+            }
+            self.last_outcome_reason = reason
+            if self.step_review_entries:
+                self.last_completed_step_review_entries = list(self.step_review_entries)
+                self.step_review_history.appendleft({
+                    "id": f"showcase-{self.episode_counter}-{int(time.time() * 1000)}",
+                    "episode": self.episode_counter,
+                    "score": self.game.score,
+                    "steps": self.game.step_count,
+                    "reason": reason,
+                    "entries": list(self.last_completed_step_review_entries),
+                })
             self.game.reset(return_obs=False)
             self.step_review_entries.clear()
+            self.recent_step_snapshots.clear()
         self.last_state = self._current_observation()
 
     def _simulation_loop(self) -> None:
@@ -759,21 +796,22 @@ class SnakeWebBackend:
             self._flush_pending_save()
             time.sleep(0.001 if did_work and dqn_training_steps > 0 else sleep_hint)
 
-    def _record_training_completion(self, payload: dict[str, Any]) -> None:
+    def _record_training_completion(self, payload: dict[str, Any], *, update_death_snapshot: bool = True) -> None:
         score = int(payload.get("score", 0))
         step_count = int(payload.get("step_count", 0))
         reason = str(payload.get("reason", "unknown"))
-        step_log = payload.get("step_log", [])
-        if isinstance(step_log, list) and step_log:
-            self.last_completed_step_review_entries = list(step_log)
-            self.step_review_history.appendleft({
-                "id": f"training-{self.episode_counter + 1}-{int(payload.get('index', 0)) + 1}-{int(time.time() * 1000)}",
-                "episode": self.episode_counter + 1,
-                "score": score,
-                "steps": step_count,
-                "reason": reason,
-                "entries": list(self.last_completed_step_review_entries),
-            })
+        if update_death_snapshot:
+            step_log = payload.get("step_log", [])
+            if isinstance(step_log, list) and step_log:
+                self.last_completed_step_review_entries = list(step_log)
+                self.step_review_history.appendleft({
+                    "id": f"training-{self.episode_counter + 1}-{int(payload.get('index', 0)) + 1}-{int(time.time() * 1000)}",
+                    "episode": self.episode_counter + 1,
+                    "score": score,
+                    "steps": step_count,
+                    "reason": reason,
+                    "entries": list(self.last_completed_step_review_entries),
+                })
 
         self.episode_counter += 1
         self.best_score = max(self.best_score, score)
@@ -796,9 +834,10 @@ class SnakeWebBackend:
         if len(self.history) > HISTORY_LIMIT:
             self.history.pop(0)
 
-        self.last_death_snapshot = self._snapshot_for_completed_training(payload)
-        self.last_outcome_reason = reason
-        self.last_penalty_reasons = [str(item) for item in payload.get("penalty_reasons", [])]
+        if update_death_snapshot:
+            self.last_death_snapshot = self._snapshot_for_completed_training(payload)
+            self.last_outcome_reason = reason
+            self.last_penalty_reasons = [str(item) for item in payload.get("penalty_reasons", [])]
         self.fitness_ema = -loss_val if self.fitness_ema == 0 else self.fitness_ema * 0.9 + (-loss_val) * 0.1
 
     def _snapshot_for_completed_training(self, payload: dict[str, Any]) -> dict[str, Any]:

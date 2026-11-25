@@ -1337,6 +1337,9 @@ class SnakeLabApp {
 
     const scoreText = `Счет: ${game.score}`;
     const boardText = `Поле: ${size}x${size}`;
+    const isPpoTraining = Boolean(this.state.training && this.state.agent_kind === "ppo" && this.state.mode !== "smart");
+    const ppoEnvs = Number(this.state.stats?.population ?? 0);
+    const bgTrainText = isPpoTraining && ppoEnvs > 0 ? `Обучение: ${ppoEnvs} сред в фоне` : "";
 
     ctx.font = "600 22px Aptos, Trebuchet MS, sans-serif";
     const scoreWidth = ctx.measureText(scoreText).width;
@@ -1344,12 +1347,19 @@ class SnakeLabApp {
     ctx.font = "500 14px Aptos, Trebuchet MS, sans-serif";
     const boardWidth = ctx.measureText(boardText).width;
 
-    const boxWidth = Math.max(140, Math.round(Math.max(scoreWidth, boardWidth) + 28));
+    let bgTrainWidth = 0;
+    if (bgTrainText) {
+      ctx.font = "600 12px Aptos, Trebuchet MS, sans-serif";
+      bgTrainWidth = ctx.measureText(bgTrainText).width;
+    }
+
+    const boxWidth = Math.max(140, Math.round(Math.max(scoreWidth, boardWidth, bgTrainWidth) + 28));
+    const boxHeight = bgTrainText ? 86 : 66;
 
     ctx.fillStyle = "rgba(4, 14, 20, 0.72)";
-    ctx.fillRect(14, 14, boxWidth, 66);
+    ctx.fillRect(14, 14, boxWidth, boxHeight);
     ctx.strokeStyle = "rgba(255,255,255,0.1)";
-    ctx.strokeRect(14, 14, boxWidth, 66);
+    ctx.strokeRect(14, 14, boxWidth, boxHeight);
 
     ctx.fillStyle = "#edf6f9";
     ctx.font = "600 22px Aptos, Trebuchet MS, sans-serif";
@@ -1358,6 +1368,12 @@ class SnakeLabApp {
     ctx.font = "500 14px Aptos, Trebuchet MS, sans-serif";
     ctx.fillStyle = "#b4c7cf";
     ctx.fillText(boardText, 28, 68);
+
+    if (bgTrainText) {
+      ctx.font = "600 12px Aptos, Trebuchet MS, sans-serif";
+      ctx.fillStyle = "#7fd0ff";
+      ctx.fillText(bgTrainText, 28, 88);
+    }
     this.lastGameRenderTime = now;
     if (t >= 0.999) {
       this.lastSettledGameSignature = settledSignature;
