@@ -42,9 +42,15 @@
       <main class="dashboard">
         <section class="panel game-panel">
           <div class="panel-head">
-            <div>
+            <div class="game-head-title">
               <p class="panel-kicker">Поле</p>
-              <h2>Игровая среда</h2>
+              <div class="game-title-row">
+                <h2>Игровая среда</h2>
+                <div class="game-live-meta">
+                  <span id="gameHeaderScore" class="game-score-pill">Счет: 0</span>
+                  <span id="gameHeaderStatus" class="game-bg-pill" hidden></span>
+                </div>
+              </div>
             </div>
             <div class="panel-actions compact">
               <label class="agent-mode-control">

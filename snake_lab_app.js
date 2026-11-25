@@ -35,6 +35,8 @@ class SnakeLabApp {
     this.modeStat = document.getElementById("modeStat");
     this.epochStat = document.getElementById("epochStat");
     this.scoreStat = document.getElementById("scoreStat");
+    this.gameHeaderScore = document.getElementById("gameHeaderScore");
+    this.gameHeaderStatus = document.getElementById("gameHeaderStatus");
     this.bestScoreStat = document.getElementById("bestScoreStat");
     this.avgScoreStat = document.getElementById("avgScoreStat");
     this.lossStat = document.getElementById("lossStat");
@@ -282,6 +284,21 @@ class SnakeLabApp {
     applyRuntimeReasonConfig(this.state);
     this.stateDetailsFresh = false;
     this.ingestGameFrame(this.state);
+    this.updateGameHeaderMeta();
+  }
+
+  updateGameHeaderMeta() {
+    if (!this.state) return;
+    const score = Number(this.currGameSnapshot?.score ?? this.state?.game?.score ?? 0);
+    this.setText(this.gameHeaderScore, `Счет: ${score}`);
+    const isPpoTraining = Boolean(this.state.training && this.state.agent_kind === "ppo" && this.state.mode !== "smart");
+    const ppoEnvs = Number(this.state.stats?.population ?? 0);
+    if (isPpoTraining && ppoEnvs > 0) {
+      this.setText(this.gameHeaderStatus, `Обучение: ${ppoEnvs} сред в фоне`);
+      this.setHidden(this.gameHeaderStatus, false);
+    } else {
+      this.setHidden(this.gameHeaderStatus, true);
+    }
   }
 
   ingestGameFrame(state) {
@@ -1157,6 +1174,7 @@ class SnakeLabApp {
     this.setText(this.modeStat, modeText);
     this.setText(this.epochStat, String(this.state.stats.episode));
     this.setText(this.scoreStat, String(this.state.game.score));
+    this.updateGameHeaderMeta();
     this.setText(this.bestScoreStat, String(this.state.stats.best_score));
     this.setText(this.avgScoreStat, Number(this.state.stats.average_score_100 ?? 0).toFixed(1));
     if (this.avgScoreStat) { const averageWindow = Number(this.state.stats.average_score_window ?? 0); this.avgScoreStat.title = averageWindow ? `Средний счет по ${averageWindow} эпизодам` : ""; }
@@ -1335,45 +1353,6 @@ class SnakeLabApp {
       }
     );
 
-    const scoreText = `Счет: ${game.score}`;
-    const boardText = `Поле: ${size}x${size}`;
-    const isPpoTraining = Boolean(this.state.training && this.state.agent_kind === "ppo" && this.state.mode !== "smart");
-    const ppoEnvs = Number(this.state.stats?.population ?? 0);
-    const bgTrainText = isPpoTraining && ppoEnvs > 0 ? `Обучение: ${ppoEnvs} сред в фоне` : "";
-
-    ctx.font = "600 22px Aptos, Trebuchet MS, sans-serif";
-    const scoreWidth = ctx.measureText(scoreText).width;
-
-    ctx.font = "500 14px Aptos, Trebuchet MS, sans-serif";
-    const boardWidth = ctx.measureText(boardText).width;
-
-    let bgTrainWidth = 0;
-    if (bgTrainText) {
-      ctx.font = "600 12px Aptos, Trebuchet MS, sans-serif";
-      bgTrainWidth = ctx.measureText(bgTrainText).width;
-    }
-
-    const boxWidth = Math.max(140, Math.round(Math.max(scoreWidth, boardWidth, bgTrainWidth) + 28));
-    const boxHeight = bgTrainText ? 86 : 66;
-
-    ctx.fillStyle = "rgba(4, 14, 20, 0.72)";
-    ctx.fillRect(14, 14, boxWidth, boxHeight);
-    ctx.strokeStyle = "rgba(255,255,255,0.1)";
-    ctx.strokeRect(14, 14, boxWidth, boxHeight);
-
-    ctx.fillStyle = "#edf6f9";
-    ctx.font = "600 22px Aptos, Trebuchet MS, sans-serif";
-    ctx.fillText(scoreText, 28, 44);
-
-    ctx.font = "500 14px Aptos, Trebuchet MS, sans-serif";
-    ctx.fillStyle = "#b4c7cf";
-    ctx.fillText(boardText, 28, 68);
-
-    if (bgTrainText) {
-      ctx.font = "600 12px Aptos, Trebuchet MS, sans-serif";
-      ctx.fillStyle = "#7fd0ff";
-      ctx.fillText(bgTrainText, 28, 88);
-    }
     this.lastGameRenderTime = now;
     if (t >= 0.999) {
       this.lastSettledGameSignature = settledSignature;
