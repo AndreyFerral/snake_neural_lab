@@ -89,9 +89,6 @@ const FORCE_PANEL_REFRESH_COMMANDS = new Set([
 ]);
 const DEFERRED_STATE_FIELDS = [
   "reward_rules",
-  "step_review",
-  "step_review_source",
-  "step_review_history",
   "observation",
   "global_signals",
   "last_death_snapshot",
@@ -138,17 +135,3 @@ function applyRuntimeReasonConfig(state) {
     SIGNAL_LABELS = Object.freeze({ ...signalLabels });
   }
 }
-const KEY_DIRECTIONS = Object.freeze({
-  arrowup: 0,
-  w: 0,
-  ц: 0,
-  arrowright: 1,
-  d: 1,
-  в: 1,
-  arrowdown: 2,
-  s: 2,
-  ы: 2,
-  arrowleft: 3,
-  a: 3,
-  ф: 3,
-});

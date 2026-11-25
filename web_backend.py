@@ -235,9 +235,8 @@ class SnakeWebBackend:
         self.smart_agent = SmartH5Agent(RUNTIME_DIR, STATIC_ROOT)
         self.running = True
         self.training = False
-        self.mode = "manual"
+        self.mode = "ai"
         self.speed = 8
-        self.pending_manual_direction = self.game.direction
         self.live_reward = 0.0
         self.episode_reward = 0.0
         self.fitness_ema = 0.0
@@ -256,9 +255,6 @@ class SnakeWebBackend:
         self.persistence_enabled = True
         self.decision_stats = make_decision_stats()
         self.recent_step_snapshots: Deque[dict[str, Any]] = deque(maxlen=18)
-        self.step_review_entries: Deque[dict[str, Any]] = deque(maxlen=120)
-        self.last_completed_step_review_entries: list[dict[str, Any]] = []
-        self.step_review_history: Deque[dict[str, Any]] = deque(maxlen=1)
         self.training_display_index = 0
         self.current_replay_steps: list[dict[str, Any]] = []
         self.replays_dir = RUNTIME_DIR / "replays"
@@ -266,6 +262,8 @@ class SnakeWebBackend:
         self.record_replays = True
         self.last_eval_result: dict[str, Any] | None = None
         self._eval_running = False
+        self._eval_generation = 0
+        self._eval_cancel_event = threading.Event()
 
         self._sync_network_source()
         self._load_active_context()
@@ -300,6 +298,7 @@ class SnakeWebBackend:
 
     def shutdown(self, *, fast: bool = False) -> None:
         self.stop_event.set()
+        self._cancel_greedy_eval(clear_result=False)
         self._ppo_paused = True
         self._ppo_wake_event.set()
         with self._frame_cond:
@@ -538,6 +537,8 @@ class SnakeWebBackend:
             self._sync_network_source()
             return False, error
 
+        self._cancel_greedy_eval(clear_result=True)
+
         self._sync_network_source()
         self._smart_models_cache_at = 0.0
         self.mode = "smart"
@@ -686,20 +687,7 @@ class SnakeWebBackend:
         all_penalties = [str(item) for item in info.get("penalty_reasons", [])] + extra_penalties
         step_num = int(info.get("steps", self.game.step_count))
         if step_num == 1:
-            self.step_review_entries.clear()
             self.recent_step_snapshots.clear()
-        self.step_review_entries.append({
-            "step": step_num,
-            "reward": float(shaped_reward),
-            "train_reward": float(shaped_reward),
-            "action": int(act),
-            "action_label": MODEL_ACTION_LABELS[act] if 0 <= act < len(MODEL_ACTION_LABELS) else "-",
-            "reason": reason,
-            "penalties": list(all_penalties),
-            "random": False,
-            "steps_without_food": int(self.game.steps_without_food),
-            "max_steps_without_food": int(self.game.max_steps_without_food),
-        })
         pre_step_snapshot["outcome_reason"] = reason
         pre_step_snapshot["penalty_reasons"] = list(all_penalties)
         pre_step_snapshot["steps_without_food"] = int(self.game.steps_without_food)
@@ -731,18 +719,7 @@ class SnakeWebBackend:
                 "recent_steps": recent_steps,
             }
             self.last_outcome_reason = reason
-            if self.step_review_entries:
-                self.last_completed_step_review_entries = list(self.step_review_entries)
-                self.step_review_history.appendleft({
-                    "id": f"showcase-{self.episode_counter}-{int(time.time() * 1000)}",
-                    "episode": self.episode_counter,
-                    "score": self.game.score,
-                    "steps": self.game.step_count,
-                    "reason": reason,
-                    "entries": list(self.last_completed_step_review_entries),
-                })
             self.game.reset(return_obs=False)
-            self.step_review_entries.clear()
             self.recent_step_snapshots.clear()
         self.last_state = self._current_observation()
 
@@ -815,18 +792,6 @@ class SnakeWebBackend:
         score = int(payload.get("score", 0))
         step_count = int(payload.get("step_count", 0))
         reason = str(payload.get("reason", "unknown"))
-        if update_death_snapshot:
-            step_log = payload.get("step_log", [])
-            if isinstance(step_log, list) and step_log:
-                self.last_completed_step_review_entries = list(step_log)
-                self.step_review_history.appendleft({
-                    "id": f"training-{self.episode_counter + 1}-{int(payload.get('index', 0)) + 1}-{int(time.time() * 1000)}",
-                    "episode": self.episode_counter + 1,
-                    "score": score,
-                    "steps": step_count,
-                    "reason": reason,
-                    "entries": list(self.last_completed_step_review_entries),
-                })
 
         self.episode_counter += 1
         self.best_score = max(self.best_score, score)
@@ -909,11 +874,6 @@ class SnakeWebBackend:
 
         self.training_display_index = self.training_runner.update_leader()
         self.game = self.training_runner.leader_env()
-        if 0 <= self.training_display_index < len(self.training_runner.step_logs):
-            self.step_review_entries = deque(
-                self.training_runner.step_logs[self.training_display_index],
-                maxlen=120,
-            )
         self.last_state = self._current_observation()
         if (
             self.training_runner.last_probs is not None
@@ -965,18 +925,8 @@ class SnakeWebBackend:
                 greedy_action,
                 was_random,
             )
-        if self.mode == "manual" and not self.training:
-            absolute_direction = self.pending_manual_direction
-            if absolute_direction == (self.game.direction - 1) % 4:
-                visible_action = 1
-            elif absolute_direction == (self.game.direction + 1) % 4:
-                visible_action = 2
-            else:
-                visible_action = 0
-            was_random = False
-        else:
-            absolute_direction = relative_to_absolute(self.game.direction, predicted_action)
-            visible_action = predicted_action
+        absolute_direction = relative_to_absolute(self.game.direction, predicted_action)
+        visible_action = predicted_action
 
         pre_step_snapshot = self._build_recent_step_snapshot(
             absolute_direction=absolute_direction,
@@ -1016,24 +966,7 @@ class SnakeWebBackend:
         self.last_greedy_action = greedy_action
         self.last_reason = reason
         self.last_penalty_reasons = [str(item) for item in info.get("penalty_reasons", [])] + extra_penalties
-            
-        train_reward = reward
         step_number = int(info.get("steps", self.game.step_count))
-        if step_number == 1:
-            if self.step_review_entries:
-                self.step_review_entries.clear()
-        self.step_review_entries.append({
-            "step": step_number,
-            "reward": float(reward),
-            "train_reward": float(train_reward),
-            "action": int(visible_action),
-            "action_label": MODEL_ACTION_LABELS[visible_action] if 0 <= visible_action < len(MODEL_ACTION_LABELS) else "-",
-            "reason": self.last_reason,
-            "penalties": list(self.last_penalty_reasons),
-            "random": bool(was_random),
-            "steps_without_food": int(self.game.steps_without_food),
-            "max_steps_without_food": int(self.game.max_steps_without_food),
-        })
         self._record_decision_stat("choices", MODEL_ACTION_LABELS[visible_action])
         self._record_decision_stat("steps", self.last_reason)
         pre_step_snapshot["outcome_reason"] = self.last_reason
@@ -1101,20 +1034,10 @@ class SnakeWebBackend:
             )
 
     def _finish_episode(self, reason: str, *, training_mode: bool) -> None:
-        self.last_completed_step_review_entries = list(self.step_review_entries)
         self.episode_counter += 1
         is_new_best = self.game.score > self.best_score
         self.best_score = max(self.best_score, self.game.score)
         self._sync_board_best_score()
-        if self.last_completed_step_review_entries:
-            self.step_review_history.appendleft({
-                "id": f"episode-{self.episode_counter}-{int(time.time() * 1000)}",
-                "episode": self.episode_counter,
-                "score": self.game.score,
-                "steps": self.game.step_count,
-                "reason": reason,
-                "entries": list(self.last_completed_step_review_entries),
-            })
         if reason in DEATH_REASON_ORDER:
             self._record_decision_stat("deaths", reason)
         recent_steps = self._recent_unique_death_steps(limit=8)
@@ -1162,7 +1085,6 @@ class SnakeWebBackend:
 
         self.last_outcome_reason = reason
         self.game.reset()
-        self.pending_manual_direction = self.game.direction
         self.episode_reward = 0.0
         self.last_state = self._current_observation()
         _, self.last_q_values, _, self.last_greedy_action = self._select_current_action(self.last_state, False)
@@ -1194,7 +1116,6 @@ class SnakeWebBackend:
 
     def _reset_environment_state(self) -> None:
         self._ensure_runtime_consistency()
-        self.pending_manual_direction = self.game.direction
         self.live_reward = 0.0
         self.episode_reward = 0.0
         self.last_action = 0
@@ -1204,7 +1125,6 @@ class SnakeWebBackend:
         self.last_outcome_reason = "new_game"
         self.last_penalty_reasons = []
         self.recent_step_snapshots.clear()
-        self.step_review_entries.clear()
         self.current_replay_steps.clear()
         self.last_state = self._current_observation()
         _, self.last_q_values, _, self.last_greedy_action = self._select_current_action(self.last_state, False)
@@ -1262,9 +1182,6 @@ class SnakeWebBackend:
         self._reset_death_stats()
         self.last_death_snapshot = None
         self.recent_step_snapshots.clear()
-        self.step_review_entries.clear()
-        self.last_completed_step_review_entries.clear()
-        self.step_review_history.clear()
         self.last_outcome_reason = "new_game"
         self.last_penalty_reasons = []
 
@@ -1272,7 +1189,7 @@ class SnakeWebBackend:
         record_decision_stat(self.decision_stats, section, key)
 
     def _reward_rules_payload(self) -> dict[str, Any]:
-        return build_reward_rules_payload()
+        return build_reward_rules_payload(agent_kind=self.agent_kind, mode=self.mode)
 
     def _active_context_payload(self) -> dict[str, object]:
         return {
@@ -1327,8 +1244,8 @@ class SnakeWebBackend:
         mode = str(payload.get("mode", self.mode))
         if mode == "smart" and self.smart_agent.loaded:
             self.mode = "smart"
-        elif mode in {"manual", "ai"}:
-            self.mode = mode
+        else:
+            self.mode = "ai"
 
         try:
             self.speed = int(payload.get("speed", self.speed))
@@ -1373,7 +1290,6 @@ class SnakeWebBackend:
             "running": bool(self.running),
             "mode": str(self.mode),
             "speed": int(self.speed),
-            "pending_manual_direction": int(self.pending_manual_direction),
             "live_reward": float(self.live_reward),
             "episode_reward": float(self.episode_reward),
             "last_action": int(self.last_action),
@@ -1421,11 +1337,9 @@ class SnakeWebBackend:
             self.last_state = self._current_observation()
         self.running = bool(payload.get("running", self.running))
         self.training = False
-        self.mode = str(payload.get("mode", self.mode))
-        if self.mode == "smart" and not self.smart_agent.loaded:
-            self.mode = "manual"
+        loaded_mode = str(payload.get("mode", self.mode))
+        self.mode = "smart" if (loaded_mode == "smart" and self.smart_agent.loaded) else "ai"
         self.speed = int(payload.get("speed", self.speed))
-        self.pending_manual_direction = int(payload.get("pending_manual_direction", self.game.direction))
         self.live_reward = float(payload.get("live_reward", 0.0))
         self.episode_reward = float(payload.get("episode_reward", 0.0))
         self.last_action = int(payload.get("last_action", 0))
@@ -1751,6 +1665,8 @@ class SnakeWebBackend:
             return False, "Unknown agent kind"
         if agent_kind == self.agent_kind:
             was_smart_mode = self.mode == "smart"
+            if was_smart_mode:
+                self._cancel_greedy_eval(clear_result=True)
             self.mode = "ai"
             self.training = False
             self.running = False
@@ -1764,6 +1680,7 @@ class SnakeWebBackend:
                 self._reset_environment_state()
             return True, "ok"
 
+        self._cancel_greedy_eval(clear_result=True)
         current_board_size = self.game.board_size
         self._sync_board_best_score()
         self._store_active_agent_slot()
@@ -1813,7 +1730,7 @@ class SnakeWebBackend:
         self.training = False
         self.running = False
         self.fitness_ema = 0.0
-        self.last_eval_result = None
+        self._cancel_greedy_eval(clear_result=True)
         self._reset_environment_state()
         self._schedule_save(urgent=True)
         return True, "ok"
@@ -1831,7 +1748,7 @@ class SnakeWebBackend:
             with self.agent_lock:
                 self.agent.clear_rollout()
                 self.agent.on_board_size_changed(board_size)
-        self.last_eval_result = None
+        self._cancel_greedy_eval(clear_result=True)
         self._select_board_best_score(board_size)
         self._reset_environment_state()
         self._schedule_save(urgent=True)
@@ -1852,50 +1769,53 @@ class SnakeWebBackend:
         expected_signal_count = self._expected_state_size()
         
         self._ensure_runtime_consistency()
-        locked = self.agent_lock.acquire(timeout=0.02 if self.running else -1)
-        if not locked:
-            output_values = np.asarray(self.last_q_values, dtype=np.float32)
-            if self._network_payload_cache is not None:
-                cache_used = True
-                cached = dict(self._network_payload_cache)
-                cached["output"] = output_values.tolist()
-                cached["global_signals"]["values"] = self.last_state.tolist()
+        use_ppo_inference = self.agent_kind == "ppo" and isinstance(self.agent, PPOAgent)
+        acquired_agent_lock = False
+        if not use_ppo_inference:
+            acquired_agent_lock = self.agent_lock.acquire(timeout=0.02 if self.running else -1)
+            if not acquired_agent_lock:
+                output_values = np.asarray(self.last_q_values, dtype=np.float32)
+                if self._network_payload_cache is not None:
+                    cache_used = True
+                    cached = dict(self._network_payload_cache)
+                    cached["output"] = output_values.tolist()
+                    cached["global_signals"]["values"] = self.last_state.tolist()
+                    elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+                    if elapsed_ms >= SLOW_NETWORK_MS:
+                        log_perf("slow_network_payload", elapsed_ms, cache=cache_used, locked=False)
+                    return cached
+
+                net_h1 = int(getattr(self.agent.online_net, "hidden1_size", HIDDEN_LAYER_1))
+                net_h2 = int(getattr(self.agent.online_net, "hidden2_size", HIDDEN_LAYER_2))
+                payload = {
+                    "global_signals": {
+                        "labels": global_signal_labels,
+                        "values": self.last_state.tolist(),
+                    },
+                    "hidden1": [0.0] * net_h1,
+                    "hidden2": [0.0] * net_h2,
+                    "output": output_values.tolist(),
+                    "value": [],
+                    "connections": {
+                        "global_hidden1": [],
+                        "hidden1_hidden2": [],
+                        "hidden2_output": [],
+                        "hidden2_value": [],
+                    },
+                }
                 elapsed_ms = (time.perf_counter() - started_at) * 1000.0
                 if elapsed_ms >= SLOW_NETWORK_MS:
                     log_perf("slow_network_payload", elapsed_ms, cache=cache_used, locked=False)
-                return cached
-            
-            net_h1 = int(getattr(self.agent.online_net, "hidden1_size", HIDDEN_LAYER_1))
-            net_h2 = int(getattr(self.agent.online_net, "hidden2_size", HIDDEN_LAYER_2))
-            payload = {
-                "global_signals": {
-                    "labels": global_signal_labels,
-                    "values": self.last_state.tolist(),
-                },
-                "hidden1": [0.0] * net_h1,
-                "hidden2": [0.0] * net_h2,
-                "output": output_values.tolist(),
-                "value": [],
-                "connections": {
-                    "global_hidden1": [],
-                    "hidden1_hidden2": [],
-                    "hidden2_output": [],
-                    "hidden2_value": [],
-                },
-            }
-            elapsed_ms = (time.perf_counter() - started_at) * 1000.0
-            if elapsed_ms >= SLOW_NETWORK_MS:
-                log_perf("slow_network_payload", elapsed_ms, cache=cache_used, locked=False)
-            return payload
+                return payload
 
         try:
-            ego_map = self.game.get_egocentric_map() if self.agent_kind == "ppo" else None
-            snapshot = (
-                self.agent.snapshot(self.last_state, ego_map=ego_map)
-                if self.agent_kind == "ppo"
-                else self.agent.snapshot(self.last_state)
-            )
-            net = self.agent.online_net
+            ego_map = self.game.get_egocentric_map() if use_ppo_inference else None
+            if use_ppo_inference:
+                snapshot = self.agent.snapshot(self.last_state, ego_map=ego_map, use_inference_net=True)
+                net = self.agent.inference_net
+            else:
+                snapshot = self.agent.snapshot(self.last_state)
+                net = self.agent.online_net
             net_h1 = int(getattr(net, "hidden1_size", HIDDEN_LAYER_1))
             net_h2 = int(getattr(net, "hidden2_size", HIDDEN_LAYER_2))
             input_values = np.asarray(snapshot.get("input", np.zeros(expected_signal_count)), dtype=np.float32)
@@ -1910,46 +1830,53 @@ class SnakeWebBackend:
             hidden2_value_connections = []
 
             try:
-                if hasattr(net, 'hidden1_layer'):
-                    if hasattr(net, 'input_layer'):
-                        w_in = net.input_layer.weight.detach()
-                        w_h1 = net.hidden1_layer.weight.detach()
-                        w_in_h1 = (w_h1 @ w_in).cpu().numpy()
-                    else:
-                        w_in_h1 = net.hidden1_layer.weight.detach()[:, :len(input_values)].cpu().numpy()
-                    
-                    input_hidden1_connections = build_connection_payload(
-                        input_values, hidden1_values, w_in_h1,
-                        len(input_values), 14, 48
-                    )
-                
-                # hidden1 -> hidden2: используется вес именно hidden2_layer (H2, H1)
-                if hasattr(net, 'hidden1_layer') and hasattr(net, 'hidden2_layer'):
-                    w_h1_h2 = net.hidden2_layer.weight.detach().cpu().numpy()
-                    hidden1_hidden2_connections = build_connection_payload(
-                        hidden1_values, hidden2_values, w_h1_h2,
-                        14, 10, 90
-                    )
-                 
-                w_out = None
-                if hasattr(net, 'advantage_head'):
-                    w_out = net.advantage_head.weight.detach().cpu().numpy()
-                elif hasattr(net, 'output'):
-                    w_out = net.output.weight.detach().cpu().numpy()
-                
-                if w_out is not None:
-                    hidden2_output_connections = build_connection_payload(
-                        hidden2_values, output_values, w_out, 
-                        10, len(output_values), 30
-                    )
-                
-                if hasattr(net, 'value_head'):
-                    w_val = net.value_head.weight.detach().cpu().numpy()
-                    val_source = np.asarray(snapshot.get("critic_hidden2", hidden2_values), dtype=np.float32)
-                    hidden2_value_connections = build_connection_payload(
-                        val_source, value_values, w_val,
-                        10, len(value_values), 16
-                    )
+                weight_ctx = self.agent._inference_lock if use_ppo_inference else None
+                if weight_ctx is not None:
+                    weight_ctx.acquire()
+                try:
+                    if hasattr(net, 'hidden1_layer'):
+                        if hasattr(net, 'input_layer'):
+                            w_in = net.input_layer.weight.detach()
+                            w_h1 = net.hidden1_layer.weight.detach()
+                            w_in_h1 = (w_h1 @ w_in).cpu().numpy()
+                        else:
+                            w_in_h1 = net.hidden1_layer.weight.detach()[:, :len(input_values)].cpu().numpy()
+
+                        input_hidden1_connections = build_connection_payload(
+                            input_values, hidden1_values, w_in_h1,
+                            len(input_values), 14, 48
+                        )
+
+                    # hidden1 -> hidden2: используется вес именно hidden2_layer (H2, H1)
+                    if hasattr(net, 'hidden1_layer') and hasattr(net, 'hidden2_layer'):
+                        w_h1_h2 = net.hidden2_layer.weight.detach().cpu().numpy()
+                        hidden1_hidden2_connections = build_connection_payload(
+                            hidden1_values, hidden2_values, w_h1_h2,
+                            14, 10, 90
+                        )
+
+                    w_out = None
+                    if hasattr(net, 'advantage_head'):
+                        w_out = net.advantage_head.weight.detach().cpu().numpy()
+                    elif hasattr(net, 'output'):
+                        w_out = net.output.weight.detach().cpu().numpy()
+
+                    if w_out is not None:
+                        hidden2_output_connections = build_connection_payload(
+                            hidden2_values, output_values, w_out,
+                            10, len(output_values), 30
+                        )
+
+                    if hasattr(net, 'value_head'):
+                        w_val = net.value_head.weight.detach().cpu().numpy()
+                        val_source = np.asarray(snapshot.get("critic_hidden2", hidden2_values), dtype=np.float32)
+                        hidden2_value_connections = build_connection_payload(
+                            val_source, value_values, w_val,
+                            10, len(value_values), 16
+                        )
+                finally:
+                    if weight_ctx is not None:
+                        weight_ctx.release()
             except Exception as e:
                 log_perf("network_payload_weight_error", 0.0, error=str(e))
 
@@ -1983,7 +1910,8 @@ class SnakeWebBackend:
                 "connections": {"global_hidden1": [], "hidden1_hidden2": [], "hidden2_output": [], "hidden2_value": []},
             }
         finally:
-            self.agent_lock.release()
+            if acquired_agent_lock:
+                self.agent_lock.release()
 
     def _cached_state_snapshot(self, include_network: bool, include_details: bool) -> dict[str, Any] | None:
         cached = self._snapshot_cache.get((include_network, include_details))
@@ -1998,7 +1926,7 @@ class SnakeWebBackend:
             payload["network"] = None
         if not include_details:
             for key in (
-                "reward_rules", "step_review", "step_review_source", "step_review_history",
+                "reward_rules",
                 "observation", "global_signals", "last_death_snapshot", "decision_stats", "history",
             ):
                 payload.pop(key, None)
@@ -2052,7 +1980,15 @@ class SnakeWebBackend:
             "best_fill_ratio": float(getattr(self.agent, "best_fill_ratio", 0.0)) if is_ppo else 0.0,
             "effective_tail_bias": float(self.agent.effective_tail_bias()) if (is_ppo and isinstance(self.agent, PPOAgent)) else 0.0,
             "eval_running": bool(self._eval_running),
-            "last_eval_result": dict(self.last_eval_result) if isinstance(self.last_eval_result, dict) else None,
+            "last_eval_result": (
+                dict(self.last_eval_result)
+                if (
+                    isinstance(self.last_eval_result, dict)
+                    and self.last_eval_result.get("agent_kind") == self._active_eval_kind()
+                    and int(self.last_eval_result.get("board_size", 0)) == int(self.game.board_size)
+                )
+                else None
+            ),
             "loss": float(getattr(self.agent, "last_loss", 0.0)) if (is_dqn or is_ppo) else 0.0,
             "updates": int(getattr(self.agent, "total_updates", 0)) if (is_dqn or is_ppo) else 0,
             "steps": self.game.step_count,
@@ -2274,23 +2210,8 @@ class SnakeWebBackend:
                 "terminal_reasons": list(TERMINAL_REASONS),
             }
             if include_details:
-                step_review_source = "current"
-                step_review_payload: list[dict[str, Any]] = list(self.step_review_entries)
-                if (
-                    self.training
-                    and self.running
-                    and not step_review_payload
-                    and self.last_outcome_reason in TERMINAL_REASONS
-                    and self.last_completed_step_review_entries
-                ):
-                    step_review_source = "last_death"
-                    step_review_payload = list(self.last_completed_step_review_entries)
-                step_review_payload = step_review_payload[-100:]
                 payload.update({
                     "reward_rules": self._reward_rules_payload(),
-                    "step_review": step_review_payload,
-                    "step_review_source": step_review_source,
-                    "step_review_history": list(self.step_review_history),
                     "observation": self.last_state.tolist(),
                     "global_signals": {
                         "labels": self._current_signal_labels(),
@@ -2309,9 +2230,26 @@ class SnakeWebBackend:
             if acquired:
                 self.lock.release()
 
-    def _run_greedy_eval_sync(self, episodes: int | None = None) -> dict[str, Any]:
+    def _active_eval_kind(self) -> str:
+        return "smart" if self.mode == "smart" else str(self.agent_kind)
+
+    def _cancel_greedy_eval(self, *, clear_result: bool = True) -> None:
+        self._eval_generation += 1
+        self._eval_cancel_event.set()
+        self._eval_running = False
+        if clear_result:
+            self.last_eval_result = None
+
+    def _run_greedy_eval_sync(
+        self,
+        episodes: int | None = None,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any] | None:
         """Выполняет честную жадную оценку (pure policy, bias=0.0 для PPO) без влияния на обучение."""
         with self.lock:
+            if cancel_event is not None and cancel_event.is_set():
+                return None
             board_size = int(self.game.board_size)
             agent_kind = str(self.agent_kind)
             mode = str(self.mode)
@@ -2319,6 +2257,8 @@ class SnakeWebBackend:
             target_episodes = max(1, min(50, target_episodes))
             eval_agent: Any = None
             if mode == "smart":
+                if not self.smart_agent.loaded:
+                    return None
                 eval_kind = "smart"
                 eval_agent = self.smart_agent
             elif agent_kind == "ppo" and isinstance(self.agent, PPOAgent):
@@ -2356,13 +2296,13 @@ class SnakeWebBackend:
         completed_eps = 0
 
         for _ in range(target_episodes):
-            if self.stop_event.is_set():
-                break
+            if self.stop_event.is_set() or (cancel_event is not None and cancel_event.is_set()):
+                return None
             env = SnakeEnv(board_size=board_size)
             env.reset(return_obs=False)
             while not env.done and env.step_count < max_steps_cap:
-                if self.stop_event.is_set():
-                    break
+                if self.stop_event.is_set() or (cancel_event is not None and cancel_event.is_set()):
+                    return None
                 if eval_kind == "ppo":
                     sig = env.get_ppo_signals()
                     ego = env.get_egocentric_map(eval_agent.map_size)
@@ -2373,8 +2313,8 @@ class SnakeWebBackend:
                     sig = env.get_observation_grid()
                     act, _, _, _ = eval_agent.select_best_action(sig)
                 env.step(relative_to_absolute(env.direction, act), return_obs=False)
-            if self.stop_event.is_set():
-                break
+            if self.stop_event.is_set() or (cancel_event is not None and cancel_event.is_set()):
+                return None
             completed_eps += 1
             scores.append(int(env.score))
             if env.last_reason == "victory":
@@ -2402,36 +2342,45 @@ class SnakeWebBackend:
     def _start_greedy_eval(self, episodes: int | None = None, *, sync: bool = False) -> bool:
         if self._eval_running:
             return False
+        if self.mode == "smart" and not self.smart_agent.loaded:
+            return False
+        self._eval_generation += 1
+        gen = self._eval_generation
+        cancel_event = threading.Event()
+        self._eval_cancel_event = cancel_event
         self._eval_running = True
         if sync:
             try:
-                res = self._run_greedy_eval_sync(episodes=episodes)
+                res = self._run_greedy_eval_sync(episodes=episodes, cancel_event=cancel_event)
                 with self.lock:
-                    self.last_eval_result = res
-                    self._eval_running = False
-                    self._update_frame_cache()
+                    if gen == self._eval_generation and not cancel_event.is_set():
+                        if res is not None:
+                            self.last_eval_result = res
+                        self._eval_running = False
+                        self._update_frame_cache()
             except Exception:
                 with self.lock:
-                    self._eval_running = False
-                    self._update_frame_cache()
+                    if gen == self._eval_generation:
+                        self._eval_running = False
+                        self._update_frame_cache()
             return True
 
         def _worker() -> None:
             try:
-                res = self._run_greedy_eval_sync(episodes=episodes)
+                res = self._run_greedy_eval_sync(episodes=episodes, cancel_event=cancel_event)
                 with self.lock:
-                    self.last_eval_result = res
+                    if gen == self._eval_generation and not cancel_event.is_set() and res is not None:
+                        self.last_eval_result = res
             finally:
                 with self.lock:
-                    self._eval_running = False
-                    self._update_frame_cache()
+                    if gen == self._eval_generation:
+                        self._eval_running = False
+                        self._update_frame_cache()
 
         threading.Thread(target=_worker, daemon=True, name="snake-greedy-eval").start()
         return True
 
     def _command_state_response(self, command: str) -> dict[str, Any] | None:
-        if command == "manual_action":
-            return None
         light_state_commands = {
             "toggle_running", "toggle_training", "set_agent_kind", "set_mode",
             "set_smart_model", "set_board_size", "cycle_board_size",
@@ -2472,13 +2421,15 @@ class SnakeWebBackend:
                     # Но устанавливаем флаг что модель недоступна
                     pass  # Продолжаем вместо возврата ошибки
                 
-                if value in {"manual", "ai", "smart"}:
+                if value in {"ai", "smart"}:
                     previous_mode = self.mode
                     switching_agent_mode = {previous_mode, str(value)} <= {"ai", "smart"} and previous_mode != str(value)
+                    if switching_agent_mode:
+                        self._cancel_greedy_eval(clear_result=True)
                     self.mode = str(value)
                     self.training = False
                     if value == "smart":
-                        self.running = False
+                        self.running = bool(self.smart_agent.loaded)
                         self.game = SnakeEnv(board_size=self.game.board_size)
                         if not self._load_active_aux_stats():
                             # У smart-режима может не быть собственного сохранённого слота статистики.
@@ -2535,9 +2486,6 @@ class SnakeWebBackend:
                 if isinstance(value, int):
                     self.speed = max(1, min(64, value))
                     self._save_active_context()
-            elif command == "manual_action":
-                if isinstance(value, int) and 0 <= value < 4:
-                    self.pending_manual_direction = value
             elif command == "set_device":
                 if not isinstance(value, str):
                     return {"ok": False, "error": "Invalid device value"}
@@ -2560,7 +2508,7 @@ class SnakeWebBackend:
                 self._start_greedy_eval(episodes=episodes_val, sync=sync_val)
             elif command == "reset_agent":
                 with self._pause_ppo_worker():
-                    self.last_eval_result = None
+                    self._cancel_greedy_eval(clear_result=True)
                     if self.mode == "smart":
                         store = load_aux_stats_store()
                         models = store.get("models", {})
@@ -2595,7 +2543,7 @@ class SnakeWebBackend:
                         self.episode_counter = 0
                         self.history.clear()
                         self.training = False
-                        self.mode = "manual"
+                        self.mode = "ai"
                         self.running = False
                         self._reset_environment_state()
                         self._save_state()

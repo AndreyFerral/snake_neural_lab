@@ -26,7 +26,7 @@ def _reject_nonfinite_json(constant: str) -> None:
 
 
 class TestWebBackendAndApi(unittest.TestCase):
-    def test_preload_switching_manual_json_and_smart_reset(self) -> None:
+    def test_preload_switching_ai_json_and_smart_reset(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             orig_paths = (
@@ -129,24 +129,44 @@ class TestWebBackendAndApi(unittest.TestCase):
                     self.assertTrue(res_eval["ok"])
                     eval_data = backend.last_eval_result
                     self.assertIsNotNone(eval_data)
+                    self.assertEqual(eval_data["agent_kind"], "ppo")
                     self.assertEqual(eval_data["episodes"], 3)
                     self.assertEqual(eval_data["board_size"], 10)
                     self.assertTrue(eval_data["pure_policy"])
                     self.assertEqual(backend.episode_counter, ep_before)
 
+                    # Agent-specific reward rules: PPO has +30 victory and hunger_critical
+                    ppo_rules = backend.state_snapshot(include_network=False, include_details=True)["reward_rules"]
+                    ppo_bonus_map = {b["id"]: b["value"] for b in ppo_rules["bonuses"]}
+                    ppo_pen_ids = {p["id"] for p in ppo_rules["penalties"]}
+                    self.assertEqual(ppo_bonus_map["victory"], "+30")
+                    self.assertIn("pocket_merge", ppo_bonus_map)
+                    self.assertIn("hunger_critical", ppo_pen_ids)
+
+                    # Switching agent cancels/clears PPO eval result so it never leaks to DQN
                     res = backend.handle_command({"type": "set_agent_kind", "value": "dqn"})
                     self.assertTrue(res["ok"])
+                    self.assertIsNone(backend.last_eval_result)
+                    self.assertFalse(backend._eval_running)
                     dqn_w = float(backend.agent.online_net.hidden1_layer.weight[0, 0].detach())
                     self.assertAlmostEqual(dqn_w, 0.1234, places=4)
                     dqn_snap = backend.state_snapshot(include_network=True, include_details=True)
                     self.assertEqual(dqn_snap["model_input_size"], len(GLOBAL_SIGNAL_LABELS))
+                    self.assertIsNone(dqn_snap["stats"]["last_eval_result"])
+                    dqn_bonus_map = {b["id"]: b["value"] for b in dqn_snap["reward_rules"]["bonuses"]}
+                    dqn_pen_ids = {p["id"] for p in dqn_snap["reward_rules"]["penalties"]}
+                    self.assertEqual(dqn_bonus_map["victory"], "+10")
+                    self.assertIn("pocket_merge", dqn_bonus_map)
+                    self.assertNotIn("hunger_critical", dqn_pen_ids)
 
-                    backend.handle_command({"type": "set_mode", "value": "manual"})
+                    # Legacy manual mode in active_context.json coerces cleanly to ai
+                    self.assertEqual(backend.mode, "ai")
+                    res_unknown = backend.handle_command({"type": "manual_action", "value": 1})
+                    self.assertFalse(res_unknown["ok"])
+                    backend.handle_command({"type": "set_mode", "value": "ai"})
                     with backend.lock:
-                        cur_dir = backend.game.direction
-                        backend.pending_manual_direction = (cur_dir - 1) % 4
                         backend._perform_step(training_mode=False)
-                        self.assertEqual(backend.last_action, 1)
+                        self.assertIn(backend.last_action, (0, 1, 2))
 
                     backend._save_state()
                     raw_json = (tmp / "snake_model_stats.json").read_text(encoding="utf-8")

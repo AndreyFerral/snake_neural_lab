@@ -24,12 +24,16 @@ from backend_config import (
     POCKET_SPLIT_START_IDX,
     PPO_CONV1_CHANNELS,
     PPO_CONV2_CHANNELS,
+    PPO_CRITICAL_HUNGER_PENALTY,
+    PPO_FOOD_STEP_AWAY_PENALTY,
+    PPO_FOOD_STEP_CLOSER_BONUS,
     PPO_HIDDEN_LAYER_1,
     PPO_HIDDEN_LAYER_2,
     PPO_MAP_CHANNELS,
     PPO_MAP_FEAT_SIZE,
     PPO_MAP_SIZE,
     PPO_SIGNAL_LABELS,
+    PPO_VICTORY_EXTRA_BONUS,
     TAIL_BLOCKED_START_IDX,
 )
 from dqn_agent import (
@@ -60,8 +64,6 @@ PPO_MINIBATCH_SIZE = 256
 PPO_POLISH_MINIBATCH_SIZE = 512
 PPO_MAX_GRAD_NORM = 0.5
 PPO_REWARD_SCALE = 0.1
-PPO_VICTORY_EXTRA_BONUS = 20.0
-PPO_CRITICAL_HUNGER_PENALTY = 0.05
 PPO_BEST_WINDOW = 30
 PPO_BEST_MIN_EPISODES = 20
 PPO_FAILURE_MIN_SCORE = 25
@@ -799,29 +801,63 @@ class PPOAgent:
         return self.last_loss
 
     @torch.inference_mode()
-    def snapshot(self, state: np.ndarray, ego_map: np.ndarray | None = None) -> dict[str, np.ndarray]:
-        self.online_net.eval()
-        sig_t = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
-        map_t = (
-            torch.as_tensor(ego_map, dtype=torch.float32, device=self.device).unsqueeze(0)
-            if ego_map is not None
-            else None
-        )
-        activations = self.online_net.forward_with_activations(sig_t, map_t)
-        masked_logits = self._masked_policy_logits(activations["output"].unsqueeze(0), sig_t)
-        probs = torch.softmax(masked_logits, dim=-1).squeeze(0)
-        self.last_value = float(activations["value"].item()) if activations["value"].numel() else 0.0
-        result = {
-            "input": activations["input"].detach().cpu().numpy().astype(np.float32),
-            "map_features": activations["map_features"].detach().cpu().numpy().astype(np.float32),
-            "hidden1": activations["hidden1"].detach().cpu().numpy().astype(np.float32),
-            "hidden2": activations["hidden2"].detach().cpu().numpy().astype(np.float32),
-            "output": probs.detach().cpu().numpy().astype(np.float32),
-            "value": activations["value"].detach().cpu().numpy().astype(np.float32),
-        }
-        if "critic_hidden2" in activations:
-            result["critic_hidden2"] = activations["critic_hidden2"].detach().cpu().numpy().astype(np.float32)
-        return result
+    def snapshot(
+        self,
+        state: np.ndarray,
+        ego_map: np.ndarray | None = None,
+        *,
+        use_inference_net: bool = False,
+    ) -> dict[str, np.ndarray]:
+        if use_inference_net:
+            with self._inference_lock, torch.no_grad():
+                net = self.inference_net
+                net.eval()
+                sig_t = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+                map_t = (
+                    torch.as_tensor(ego_map, dtype=torch.float32, device=self.device).unsqueeze(0)
+                    if ego_map is not None
+                    else None
+                )
+                activations = net.forward_with_activations(sig_t, map_t)
+                masked_logits = self._masked_policy_logits(activations["output"].unsqueeze(0), sig_t)
+                probs = torch.softmax(masked_logits, dim=-1).squeeze(0)
+                val_scalar = float(activations["value"].item()) if activations["value"].numel() else 0.0
+                self.last_value = val_scalar
+                result = {
+                    "input": activations["input"].detach().cpu().numpy().astype(np.float32),
+                    "map_features": activations["map_features"].detach().cpu().numpy().astype(np.float32),
+                    "hidden1": activations["hidden1"].detach().cpu().numpy().astype(np.float32),
+                    "hidden2": activations["hidden2"].detach().cpu().numpy().astype(np.float32),
+                    "output": probs.detach().cpu().numpy().astype(np.float32),
+                    "value": activations["value"].detach().cpu().numpy().astype(np.float32),
+                }
+                if "critic_hidden2" in activations:
+                    result["critic_hidden2"] = activations["critic_hidden2"].detach().cpu().numpy().astype(np.float32)
+                return result
+
+        with torch.no_grad():
+            self.online_net.eval()
+            sig_t = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+            map_t = (
+                torch.as_tensor(ego_map, dtype=torch.float32, device=self.device).unsqueeze(0)
+                if ego_map is not None
+                else None
+            )
+            activations = self.online_net.forward_with_activations(sig_t, map_t)
+            masked_logits = self._masked_policy_logits(activations["output"].unsqueeze(0), sig_t)
+            probs = torch.softmax(masked_logits, dim=-1).squeeze(0)
+            self.last_value = float(activations["value"].item()) if activations["value"].numel() else 0.0
+            result = {
+                "input": activations["input"].detach().cpu().numpy().astype(np.float32),
+                "map_features": activations["map_features"].detach().cpu().numpy().astype(np.float32),
+                "hidden1": activations["hidden1"].detach().cpu().numpy().astype(np.float32),
+                "hidden2": activations["hidden2"].detach().cpu().numpy().astype(np.float32),
+                "output": probs.detach().cpu().numpy().astype(np.float32),
+                "value": activations["value"].detach().cpu().numpy().astype(np.float32),
+            }
+            if "critic_hidden2" in activations:
+                result["critic_hidden2"] = activations["critic_hidden2"].detach().cpu().numpy().astype(np.float32)
+            return result
 
     def export_checkpoint(self) -> dict[str, object]:
         policy_cpu = {k: v.detach().to(device="cpu", dtype=torch.float32) for k, v in self.online_net.state_dict().items()}
@@ -953,7 +989,7 @@ class ParallelPPORunner:
 
         self.envs: list[Any] = [env_factory(self.board_size) for _ in range(self.num_envs)]
         self.episode_rewards: list[float] = [0.0 for _ in range(self.num_envs)]
-        self.step_logs: list[Deque[dict[str, Any]]] = [deque(maxlen=120) for _ in range(self.num_envs)]
+        self.recent_random_flags: list[Deque[bool]] = [deque(maxlen=12) for _ in range(self.num_envs)]
         self.replay_histories: list[list[dict[str, Any]]] = [[] for _ in range(self.num_envs)]
         self._state_snapshots: list[Deque[tuple[int, dict[str, object]]]] = [
             deque(maxlen=8) for _ in range(self.num_envs)
@@ -986,7 +1022,7 @@ class ParallelPPORunner:
             self.board_size = int(board_size)
         self.envs = [self.env_factory(self.board_size) for _ in range(self.num_envs)]
         self.episode_rewards = [0.0 for _ in range(self.num_envs)]
-        self.step_logs = [deque(maxlen=120) for _ in range(self.num_envs)]
+        self.recent_random_flags = [deque(maxlen=12) for _ in range(self.num_envs)]
         self.replay_histories = [[] for _ in range(self.num_envs)]
         self._state_snapshots = [deque(maxlen=8) for _ in range(self.num_envs)]
         self.is_replay_env = [False for _ in range(self.num_envs)]
@@ -1078,7 +1114,7 @@ class ParallelPPORunner:
     def _reset_env_slot(self, idx: int, *, active_replay_count: int | None = None) -> None:
         env = self.envs[idx]
         self.episode_rewards[idx] = 0.0
-        self.step_logs[idx].clear()
+        self.recent_random_flags[idx].clear()
         self.replay_histories[idx].clear()
         self._state_snapshots[idx].clear()
         self._active_replay_entry[idx] = None
@@ -1159,9 +1195,9 @@ class ParallelPPORunner:
             if not done and reason == "step" and food_reachable and not is_endgame:
                 new_food_dist = abs(env.snake[0][0] - env.food[0]) + abs(env.snake[0][1] - env.food[1])
                 if new_food_dist < old_food_dist:
-                    shaped_reward += 0.03
+                    shaped_reward += PPO_FOOD_STEP_CLOSER_BONUS
                 elif new_food_dist > old_food_dist:
-                    shaped_reward -= 0.04
+                    shaped_reward -= PPO_FOOD_STEP_AWAY_PENALTY
 
             all_penalties = [str(item) for item in info.get("penalty_reasons", [])] + extra_penalties
             step_rewards[idx] = float(shaped_reward)
@@ -1171,20 +1207,9 @@ class ParallelPPORunner:
             step_num = int(info.get("steps", env.step_count))
             if not is_replay:
                 if step_num == 1:
-                    self.step_logs[idx].clear()
+                    self.recent_random_flags[idx].clear()
                     self.replay_histories[idx].clear()
-                self.step_logs[idx].append({
-                    "step": step_num,
-                    "reward": float(shaped_reward),
-                    "train_reward": float(shaped_reward),
-                    "action": act,
-                    "action_label": self.action_labels[act] if 0 <= act < len(self.action_labels) else "-",
-                    "reason": reason,
-                    "penalties": list(all_penalties),
-                    "random": bool(was_random),
-                    "steps_without_food": int(env.steps_without_food),
-                    "max_steps_without_food": int(env.max_steps_without_food),
-                })
+                self.recent_random_flags[idx].append(bool(was_random))
                 if record_replays:
                     self.replay_histories[idx].append({
                         "step": int(env.step_count),
@@ -1229,7 +1254,7 @@ class ParallelPPORunner:
                         fill_ratio >= adaptive_min_fill
                         and (self.board_size != 10 or int(env.score) >= self.failure_min_score)
                     )
-                    had_recent_random = any(bool(e.get("random", False)) for e in list(self.step_logs[idx])[-12:])
+                    had_recent_random = any(self.recent_random_flags[idx])
                     allow_failure_record = (not had_recent_random) or len(self.failure_replay_buffer) < 12
                     if reason != "victory" and passes_min and allow_failure_record:
                         rewind_target = (
@@ -1261,7 +1286,6 @@ class ParallelPPORunner:
                         "reason": reason,
                         "reward": float(self.episode_rewards[idx]),
                         "penalty_reasons": list(all_penalties),
-                        "step_log": list(self.step_logs[idx]),
                         "replay_steps": list(self.replay_histories[idx]) if record_replays else [],
                         "loss": float(agent.last_loss),
                     }

@@ -74,101 +74,82 @@
           </div>
 
           <canvas id="gameCanvas" class="snake-canvas" width="720" height="720"></canvas>
-          <div class="legend">
-            <div class="step-review">
-              <div class="step-review-head">
-                <strong>Журнал</strong>
-                <div class="step-review-controls">
-                  <span id="stepReviewLabel" class="step-review-label">Нет шагов</span>
-                  <div class="step-review-tabs">
-                    <button id="stepReviewLive" class="step-review-tab is-active" data-step-log="live">Текущий</button>
-                    <button id="stepReviewPrevious" class="step-review-tab" data-step-log="previous" disabled>Прошлый</button>
-                  </div>
-                </div>
-              </div>
-              <div id="stepReviewBody" class="step-review-body">
-                <div class="muted">После первого шага здесь появятся награда и штрафы по ходу эпизода.</div>
-              </div>
-            </div>
-          </div>
         </section>
 
         <aside class="panel control-panel">
-          <div class="panel-head">
+          <div class="panel-head control-panel-head">
             <div>
               <p class="panel-kicker">Контроль</p>
               <h2>Режимы и обучение</h2>
             </div>
+            <span id="agentPillBadge" class="ctrl-agent-badge">DQN</span>
           </div>
 
-          <div class="button-grid">
-            <button id="runToggle" class="primary">Пауза</button>
-            <button id="manualMode">Ручное управление</button>
-            <button id="aiMode">ИИ играет</button>
-            <button id="trainToggle" class="accent">Обучение: выкл</button>
-            <button id="evalGreedy">Тест (20 игр)</button>
-            <button id="resetAgent" class="danger">Сбросить агента</button>
+          <div class="ctrl-mode-switch" role="group" aria-label="Режим работы">
+            <button id="aiMode" type="button">ИИ</button>
+            <button id="trainToggle" type="button">Обучение</button>
+          </div>
+
+          <div class="ctrl-action-row">
+            <button id="runToggle" type="button" class="primary">⏸ Пауза</button>
+            <button id="evalGreedy" type="button">Тест (20)</button>
+            <button id="resetAgent" type="button" class="danger">↺ Сброс</button>
           </div>
 
           <div id="evalResultBar" class="eval-result-bar" hidden></div>
 
-          <div class="status-callout">
-            <div class="decision-head">
-              <p class="status-label">Решение сети</p>
+          <div class="ctrl-card ctrl-kpi-card">
+            <div class="ctrl-kpi-row">
+              <div class="ctrl-kpi-cell">
+                <small>Счет</small>
+                <b id="scoreStat">0</b>
+              </div>
+              <div class="ctrl-kpi-cell">
+                <small>Лучший</small>
+                <b id="bestScoreStat" class="is-good">0</b>
+              </div>
+              <div class="ctrl-kpi-cell">
+                <small>Средний</small>
+                <b id="avgScoreStat">0.0</b>
+              </div>
+            </div>
+            <div id="epsilonStat" class="ctrl-hunger-row"></div>
+          </div>
+
+          <div class="ctrl-agent-meta">
+            <span class="ctrl-agent-meta-item"><small>Эпизод</small><b id="epochStat">0</b></span>
+            <span class="ctrl-agent-meta-item"><small id="updatesLabel">Updates</small><b id="leaderStat">0</b></span>
+            <span class="ctrl-agent-meta-item"><small id="auxMetricLabel">Epsilon</small><b id="auxMetricStat">0.000</b></span>
+          </div>
+
+          <div class="ctrl-card ctrl-decision-card">
+            <div class="ctrl-card-head">
+              <span class="ctrl-card-title">Решение сети</span>
               <span id="decisionMeta" class="decision-meta"></span>
             </div>
             <div id="decisionText" class="decision-body">Подключение к Python backend...</div>
           </div>
 
-          <div class="stats-grid game-stats-grid">
-            <article class="stat-card stat-wide">
-              <div class="stat-combo">
-                <div><small>Счет</small><b id="scoreStat">0</b></div>
-                <div><small>Лучший</small><b id="bestScoreStat">0</b></div>
-                <div><small>Средний</small><b id="avgScoreStat">0.0</b></div>
+          <div id="decisionStatsTable" class="ctrl-card ctrl-outcomes-card"></div>
+
+          <div class="ctrl-card ctrl-rewards-card">
+            <div id="rewardRulesBody" class="ctrl-rewards-body">
+              <div class="ctrl-reward-group">
+                <span class="ctrl-reward-title">Бонусы</span>
+                <div class="reward-list">
+                  <span class="is-good">Яблоко <code>+4.0</code></span>
+                  <span class="is-good">Победа <code>+10.0</code></span>
+                </div>
               </div>
-            </article>
-            <article class="stat-card"><span>Режим</span><strong id="modeStat">Игрок</strong></article>
-            <article class="stat-card"><span>Голод</span><strong id="epsilonStat">0/0</strong></article>
-            <article class="stat-card stat-wide">
-              <div class="stat-combo">
-                <div><small>Эпизод</small><b id="epochStat">0</b></div>
-                <div><small id="updatesLabel">Updates</small><b id="leaderStat">0</b></div>
-                <div><small id="auxMetricLabel">Epsilon</small><b id="auxMetricStat">0.000</b></div>
+              <div class="ctrl-reward-group">
+                <span class="ctrl-reward-title">Штрафы</span>
+                <div class="reward-list">
+                  <span class="is-bad">Смерть <code>-35</code></span>
+                  <span class="is-bad">Цикл <code>до -0.35</code></span>
+                </div>
               </div>
-            </article>
+            </div>
           </div>
-
-          <div id="decisionStatsTable" class="decision-stats"></div>
-
-			<table class="chart-note-table reward-table reward-table-horizontal">
-			  <thead>
-			  </thead>
-			  <tbody id="rewardRulesBody">
-				<tr>
-				  <th>Бонусы</th>
-				</tr>
-				<tr>
-				  <td colspan="3">
-					<div class="reward-list">
-					  <span>Яблоко <code>+4.0</code></span>
-					  <span>Победа <code>+10.0</code></span>
-					</div>
-				  </td>
-				</tr>
-				<tr>
-				  <th>Штрафы</th>
-				</tr>
-				<tr>
-				  <td colspan="3">
-					<div class="reward-list">
-					  <span>Смерть <code>-35</code></span>
-					  <span>Цикл <code>до -0.35</code></span>
-					</div>
-				  </td>
-				</tr>
-			  </tbody>
-			</table>
         </aside>
 
         <section id="networkPanel" class="panel network-panel" hidden>

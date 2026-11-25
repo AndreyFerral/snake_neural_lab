@@ -16,7 +16,6 @@ class SnakeLabApp {
     this.boardSizeSelect = document.getElementById("boardSize");
     this.speedRange = document.getElementById("speedRange");
     this.runToggle = document.getElementById("runToggle");
-    this.manualModeButton = document.getElementById("manualMode");
     this.aiModeButton = document.getElementById("aiMode");
     this.trainToggle = document.getElementById("trainToggle");
     this.evalGreedyButton = document.getElementById("evalGreedy");
@@ -34,6 +33,7 @@ class SnakeLabApp {
     this.inputGridBadge = document.getElementById("inputGridBadge");
     this.networkSourceBadge = document.getElementById("networkSourceBadge");
 
+    this.agentPillBadge = document.getElementById("agentPillBadge");
     this.modeStat = document.getElementById("modeStat");
     this.epochStat = document.getElementById("epochStat");
     this.scoreStat = document.getElementById("scoreStat");
@@ -50,10 +50,6 @@ class SnakeLabApp {
     this.chartMetricDescription = document.getElementById("chartMetricDescription");
     this.rewardRulesBody = document.getElementById("rewardRulesBody");
 
-    this.stepReviewLiveButton = document.getElementById("stepReviewLive");
-    this.stepReviewPreviousButton = document.getElementById("stepReviewPrevious");
-    this.stepReviewLabel = document.getElementById("stepReviewLabel");
-    this.stepReviewBody = document.getElementById("stepReviewBody");
     this.decisionText = document.getElementById("decisionText");
     this.decisionStatsTable = document.getElementById("decisionStatsTable");
     this.deathSnapshotMeta = document.getElementById("deathSnapshotMeta");
@@ -92,9 +88,6 @@ class SnakeLabApp {
     this.lastPanelRenderAt = -Infinity;
     this.lastSnapshotRenderAt = -Infinity;
     this.lastRenderedSnapshotKey = "";
-    this.lastStepReviewSignature = "";
-    this.lastStepReviewReason = "";
-    this.lastStepReviewHistoryId = "";
     this.lastGameRenderSignature = "";
     this.lastNetworkRenderSignature = "";
     this.networkHoverState = null;
@@ -104,8 +97,6 @@ class SnakeLabApp {
     this.lastGameRenderTime = 0;
     this.lastRewardRulesMarkup = "";
     this.lastDecisionStatsMarkup = "";
-    this.forceStepLogScroll = false;
-    this.selectedStepLogKey = "live";
     this.agentModeFocused = false;
     this.smartModelFocused = false;
     this.smartContextActive = false;
@@ -118,6 +109,8 @@ class SnakeLabApp {
     this.pendingHeavyTasks = [];
     this.pendingHeavyTaskNames = new Set();
     this.pendingControlSync = false;
+    this.resetConfirmArmed = false;
+    this.resetConfirmTimer = null;
 
     // Внедрение офскрин-рендеринга для кэширования сетки и градиента
     this.gameBgCanvas = document.createElement("canvas");
@@ -420,7 +413,7 @@ class SnakeLabApp {
   }
 
   shouldUseNetworkVisuals() {
-    return Boolean(this.showNetwork && !this.state?.training && !document.hidden);
+    return Boolean(this.showNetwork && !document.hidden);
   }
 
   resizeCanvas(canvas, ctx) {
@@ -472,13 +465,7 @@ class SnakeLabApp {
     this.smartModelSelect?.addEventListener("pointerdown", () => { this.smartModelFocused = true; });
     this.boardSizeSelect?.addEventListener("change", () => { this.sendCommand("set_board_size", Number(this.boardSizeSelect.value)); });
     this.speedRange?.addEventListener("input", () => { const speed = Number(this.speedRange.value); window.clearTimeout(this.speedDebounce); this.speedDebounce = window.setTimeout(() => this.sendCommand("set_speed", speed), 40); });
-    this.stepReviewLiveButton?.addEventListener("click", () => { this.selectedStepLogKey = "live"; this.lastStepReviewSignature = ""; this.renderStepReview({ force: true }); });
-    this.stepReviewPreviousButton?.addEventListener("click", () => {
-      if (this.stepReviewPreviousButton.disabled) return;
-      this.selectedStepLogKey = "previous"; this.lastStepReviewSignature = ""; this.renderStepReview({ force: true });
-    });
     this.runToggle?.addEventListener("click", () => this.sendCommand("toggle_running"));
-    this.manualModeButton?.addEventListener("click", () => { if (this.state?.mode === "smart") this.smartContextActive = true; this.sendCommand("set_mode", "manual"); });
     this.aiModeButton?.addEventListener("click", () => { this.sendCommand("set_mode", this.smartContextActive ? "smart" : "ai"); });
     
     this.trainToggle?.addEventListener("click", () => { 
@@ -491,7 +478,27 @@ class SnakeLabApp {
       this.sendCommand("eval_greedy");
     });
 
-    this.resetAgentButton?.addEventListener("click", () => { if (this.resetAgentButton.disabled) return; this.sendCommand("reset_agent"); });
+    this.resetAgentButton?.addEventListener("click", () => {
+      if (this.resetAgentButton.disabled) return;
+      if (!this.resetConfirmArmed) {
+        this.resetConfirmArmed = true;
+        this.setText(this.resetAgentButton, "Точно?");
+        this.toggleClass(this.resetAgentButton, "is-confirm", true);
+        if (this.resetConfirmTimer) window.clearTimeout(this.resetConfirmTimer);
+        this.resetConfirmTimer = window.setTimeout(() => {
+          this.resetConfirmArmed = false;
+          this.resetConfirmTimer = null;
+          this.setText(this.resetAgentButton, "↺ Сброс");
+          this.toggleClass(this.resetAgentButton, "is-confirm", false);
+        }, 2600);
+        return;
+      }
+      if (this.resetConfirmTimer) { window.clearTimeout(this.resetConfirmTimer); this.resetConfirmTimer = null; }
+      this.resetConfirmArmed = false;
+      this.setText(this.resetAgentButton, "↺ Сброс");
+      this.toggleClass(this.resetAgentButton, "is-confirm", false);
+      this.sendCommand("reset_agent");
+    });
     this.restartBackendButton?.addEventListener("click", () => this.restartBackend());
     this.shutdownBackendButton?.addEventListener("click", () => this.shutdownBackend());
     this.recordReplaysCheckbox?.addEventListener("change", () => {
@@ -586,12 +593,11 @@ class SnakeLabApp {
         this.pendingControlSync = true;
         this.stateDetailsFresh = false;
         if (forcePanelRefresh) this.forceNextVisualRefresh();
-        if (type === "toggle_running" && this.state.running) this.forceStepLogScroll = true;
         this.safeRenderAll();
         if (forcePanelRefresh) window.setTimeout(() => this.refreshState({ forceDetails: true, forceNetwork: this.shouldUseNetworkVisuals() }), 80);
         else if (type === "set_smart_model") window.setTimeout(() => this.refreshState({ forceDetails: true }), 60);
         else if (type === "set_mode" && value === "smart") window.setTimeout(() => this.refreshState({ forceDetails: true }), 60);
-      } else if (type !== "manual_action") {
+      } else {
         await this.refreshState({ forceDetails: forcePanelRefresh });
       }
     } catch (error) {
@@ -605,7 +611,7 @@ class SnakeLabApp {
 
   forceNextVisualRefresh() {
     this.lastPanelRenderAt = -Infinity; this.lastSnapshotRenderAt = -Infinity; this.lastChartRenderAt = -Infinity; this.lastNetworkRenderAt = -Infinity;
-    this.lastNetworkPayloadAt = 0; this.lastDetailPayloadAt = 0; this.lastRenderedSnapshotKey = ""; this.lastDeathTimelineMarkup = ""; this.lastStepReviewSignature = "";
+    this.lastNetworkPayloadAt = 0; this.lastDetailPayloadAt = 0; this.lastRenderedSnapshotKey = ""; this.lastDeathTimelineMarkup = "";
     this.lastGameRenderSignature = ""; this.lastSettledGameSignature = ""; this.lastNetworkRenderSignature = ""; this.lastChartRenderSignature = ""; this.lastSnapshotRenderSignature = "";
     this.lastGameRenderTime = 0; this.lastRewardRulesMarkup = ""; this.lastDecisionStatsMarkup = ""; this.lastSmartModelMarkup = "";
     this.pendingHeavyTasks = []; this.pendingHeavyTaskNames.clear();
@@ -719,8 +725,6 @@ class SnakeLabApp {
   }
 
   handleKeydown(event) {
-    const key = event.key.toLowerCase();
-    if (key in KEY_DIRECTIONS) { event.preventDefault(); this.sendCommand("manual_action", KEY_DIRECTIONS[key]); return; }
     if (event.code === "Space") { event.preventDefault(); this.sendCommand("toggle_running"); }
   }
 
@@ -786,7 +790,7 @@ class SnakeLabApp {
       const shouldRenderNetworkVisuals = this.shouldUseNetworkVisuals();
       
       // Троттлинг отрисовки сети при запущенной симуляции
-      const networkInterval = isRunning ? 400 : NETWORK_RENDER_MS;
+      const networkInterval = isRunning ? (this.state?.training ? 900 : 400) : NETWORK_RENDER_MS;
       const shouldRenderNetwork = now - this.lastNetworkRenderAt >= networkInterval;
       
       // Троттлинг графиков при запущенной симуляции
@@ -846,19 +850,32 @@ class SnakeLabApp {
     const isEvalRunning = Boolean(this.state.stats?.eval_running);
     const boardSize = Number(this.state.game?.size ?? 10);
     const evalEps = boardSize <= 20 ? 20 : 10;
-    this.setText(this.runToggle, this.state.running ? "Пауза" : "Старт");
-    this.setText(this.trainToggle, this.state.training ? "Обучение: вкл" : "Обучение: выкл");
-    if (this.trainToggle) { this.trainToggle.disabled = isSmartMode; this.trainToggle.title = isSmartMode ? "Zmey-smart не обучается в этом режиме" : ""; }
+    const agentBadgeLabel = isSmartMode ? "Zmey-smart" : this.state.agent_kind === "ppo" ? "PPO (Map)" : "DQN";
+    this.setText(this.agentPillBadge, agentBadgeLabel);
+    this.setText(this.runToggle, this.state.running ? "⏸ Пауза" : "▶ Старт");
+    this.toggleClass(this.runToggle, "primary", Boolean(this.state.running));
+    this.toggleClass(this.runToggle, "is-paused", !this.state.running);
+    this.setText(this.trainToggle, "Обучение");
+    if (this.trainToggle) { this.trainToggle.disabled = isSmartMode; this.trainToggle.title = isSmartMode ? "Zmey-smart не обучается в этом режиме" : (this.state.training ? "Выключить обучение" : "Включить обучение"); }
     if (this.evalGreedyButton) {
-      this.evalGreedyButton.disabled = isEvalRunning;
-      this.setText(this.evalGreedyButton, isEvalRunning ? "Тест идет..." : `Тест (${evalEps} игр)`);
-      this.evalGreedyButton.title = "Честная greedy-оценка текущей сети без влияния на обучение";
+      const smartUnavailable = isSmartMode && !this.state.smart_model?.loaded;
+      this.evalGreedyButton.disabled = isEvalRunning || smartUnavailable;
+      this.setText(this.evalGreedyButton, isEvalRunning ? "⏳ Тест..." : `Тест (${evalEps})`);
+      this.evalGreedyButton.title = smartUnavailable
+        ? `Модель Zmey-smart не загружена: ${this.state.smart_model?.error ?? "нет .h5"}`
+        : "Честная greedy-оценка текущей сети без влияния на обучение";
     }
     this.renderEvalResultBar();
-    if (this.resetAgentButton) { this.resetAgentButton.disabled = false; this.resetAgentButton.title = isSmartMode ? "Сброс очистит JSON-статистику Zmey-smart" : ""; }
-    this.toggleClass(this.manualModeButton, "is-active", this.state.mode === "manual" && !this.state.training);
+    if (this.resetAgentButton) {
+      this.resetAgentButton.disabled = false;
+      this.resetAgentButton.title = isSmartMode ? "Сброс очистит JSON-статистику Zmey-smart (нажмите дважды)" : "Сбросить агента (нажмите дважды для подтверждения)";
+      if (!this.resetConfirmArmed) {
+        this.setText(this.resetAgentButton, "↺ Сброс");
+        this.toggleClass(this.resetAgentButton, "is-confirm", false);
+      }
+    }
     this.toggleClass(this.aiModeButton, "is-active", ["ai", "smart"].includes(this.state.mode) && !this.state.training);
-    this.toggleClass(this.trainToggle, "is-active", this.state.training);
+    this.toggleClass(this.trainToggle, "is-active", Boolean(this.state.training));
     this.updateVisualizationVisibility();
   }
 
@@ -871,7 +888,14 @@ class SnakeLabApp {
       this.setHtml(this.evalResultBar, "Выполняется честный greedy-тест...");
       return;
     }
-    if (!res || typeof res !== "object") {
+    const activeKind = this.state?.mode === "smart" ? "smart" : String(this.state?.agent_kind ?? "");
+    const activeBoard = Number(this.state?.game?.size ?? 10);
+    if (
+      !res
+      || typeof res !== "object"
+      || (res.agent_kind && res.agent_kind !== activeKind)
+      || (res.board_size && Number(res.board_size) !== activeBoard)
+    ) {
       this.setHidden(this.evalResultBar, true);
       return;
     }
@@ -942,7 +966,13 @@ class SnakeLabApp {
     const mode = this.state?.mode;
     const agentKind = this.state?.agent_kind;
     if (mode === "smart") {
-      this.setHtml(this.decisionMeta, this.state?.smart_model?.loaded ? "<strong>Zmey-smart</strong>" : "нет .h5");
+      const smartLoaded = Boolean(this.state?.smart_model?.loaded);
+      this.setHtml(this.decisionMeta, smartLoaded ? "<strong>Zmey-smart</strong>" : "не загружена");
+      if (!smartLoaded) {
+        const err = this.state?.smart_model?.error || "файл .h5 не загружен";
+        this.setText(this.decisionText, `Zmey-smart недоступен: ${err}`);
+        return;
+      }
     } else if (agentKind === "ppo") {
       const valueEst = Number(this.state?.stats?.value_estimate ?? 0);
       this.setHtml(this.decisionMeta, `V(s) <strong>${valueEst >= 0 ? "+" : ""}${valueEst.toFixed(2)}</strong>`);
@@ -972,26 +1002,6 @@ class SnakeLabApp {
       return "Backend перезапускается. Состояние сохранено.";
     }
     return this.formatOrderedQValues() || "-";
-  }
-
-  penaltyCatalogById() {
-    const frameId = this.state?.frame_id ?? "";
-    if (this._penaltyCatalogCacheFrameId === frameId && this._penaltyCatalogCacheMap) return this._penaltyCatalogCacheMap;
-    const rules = this.state?.reward_rules ?? {};
-    const penalties = Array.isArray(rules.penalties) ? rules.penalties : [];
-    this._penaltyCatalogCacheMap = new Map(penalties.map((item) => [String(item.id ?? ""), item]));
-    this._penaltyCatalogCacheFrameId = frameId;
-    return this._penaltyCatalogCacheMap;
-  }
-
-  penaltyShortLabel(reason) {
-    const item = this.penaltyCatalogById().get(String(reason));
-    return String(item?.short_label ?? item?.label ?? formatReason(reason));
-  }
-
-  penaltyEffectTag(reason) {
-    const item = this.penaltyCatalogById().get(String(reason));
-    return String(item?.short_label ?? item?.label ?? formatReason(reason)).toLowerCase();
   }
 
   getDeathSteps(snapshot) {
@@ -1095,6 +1105,14 @@ class SnakeLabApp {
 
   formatStatPercent(count, total) { if (!total) return "0%"; return `${((count / total) * 100).toFixed(0)}%`; }
 
+  outcomeVisualMeta(key) {
+    if (key === "victory") return { label: "Победа", color: "#5cd6ad" };
+    if (key === "body_collision") return { label: "Тело", color: "#ff6b6b" };
+    if (key === "wall_collision") return { label: "Стена", color: "#ff9b71" };
+    if (key === "starvation") return { label: "Голод", color: "#ffb347" };
+    return { label: formatReason(key), color: "#9eb6c0" };
+  }
+
   renderDecisionStats() {
     if (!this.decisionStatsTable) return;
     const stats = this.state.decision_stats ?? {};
@@ -1104,21 +1122,36 @@ class SnakeLabApp {
     const recentCounts = {};
     recentList.forEach((item) => { recentCounts[item] = (recentCounts[item] ?? 0) + 1; });
     const terminalReasonsOrdered = Array.from(TERMINAL_REASONS);
-    const outcomeOrder = ["victory", ...terminalReasonsOrdered.filter((reason) => reason !== "victory")];
-    const keys = [...Object.keys(allCounts)].filter((key) => Number(allCounts[key] ?? 0) > 0).sort((a, b) => { const left = outcomeOrder.includes(a) ? outcomeOrder.indexOf(a) : outcomeOrder.length; const right = outcomeOrder.includes(b) ? outcomeOrder.indexOf(b) : outcomeOrder.length; return left - right || a.localeCompare(b); });
+    const outcomeOrder = ["victory", "body_collision", "wall_collision", "starvation", ...terminalReasonsOrdered.filter((r) => !["victory", "body_collision", "wall_collision", "starvation"].includes(r))];
+    const keys = [...Object.keys(allCounts)].filter((key) => Number(allCounts[key] ?? 0) > 0).sort((a, b) => {
+      const left = outcomeOrder.includes(a) ? outcomeOrder.indexOf(a) : outcomeOrder.length;
+      const right = outcomeOrder.includes(b) ? outcomeOrder.indexOf(b) : outcomeOrder.length;
+      return left - right || a.localeCompare(b);
+    });
     const allTotal = Object.values(allCounts).reduce((sum, value) => sum + Number(value || 0), 0);
     const recentTotal = recentList.length;
+    const header = `<div class="ctrl-outcomes-head"><span>Итог</span><span>100 посл.</span><span>Все</span></div>`;
     if (!keys.length) {
-      const emptyMarkup = `<table><thead><tr><th>Итог</th><th>Все</th><th>100 посл.</th></tr></thead><tbody><tr><td colspan="3" class="muted">Еще нет данных о завершенных эпизодах.</td></tr></tbody></table>`;
+      const emptyMarkup = `${header}<div class="ctrl-outcomes-empty">Еще нет данных о завершенных эпизодах.</div>`;
       if (emptyMarkup !== this.lastDecisionStatsMarkup) { this.lastDecisionStatsMarkup = emptyMarkup; this.setHtml(this.decisionStatsTable, emptyMarkup); }
       return;
     }
     const rows = keys.map((key) => {
       const allCount = Number(allCounts[key] ?? 0);
       const recentCount = Number(recentCounts[key] ?? 0);
-      return ["<tr>", `<td>${formatReason(key)}</td>`, '<td><span class="stat-value">', `<span>${this.formatStatPercent(allCount, allTotal)}</span>`, `<span class="muted">(${allCount})</span>`, "</span></td>", '<td><span class="stat-value">', `<span>${this.formatStatPercent(recentCount, recentTotal)}</span>`, "</span></td>", "</tr>"].join("");
+      const recentPctNum = recentTotal ? Math.round((recentCount / recentTotal) * 100) : 0;
+      const allPctText = this.formatStatPercent(allCount, allTotal);
+      const meta = this.outcomeVisualMeta(key);
+      const fullLabel = formatReason(key);
+      return [
+        `<div class="ctrl-outcome-row" title="${escapeText(fullLabel)}: ${recentCount}/${recentTotal || 0} за 100 посл., ${allCount}/${allTotal} всего">`,
+        `<span class="ctrl-outcome-name"><span class="ctrl-outcome-dot" style="background:${meta.color}"></span>${escapeText(meta.label)}</span>`,
+        `<span class="ctrl-outcome-recent"><span class="ctrl-outcome-bar"><span style="width:${recentPctNum}%;background:${meta.color}"></span></span><strong>${recentPctNum}%</strong></span>`,
+        `<span class="ctrl-outcome-all">${allPctText} <small>(${allCount})</small></span>`,
+        `</div>`,
+      ].join("");
     });
-    const markup = `<table><thead><tr><th>Итог</th><th>Все</th><th>100 посл.</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
+    const markup = `${header}${rows.join("")}`;
     if (markup !== this.lastDecisionStatsMarkup) { this.lastDecisionStatsMarkup = markup; this.setHtml(this.decisionStatsTable, markup); }
   }
 
@@ -1199,25 +1232,33 @@ class SnakeLabApp {
     const rules = this.state?.reward_rules ?? {};
     const bonuses = Array.isArray(rules.bonuses) ? rules.bonuses : [];
     const penalties = Array.isArray(rules.penalties) ? rules.penalties : [];
-    const renderItems = (items) => items.map((item) => { const title = item.formula ? `title="${escapeText(item.formula)}"` : ""; return `<span${title}>${escapeText(item.label ?? "-")} <code>${escapeText(item.value ?? "")}</code></span>`; }).join("");
-    const sections = [["Бонусы", bonuses], ["Штрафы", penalties]].filter(([, items]) => items.length > 0);
-    const markup = sections.map(([title, items]) => `<tr><th>${title}</th></tr><tr><td><div class="reward-list">${renderItems(items)}</div></td></tr>`).join("");
+    const renderItems = (items, toneClass) => items.map((item) => {
+      const title = item.formula ? ` title="${escapeText(item.formula)}"` : "";
+      return `<span class="${toneClass}"${title}>${escapeText(item.label ?? "-")} <code>${escapeText(item.value ?? "")}</code></span>`;
+    }).join("");
+    const sections = [["Бонусы", bonuses, "is-good"], ["Штрафы", penalties, "is-bad"]].filter(([, items]) => items.length > 0);
+    const noteText = String(rules.note ?? "").trim();
+    const noteHtml = noteText ? `<div class="ctrl-reward-note">${escapeText(noteText)}</div>` : "";
+    const markup = sections.map(([title, items, toneClass]) => `<div class="ctrl-reward-group"><span class="ctrl-reward-title">${title}</span><div class="reward-list">${renderItems(items, toneClass)}</div></div>`).join("") + noteHtml;
     if (markup !== this.lastRewardRulesMarkup) { this.lastRewardRulesMarkup = markup; this.setHtml(this.rewardRulesBody, markup); }
   }
 
   renderHungerStat() {
-    if (this.epsilonStat?.previousElementSibling) this.epsilonStat.previousElementSibling.textContent = "";
+    if (!this.epsilonStat) return;
     const steps = Math.max(0, Number(this.state.stats?.hunger_steps ?? this.state.game?.steps_without_food ?? 0));
     const budget = Math.max(1, Number(this.state.stats?.hunger_budget ?? 1));
     const ratio = clamp(Number(this.state.stats?.hunger_ratio ?? steps / budget), 0, 1);
     const percentValue = Math.round(ratio * 100);
-    const className = ratio >= 0.9 ? "hunger-meter is-danger" : ratio >= 0.65 ? "hunger-meter is-warn" : "hunger-meter";
+    const className = ratio >= 0.9 ? "is-danger" : ratio >= 0.65 ? "is-warn" : "";
     const text = `${Math.round(steps)}/${Math.round(budget)}`;
-    this.setHtml(this.epsilonStat, `<span class="${className}" title="Шагов без яблока: ${Math.round(steps)} из ${Math.round(budget)}"><span class="hunger-meter__text"><span class="hunger-meter__label">Голод</span><span class="hunger-meter__value">${escapeText(text)}</span></span><span class="hunger-meter__track"><span class="hunger-meter__fill" style="--hunger-width: ${percentValue}%"></span></span></span>`);
+    this.setHtml(
+      this.epsilonStat,
+      `<span class="ctrl-hunger ${className}" title="Шагов без яблока: ${Math.round(steps)} из ${Math.round(budget)}"><span class="ctrl-hunger-label">Голод</span><span class="ctrl-hunger-track"><span class="ctrl-hunger-fill" style="--hunger-width: ${percentValue}%"></span></span><span class="ctrl-hunger-val">${escapeText(text)}</span></span>`
+    );
   }
 
   updateStats() {
-    const modeLabels = { manual: "Игрок", ai: "ИИ", smart: "Zmey-smart" };
+    const modeLabels = { ai: "ИИ", smart: "Zmey-smart" };
     const isSmart = this.state.mode === "smart";
     const isPpo = this.state.agent_kind === "ppo" && !isSmart;
     const isDqn = this.state.agent_kind === "dqn" && !isSmart;
@@ -1229,7 +1270,6 @@ class SnakeLabApp {
     this.setText(this.bestScoreStat, String(this.state.stats.best_score));
     this.setText(this.avgScoreStat, Number(this.state.stats.average_score_100 ?? 0).toFixed(1));
     if (this.avgScoreStat) { const averageWindow = Number(this.state.stats.average_score_window ?? 0); this.avgScoreStat.title = averageWindow ? `Средний счет по ${averageWindow} эпизодам` : ""; }
-    this.setText(this.epsilonStat?.previousElementSibling, "");
     this.renderHungerStat();
     if (isSmart) {
       this.setText(this.updatesLabel, "Статус");
@@ -1264,80 +1304,6 @@ class SnakeLabApp {
     this.renderDecisionSummary();
     this.renderDecisionStats();
     this.renderRewardRules();
-    this.renderStepReview({ force: false });
-  }
-
-  renderStepReview({ force = false } = {}) {
-    if (!this.stepReviewLabel || !this.stepReviewBody) return;
-    const history = Array.isArray(this.state?.step_review_history) ? this.state.step_review_history : [];
-    const previousLog = history[0] ?? null;
-    const previousId = String(previousLog?.id ?? "");
-    if (!previousLog && this.selectedStepLogKey === "previous") this.selectedStepLogKey = "live";
-    if (previousId !== this.lastStepReviewHistoryId) { this.lastStepReviewHistoryId = previousId; if (!previousLog && this.selectedStepLogKey === "previous") this.selectedStepLogKey = "live"; }
-    this.toggleClass(this.stepReviewLiveButton, "is-active", this.selectedStepLogKey === "live");
-    this.toggleClass(this.stepReviewPreviousButton, "is-active", this.selectedStepLogKey === "previous");
-    if (this.stepReviewPreviousButton) { this.stepReviewPreviousButton.disabled = !previousLog; this.stepReviewPreviousButton.title = previousLog ? `Эпизод ${previousLog.episode ?? "?"}, счет ${previousLog.score ?? 0}, ${formatReason(previousLog.reason)}` : "Прошлого лога пока нет"; }
-    const selectedHistory = this.selectedStepLogKey === "previous" ? previousLog : null;
-    const steps = selectedHistory ? Array.isArray(selectedHistory.entries) ? selectedHistory.entries : [] : Array.isArray(this.state?.step_review) ? this.state.step_review : [];
-    if (!steps.length) { this.setText(this.stepReviewLabel, "Нет шагов"); this.setHtml(this.stepReviewBody, '<div class="muted">После первого шага здесь появятся награда и штрафы по ходу эпизода.</div>'); this.lastStepReviewSignature = ""; this.lastStepReviewReason = ""; return; }
-    const visibleSteps = steps.slice(-100);
-    const lastStep = steps[steps.length - 1];
-    const stepReviewSource = selectedHistory ? "history" : this.state?.step_review_source ?? "current";
-    const isDeathLog = stepReviewSource === "last_death";
-    const sourceLabel = selectedHistory ? `• эп. ${selectedHistory.episode ?? "?"}` : isDeathLog ? `• ${this.state?.last_outcome_reason === "victory" ? "последняя победа" : "итог эпизода"}` : "";
-    const signature = [this.selectedStepLogKey, stepReviewSource, this.state?.last_outcome_reason ?? "", steps.length, lastStep.step, lastStep.reward, lastStep.train_reward, lastStep.reason, (lastStep.penalties ?? []).join(", ")].join(":");
-    const shouldUpdateDuringTraining = selectedHistory || !this.state?.training || !this.state?.running || stepReviewSource === "current" || isDeathLog || TERMINAL_REASONS.has(lastStep.reason);
-    if (!force && this.state?.training && !shouldUpdateDuringTraining && this.lastStepReviewSignature) { this.setText(this.stepReviewLabel, `${visibleSteps.length} строк • последний шаг ${lastStep.step} • обновление на паузе/смерти`); return; }
-    if (!force && signature === this.lastStepReviewSignature && lastStep.reason === this.lastStepReviewReason) return;
-    const stepReasonLabel = (reason) => { if (reason === "apple") return "яблоко"; if (reason === "victory") return "победа"; if (TERMINAL_REASONS.has(reason)) return formatReason(reason).toLowerCase(); return "  "; };
-    const forceScroll = this.forceStepLogScroll;
-    const nearBottom = this.stepReviewBody.scrollHeight - this.stepReviewBody.scrollTop - this.stepReviewBody.clientHeight < 24;
-    this.setText(this.stepReviewLabel, `${visibleSteps.length} строк • последний шаг ${steps[steps.length - 1].step}${sourceLabel}`);
-
-    this.setHtml(this.stepReviewBody, visibleSteps.map((entry) => {
-      const sourceLabel = entry.random ? "random" : "q";
-      const reward = Number(entry.reward ?? 0);
-      const rewardText = reward.toFixed(3);
-      const moveArrow = this.arrowForAction(Number(entry.action ?? 0));
-      const stepStr = `#${String(entry.step).padStart(4, "0")}`;
-
-      const penalties = Array.isArray(entry.penalties) ? entry.penalties : [];
-      const effectTags = penalties.map((reason) => this.penaltyEffectTag(reason)).filter(Boolean);
-      const reasonTag = stepReasonLabel(entry.reason);
-      const hasDetailedDeathTag = effectTags.some((tag) => String(tag).startsWith("смерть:"));
-      if (reasonTag && reasonTag.trim() && !effectTags.includes(reasonTag) && !(reasonTag === "смерть" && hasDetailedDeathTag)) {
-        effectTags.unshift(reasonTag);
-      }
-
-
-      const cleanEvents = effectTags
-        .map(t => escapeText(String(t).trim()))
-        .filter(t => t && t !== "-" && t !== "  ");
-
-      const headerParts = [stepStr, rewardText, moveArrow];
-      const extraParts = [...cleanEvents, sourceLabel];
-      const logText = headerParts.join(" ") + (extraParts.length ? " • " + extraParts.join(" • ") : "");
-
-      const isCollision = penalties.includes("wall_collision") || penalties.includes("body_collision") || entry.reason === "starvation";
-      const isTailLoss = penalties.includes("tail_loss");
-      const tookApple = entry.reason === "apple";
-
-      let rowClass = "step-log-line log-yellow";
-      if (isCollision || isTailLoss || reward < -1.0) {
-        rowClass = "step-log-line log-red";
-      } else if (tookApple || reward > 1.0) {
-        rowClass = "step-log-line log-green";
-      } else if (entry.random) {
-        rowClass = "step-log-line log-blue";
-      }
-
-      return `<div class="${rowClass}">${logText}</div>`;
-    }).join(""));
-
-    this.lastStepReviewSignature = signature;
-    this.lastStepReviewReason = lastStep.reason;
-    if (nearBottom || force || forceScroll) this.stepReviewBody.scrollTop = this.stepReviewBody.scrollHeight;
-    this.forceStepLogScroll = false;
   }
 
   // Оптимизированный 60 FPS рендеринг игры с субклеточной интерполяцией и кэшем фона

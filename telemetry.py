@@ -6,11 +6,18 @@ from typing import Any
 import numpy as np
 
 from backend_config import (
+    APPLE_REWARD,
     AVERAGE_SCORE_WINDOW_RATIO,
+    DEATH_PENALTY,
     DEATH_REASON_ORDER,
     DECISION_STATS_WINDOW,
+    ENDGAME_MERGE_BONUS,
     MODEL_ACTION_LABELS,
     PENALTY_CATALOG,
+    PPO_CRITICAL_HUNGER_PENALTY,
+    PPO_FOOD_STEP_AWAY_PENALTY,
+    PPO_FOOD_STEP_CLOSER_BONUS,
+    PPO_VICTORY_EXTRA_BONUS,
     REWARD_CATALOG,
     STEP_REASON_ORDER,
 )
@@ -207,29 +214,87 @@ def _format_rule_value(value: Any, prefix: str = "") -> str:
     return str(value)
 
 
-def build_reward_rules_payload() -> dict[str, Any]:
-    bonuses: list[dict[str, Any]] = []
-    for reward_id, item in REWARD_CATALOG.items():
+def build_reward_rules_payload(agent_kind: str = "dqn", mode: str = "ai") -> dict[str, Any]:
+    is_smart = str(mode) == "smart"
+    is_ppo = (not is_smart) and str(agent_kind) == "ppo"
+
+    base_victory = float(REWARD_CATALOG.get("victory", {}).get("value", 10.0))
+    bonuses: list[dict[str, Any]] = [
+        {
+            "id": "apple",
+            "label": "Яблоко",
+            "short_label": "Яблоко",
+            "value": _format_rule_value(APPLE_REWARD, prefix="+"),
+            "active": True,
+        },
+        {
+            "id": "victory",
+            "label": "Победа",
+            "short_label": "Победа",
+            "value": _format_rule_value(base_victory + (PPO_VICTORY_EXTRA_BONUS if is_ppo else 0.0), prefix="+"),
+            "formula": "+10 среда +20 PPO бонус (+4 посл. яблоко)" if is_ppo else "+10 среда (+4 посл. яблоко)",
+            "active": True,
+        },
+    ]
+    if not is_smart:
         bonuses.append({
-            "id": reward_id,
-            "label": item.get("label", reward_id),
-            "short_label": item.get("short_label", reward_id),
-            "value": _format_rule_value(item.get("value"), prefix="+"),
+            "id": "pocket_merge",
+            "label": "Слияние",
+            "short_label": "Слияние",
+            "value": _format_rule_value(ENDGAME_MERGE_BONUS, prefix="+"),
+            "formula": "Объединение изолированных карманов в эндшпиле",
             "active": True,
         })
+    if is_ppo:
+        bonuses.append({
+            "id": "food_closer",
+            "label": "К яблоку",
+            "short_label": "К яблоку",
+            "value": _format_rule_value(PPO_FOOD_STEP_CLOSER_BONUS, prefix="+"),
+            "formula": "Шаг к достижимому яблоку до эндшпиля",
+            "active": True,
+        })
+
     penalties: list[dict[str, Any]] = []
-    for penalty_id, item in PENALTY_CATALOG.items():
-        if item.get("show_in_ui", True) is False:
-            continue
+    if is_smart:
         penalties.append({
-            "id": penalty_id,
-            "label": item.get("label", penalty_id),
-            "short_label": item.get("short_label", penalty_id),
-            "value": _format_rule_value(item.get("value")),
+            "id": "death",
+            "label": "Смерть",
+            "short_label": "Смерть",
+            "value": _format_rule_value(-DEATH_PENALTY),
             "active": True,
         })
+    else:
+        for penalty_id, item in PENALTY_CATALOG.items():
+            if item.get("show_in_ui", True) is False:
+                continue
+            penalties.append({
+                "id": penalty_id,
+                "label": item.get("label", penalty_id),
+                "short_label": item.get("short_label", penalty_id),
+                "value": _format_rule_value(item.get("value")),
+                "active": True,
+            })
+        if is_ppo:
+            penalties.append({
+                "id": "hunger_critical",
+                "label": "Крит. голод",
+                "short_label": "Голод",
+                "value": _format_rule_value(-PPO_CRITICAL_HUNGER_PENALTY),
+                "formula": "Штраф за каждый шаг при голоде >= 85% лимита",
+                "active": True,
+            })
+            penalties.append({
+                "id": "food_away",
+                "label": "От яблока",
+                "short_label": "От яблока",
+                "value": _format_rule_value(-PPO_FOOD_STEP_AWAY_PENALTY),
+                "formula": "Шаг от достижимого яблока до эндшпиля",
+                "active": True,
+            })
+
     return {
         "bonuses": bonuses,
         "penalties": penalties,
-        "note": " ",
+        "note": "Только инференс .h5 — модель не обучается." if is_smart else "",
     }
