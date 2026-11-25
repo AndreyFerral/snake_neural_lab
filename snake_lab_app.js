@@ -37,6 +37,7 @@ class SnakeLabApp {
     this.scoreStat = document.getElementById("scoreStat");
     this.gameHeaderScore = document.getElementById("gameHeaderScore");
     this.gameHeaderStatus = document.getElementById("gameHeaderStatus");
+    this.gameHeaderStatusWrap = document.getElementById("gameHeaderStatusWrap");
     this.bestScoreStat = document.getElementById("bestScoreStat");
     this.avgScoreStat = document.getElementById("avgScoreStat");
     this.lossStat = document.getElementById("lossStat");
@@ -290,14 +291,14 @@ class SnakeLabApp {
   updateGameHeaderMeta() {
     if (!this.state) return;
     const score = Number(this.currGameSnapshot?.score ?? this.state?.game?.score ?? 0);
-    this.setText(this.gameHeaderScore, `Счет: ${score}`);
+    this.setText(this.gameHeaderScore, String(score));
     const isPpoTraining = Boolean(this.state.training && this.state.agent_kind === "ppo" && this.state.mode !== "smart");
     const ppoEnvs = Number(this.state.stats?.population ?? 0);
     if (isPpoTraining && ppoEnvs > 0) {
-      this.setText(this.gameHeaderStatus, `Обучение: ${ppoEnvs} сред в фоне`);
-      this.setHidden(this.gameHeaderStatus, false);
+      this.setText(this.gameHeaderStatus, `${ppoEnvs} сред в фоне`);
+      this.setHidden(this.gameHeaderStatusWrap, false);
     } else {
-      this.setHidden(this.gameHeaderStatus, true);
+      this.setHidden(this.gameHeaderStatusWrap, true);
     }
   }
 

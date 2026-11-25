@@ -42,13 +42,19 @@
       <main class="dashboard">
         <section class="panel game-panel">
           <div class="panel-head">
-            <div class="game-head-title">
-              <p class="panel-kicker">Поле</p>
-              <div class="game-title-row">
+            <div class="game-head-group">
+              <div class="game-head-title">
+                <p class="panel-kicker">Поле</p>
                 <h2>Игровая среда</h2>
-                <div class="game-live-meta">
-                  <span id="gameHeaderScore" class="game-score-pill">Счет: 0</span>
-                  <span id="gameHeaderStatus" class="game-bg-pill" hidden></span>
+              </div>
+              <div class="game-head-meta">
+                <div class="game-meta-item">
+                  <span class="panel-kicker">Счет</span>
+                  <strong id="gameHeaderScore" class="game-meta-value">0</strong>
+                </div>
+                <div id="gameHeaderStatusWrap" class="game-meta-item" hidden>
+                  <span class="panel-kicker">Обучение</span>
+                  <strong id="gameHeaderStatus" class="game-meta-value is-muted"></strong>
                 </div>
               </div>
             </div>
