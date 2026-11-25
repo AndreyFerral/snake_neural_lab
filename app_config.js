@@ -38,16 +38,6 @@ function formatReason(reason) {
   const runtimeMap = (typeof REASON_LABELS === "object" && REASON_LABELS) ? REASON_LABELS : null;
   return runtimeMap?.[reason] ?? reason ?? "Ожидание";
 }
-function formatAppleVerdictTag(verdict) {
-  const map = {
-    safe: "безопасно",
-    blocked: "блок",
-    no_tail_after_apple: "нет хвоста",
-    not_enough_space: "мало места",
-    none: "-",
-  };
-  return map[verdict] ?? formatReason(verdict);
-}
 function formatSignalLabel(label) {
   const runtimeMap = (typeof SIGNAL_LABELS === "object" && SIGNAL_LABELS) ? SIGNAL_LABELS : null;
   return runtimeMap?.[label] ?? label;
@@ -74,7 +64,6 @@ async function apiJson(path, options = {}) {
   return response.json();
 }
 
-const DEFAULT_INPUT_GRID = 25;
 const DEFAULT_OUTPUT_LABELS = ["Вперед", "Влево", "Вправо"];
 const OUTPUT_DISPLAY_ORDER = [0, 1, 2];
 const API_POLL_MS = 120;
@@ -94,7 +83,6 @@ const FORCE_PANEL_REFRESH_COMMANDS = new Set([
   "set_agent_kind",
   "set_mode",
   "set_smart_model",
-  "set_input_mode",
   "set_board_size",
   "cycle_board_size",
   "reset_agent",
@@ -126,16 +114,12 @@ const FRAME_PRESERVED_FIELDS = [
   "smart_model",
   "available_devices",
   "available_agent_kinds",
-  "available_input_modes",
-  "available_input_grids",
-  "local_map_channels",
   "output_labels",
   "network",
   ...DEFERRED_STATE_FIELDS,
 ];
 const NETWORK_CONNECTION_KEYS = ["global_hidden1", "hidden1_hidden2", "hidden2_output", "hidden2_value"];
-const DEFAULT_TERMINAL_REASONS = [];
-const TERMINAL_REASONS = new Set(DEFAULT_TERMINAL_REASONS);
+const TERMINAL_REASONS = new Set();
 let REASON_LABELS = Object.freeze({});
 let SIGNAL_LABELS = Object.freeze({});
 function applyRuntimeReasonConfig(state) {

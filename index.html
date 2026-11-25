@@ -33,7 +33,7 @@
         <div class="hero-badges">
           <span id="deviceBadge">CPU</span>
           <span id="boardSizeBadge">Карта 10x10</span>
-          <span id="inputGridBadge">Вход: 9 сигналов</span>
+          <span id="inputGridBadge">Вход: 27 сигналов</span>
           <span>Live-графики</span>
           <span id="networkSourceBadge">Нейросеть: Python backend</span>
         </div>
@@ -47,18 +47,11 @@
               <h2>Игровая среда</h2>
             </div>
             <div class="panel-actions compact">
-              <!-- Скрытый селект входа, чтобы не сломать JS, который ищет id="inputMode" -->
-              <label hidden>
-                Вход
-              <select id="inputMode">
-                <option value="signals" selected>Сигналы</option>
-              </select>
-              </label>
               <label class="agent-mode-control">
                 Агент
               <select id="agentMode">
-                <option value="evolution" selected>Evolution</option>
-                <option value="dqn">DQN</option>
+                <option value="dqn" selected>DQN</option>
+                <option value="ppo">PPO (Map)</option>
                 <option value="smart">Zmey-smart</option>
               </select>
               </label>
@@ -125,7 +118,7 @@
             <article class="stat-card"><span>Режим</span><strong id="modeStat">Игрок</strong></article>
             <article class="stat-card"><span>Эпизод</span><strong id="epochStat">0</strong></article>
             <article class="stat-card"><span>Шагов</span><strong id="stepStat">0</strong></article>
-            <article class="stat-card"><span>Fitness</span><strong id="lossStat">0.000</strong></article>
+            <article class="stat-card"><span>Epsilon</span><strong id="lossStat">0.000</strong></article>
             <article class="stat-card stat-wide">
               <div class="stat-combo">
                 <div><small>Счет</small><b id="scoreStat">0</b></div>
@@ -133,12 +126,12 @@
                 <div><small>Средний</small><b id="avgScoreStat">0.0</b></div>
               </div>
             </article>
-            <article class="stat-card"><span>Мутация</span><strong id="epsilonStat">0.000</strong></article>
+            <article class="stat-card"><span>Голод</span><strong id="epsilonStat">0/0</strong></article>
             <article class="stat-card stat-wide">
               <div class="stat-combo">
-                <div><small>Поколение</small><b id="bufferStat">1</b></div>
-                <div><small>Лидер</small><b id="leaderStat">-</b></div>
-                <div><small>Живых</small><b id="aliveStat">-</b></div>
+                <div><small>Replay</small><b id="bufferStat">0</b></div>
+                <div><small>Updates</small><b id="leaderStat">0</b></div>
+                <div><small>Статус</small><b id="aliveStat">idle</b></div>
               </div>
             </article>
           </div>
@@ -166,7 +159,7 @@
 				<tr>
 				  <td colspan="3">
 					<div class="reward-list">
-					  <span>Смерть <code>-5.0</code></span>
+					  <span>Смерть <code>-35</code></span>
 					  <span>Цикл <code>до -0.35</code></span>
 					</div>
 				  </td>
@@ -186,7 +179,7 @@
           <div class="network-layout">
             <article id="networkGraphCard" class="viz-card wide">
               <h3>Граф сети</h3>
-              <canvas id="networkCanvas" width="1060" height="560"></canvas>
+              <canvas id="networkCanvas" width="1120" height="590"></canvas>
             </article>
 
             <article class="viz-card">
@@ -203,8 +196,8 @@
                     <td>Суммарная награда за эпизод.</td>
                   </tr>
                   <tr>
-                    <th id="chartMetricLabel">Fitness</th>
-                    <td id="chartMetricDescription">Оценка особи для селекции: учитывает счет, выживание, награду, ловушки и причину завершения.</td>
+                    <th id="chartMetricLabel">Loss</th>
+                    <td id="chartMetricDescription">Ошибка сети при обновлении политики/Q-значений: чем ниже и ровнее, тем стабильнее обучение.</td>
                   </tr>
                 </tbody>
               </table>
@@ -225,6 +218,7 @@
 
 
     <script src="app_config.js"></script>
+    <script src="snake_renderers.js"></script>
     <script src="snake_lab_app.js"></script>
   </body>
 </html>

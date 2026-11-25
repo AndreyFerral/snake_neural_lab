@@ -111,14 +111,14 @@ class SnakeRequestHandler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/debug_log":
                 log_path = STATIC_ROOT / ".runtime" / "debug_log.jsonl"
                 if log_path.is_file():
-                    data = log_path.read_text(encoding="utf-8")
+                    encoded = log_path.read_text(encoding="utf-8").encode("utf-8")
                     self.send_response_only(HTTPStatus.OK)
                     self.send_header("Content-Type", "application/jsonl; charset=utf-8")
                     self.send_header("Content-Disposition", 'attachment; filename="debug_log.jsonl"')
-                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Content-Length", str(len(encoded)))
                     self.send_header("Cache-Control", "no-store")
                     self.end_headers()
-                    self.wfile.write(data.encode("utf-8"))
+                    self.wfile.write(encoded)
                 else:
                     self._send_json({"ok": False, "error": "Log file not found. Complete at least one episode."})
                 return
@@ -190,6 +190,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--force-cpu", action="store_true")
+    parser.add_argument("--allow-gpu", action="store_true")
     return parser.parse_args()
 
 
@@ -197,6 +198,8 @@ def backend_process_command(args: argparse.Namespace) -> list[str]:
     command = [sys.executable, str(Path(sys.argv[0]).resolve()), "--host", str(args.host), "--port", str(args.port)]
     if args.force_cpu:
         command.append("--force-cpu")
+    if getattr(args, "allow_gpu", False):
+        command.append("--allow-gpu")
     return command
 
 
@@ -269,6 +272,8 @@ def main(
             
     if restart_requested:
         time.sleep(0.25)
+        if os.environ.get("SNAKE_RESTART_IN_PARENT") == "1":
+            sys.exit(42)
         restart_backend_in_place(args)
     if close_console_requested:
         time.sleep(0.15)

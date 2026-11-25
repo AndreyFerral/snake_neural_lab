@@ -13,7 +13,7 @@ from __future__ import annotations
 
 STARTUP_BOARD_SIZE = 10
 BOARD_SIZES = (10, 15, 20, 25, 30, 35)
-AGENT_KINDS = ("evolution", "dqn")
+AGENT_KINDS = ("dqn", "ppo")
 MODEL_ACTION_LABELS = ("Вперед", "Влево", "Вправо")
 
 # Все относительные группы используют единый порядок действий:
@@ -37,15 +37,22 @@ GLOBAL_SIGNAL_LABELS = (
     "tail_blocked_forward",
     "tail_blocked_left",
     "tail_blocked_right",
-    "space_tight_forward",
-    "space_tight_left",
-    "space_tight_right",
     "tail_close_forward",
     "tail_close_left",
     "tail_close_right",
     "partition_forward",
     "partition_left",
     "partition_right",
+    "endgame",
+    "pocket_split_forward",
+    "pocket_split_left",
+    "pocket_split_right",
+    "hunger_high",
+    "hunger_critical",
+    "board_split",
+    "pocket_merge_forward",
+    "pocket_merge_left",
+    "pocket_merge_right",
 )
 DIRECTIONS = (
     (0, -1),
@@ -64,11 +71,14 @@ TAIL_LOSS_PENALTY = 12.0
 TAIL_CLOSE_PENALTY = 1.2
 PARTITION_PENALTY_LARGE = 0.5
 PARTITION_PENALTY_SMALL = 0.15
-EPISODE_TRANSITION_LIMIT = 2_000
+ENDGAME_SPLIT_PENALTY = 0.45
+ENDGAME_MERGE_BONUS = 0.25
 
 CPU_BATCH_SIZE = 64
 HIDDEN_LAYER_1 = 64
 HIDDEN_LAYER_2 = 32
+PPO_MAP_SIZE = 9
+PPO_MAP_CHANNELS = 4
 
 
 STEP_REASON_ORDER = (
@@ -101,6 +111,7 @@ PENALTY_CATALOG = {
     "tail_loss": {"label": "Потеря хвоста", "short_label": "Хвост", "value": -TAIL_LOSS_PENALTY},
     "tail_close": {"label": "Близко к хвосту", "short_label": "Близко", "value": f"до -{2 * TAIL_CLOSE_PENALTY:.2g}"},
     "partition": {"label": "Разрыв поля", "short_label": "Разрыв", "value": f"до -{PARTITION_PENALTY_LARGE:.2g}"},
+    "pocket_split": {"label": "Разрыв карманов", "short_label": "Карман", "value": -ENDGAME_SPLIT_PENALTY},
 }
 
 REWARD_CATALOG = {
@@ -125,6 +136,7 @@ REASON_LABELS = {
     "death": "Смерть",
     "tail_loss": "Потеря хвоста",
     "tail_close": "Близко к хвосту",
+    "pocket_split": "Разрыв карманов",
 }
 
 SIGNAL_LABELS = {
@@ -146,15 +158,22 @@ SIGNAL_LABELS = {
     "tail_blocked_forward": "⛔↑",
     "tail_blocked_left": "⛔←",
     "tail_blocked_right": "⛔→",
-    "space_tight_forward": "⚠️↑",
-    "space_tight_left": "⚠️←",
-    "space_tight_right": "⚠️→",
     "tail_close_forward": "🐍🤏↑",
     "tail_close_left": "🐍🤏←",
     "tail_close_right": "🐍🤏→",
     "partition_forward": "🧩↑",
     "partition_left": "🧩←",
     "partition_right": "🧩→",
+    "endgame": "🏁",
+    "pocket_split_forward": "🕳️↑",
+    "pocket_split_left": "🕳️←",
+    "pocket_split_right": "🕳️→",
+    "hunger_high": "⏳",
+    "hunger_critical": "🔥",
+    "board_split": "🧩!",
+    "pocket_merge_forward": "🔗↑",
+    "pocket_merge_left": "🔗←",
+    "pocket_merge_right": "🔗→",
 }
 
 TERMINAL_REASONS = (
@@ -179,10 +198,28 @@ def hunger_budget_for(score: int, board_size: int) -> float:
 
 # Динамические индексы признаков для исключения магических чисел в коде
 try:
+    APPLE_STEP_START_IDX = GLOBAL_SIGNAL_LABELS.index("apple_step_forward")
+    FOOD_REACHABLE_IDX = GLOBAL_SIGNAL_LABELS.index("food_reachable")
+    DANGER_START_IDX = GLOBAL_SIGNAL_LABELS.index("danger_forward")
     TAIL_BLOCKED_START_IDX = GLOBAL_SIGNAL_LABELS.index("tail_blocked_forward")
     TAIL_CLOSE_START_IDX = GLOBAL_SIGNAL_LABELS.index("tail_close_forward")
     PARTITION_START_IDX = GLOBAL_SIGNAL_LABELS.index("partition_forward")
+    ENDGAME_IDX = GLOBAL_SIGNAL_LABELS.index("endgame")
+    POCKET_SPLIT_START_IDX = GLOBAL_SIGNAL_LABELS.index("pocket_split_forward")
+    HUNGER_HIGH_IDX = GLOBAL_SIGNAL_LABELS.index("hunger_high")
+    HUNGER_CRITICAL_IDX = GLOBAL_SIGNAL_LABELS.index("hunger_critical")
+    BOARD_SPLIT_IDX = GLOBAL_SIGNAL_LABELS.index("board_split")
+    POCKET_MERGE_START_IDX = GLOBAL_SIGNAL_LABELS.index("pocket_merge_forward")
 except ValueError:
+    APPLE_STEP_START_IDX = 4
+    FOOD_REACHABLE_IDX = 7
+    DANGER_START_IDX = 8
     TAIL_BLOCKED_START_IDX = 15
-    TAIL_CLOSE_START_IDX = 21
-    PARTITION_START_IDX = 24
+    TAIL_CLOSE_START_IDX = 18
+    PARTITION_START_IDX = 21
+    ENDGAME_IDX = 24
+    POCKET_SPLIT_START_IDX = 25
+    HUNGER_HIGH_IDX = 28
+    HUNGER_CRITICAL_IDX = 29
+    BOARD_SPLIT_IDX = 30
+    POCKET_MERGE_START_IDX = 31

@@ -66,7 +66,7 @@ select { border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 10px; paddi
 canvas { display: block; width: 100%; border-radius: 0; background: transparent; border: none; }
 .snake-canvas { aspect-ratio: 1 / 1; margin: 0 auto; background: transparent; border: none; border-radius: 0; }
 #gameCanvas { width: min(100%, min(76vh, 720px)); height: auto; max-height: none; }
-#networkCanvas { height: 456px; max-width: 1020px; margin: 0 auto; }
+#networkCanvas { height: 590px; max-width: 1120px; margin: 0 auto; cursor: default; }
 #chartCanvas { height: 300px; max-width: 860px; margin: 0 auto; }
 .hint, .legend, .viz-note { margin: 14px 0 0; color: var(--muted); line-height: 1.5; }
 .button-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
@@ -264,6 +264,6 @@ button.danger { background: rgba(255, 107, 107, 0.13); border-color: rgba(255, 1
   .game-stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .network-layout { grid-template-columns: 1fr; max-width: 900px; }
   .panel-head { flex-direction: column; }
-  #networkCanvas { height: 388px; }
+  #networkCanvas { height: 490px; }
   #chartCanvas { height: 320px; }
 }

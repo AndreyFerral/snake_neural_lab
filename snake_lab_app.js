@@ -10,7 +10,6 @@ class SnakeLabApp {
     this.chartCtx = this.getCanvasContext(this.chartCanvas);
     this.deathSnapshotCtx = this.getCanvasContext(this.deathSnapshotCanvas);
 
-    this.inputModeSelect = document.getElementById("inputMode");
     this.agentModeSelect = document.getElementById("agentMode");
     this.smartModelControl = document.getElementById("smartModelControl");
     this.smartModelSelect = document.getElementById("smartModel");
@@ -85,6 +84,8 @@ class SnakeLabApp {
     this.lastStepReviewHistoryId = "";
     this.lastGameRenderSignature = "";
     this.lastNetworkRenderSignature = "";
+    this.networkHoverState = null;
+    this.networkHitCache = { signals: [], hidden1: [], hidden2: [], outputs: [] };
     this.lastChartRenderSignature = "";
     this.lastSnapshotRenderSignature = "";
     this.lastGameRenderTime = 0;
@@ -235,18 +236,6 @@ class SnakeLabApp {
     return "-";
   }
 
-  currentInputGrid() {
-    return this.state?.input_grid ?? DEFAULT_INPUT_GRID;
-  }
-
-  inputMode() {
-    return this.state?.input_mode ?? "signals";
-  }
-
-  shouldShowNetworkGraph() {
-    return this.inputMode() !== "map";
-  }
-
   shouldUseNetworkVisuals() {
     return Boolean(this.showNetwork && !this.state?.training && !document.hidden);
   }
@@ -274,260 +263,6 @@ class SnakeLabApp {
     return { width: dim.width, height: dim.height, resized };
   }
 
-  pickTopIndices(values, count) {
-    const len = values.length;
-    if (len === 0) return [];
-    const indexed = new Array(len);
-    for (let i = 0; i < len; i++) indexed[i] = [Math.abs(values[i]), i];
-    indexed.sort((a, b) => b[0] - a[0]);
-    const result = [];
-    for (let i = 0; i < count && i < len; i++) result.push(indexed[i][1]);
-    result.sort((a, b) => a - b);
-    return result;
-  }
-
-  roundedRect(ctx, x, y, width, height, radius) {
-    const r = Math.min(radius, width / 2, height / 2);
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.arcTo(x + width, y, x + width, y + height, r);
-    ctx.arcTo(x + width, y + height, x, y + height, r);
-    ctx.arcTo(x, y + height, x, y, r);
-    ctx.arcTo(x, y, x + width, y, r);
-    ctx.closePath();
-  }
-
-  drawBoardFrame(ctx, boardX, boardY, boardSize, cells, options = {}) {
-    const glow = options.glow ?? 6;
-    const strokeOffset = glow - 0.75;
-    ctx.fillStyle = "rgba(255,255,255,0.04)";
-    ctx.fillRect(boardX - glow, boardY - glow, boardSize + glow * 2, boardSize + glow * 2);
-    ctx.strokeStyle = "rgba(255,255,255,0.09)";
-    ctx.lineWidth = options.outerLineWidth ?? 1.5;
-    ctx.strokeRect(boardX - strokeOffset, boardY - strokeOffset, boardSize + strokeOffset * 2, boardSize + strokeOffset * 2);
-    ctx.fillStyle = "rgba(13, 30, 41, 0.96)";
-    ctx.fillRect(boardX, boardY, boardSize, boardSize);
-    ctx.strokeStyle = "rgba(255,255,255,0.08)";
-    ctx.lineWidth = options.innerLineWidth ?? 1.5;
-    const inset = ctx.lineWidth / 2;
-    ctx.strokeRect(boardX + inset, boardY + inset, boardSize - inset * 2, boardSize - inset * 2);
-    const cell = boardSize / cells;
-    ctx.strokeStyle = "rgba(255,255,255,0.05)";
-    ctx.lineWidth = 1;
-    for (let i = 1; i < cells; i += 1) {
-      const offset = Math.round(i * cell) + 0.5;
-      ctx.beginPath();
-      ctx.moveTo(boardX + offset, boardY);
-      ctx.lineTo(boardX + offset, boardY + boardSize);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(boardX, boardY + offset);
-      ctx.lineTo(boardX + boardSize, boardY + offset);
-      ctx.stroke();
-    }
-    return cell;
-  }
-
-  fillBoardCell(ctx, boardX, boardY, cell, gridX, gridY, options = {}) {
-    const insetRatio = options.insetRatio ?? 0;
-    const inset = cell * insetRatio;
-    const sizePx = cell - inset * 2;
-    ctx.fillStyle = options.fill ?? "rgba(13, 30, 41, 0.68)";
-    if (options.rounded === false) {
-      ctx.fillRect(boardX + gridX * cell + inset, boardY + gridY * cell + inset, sizePx, sizePx);
-      return;
-    }
-    const radiusRatio = options.radiusRatio ?? 0.24;
-    const minRadius = options.minRadius ?? 4;
-    this.roundedRect(
-      ctx,
-      boardX + gridX * cell + inset,
-      boardY + gridY * cell + inset,
-      sizePx,
-      sizePx,
-      Math.max(minRadius, cell * radiusRatio)
-    );
-    ctx.fill();
-  }
-
-  drawApple(ctx, boardX, boardY, cell, food, { includeStem = true } = {}) {
-    if (!food) return;
-    const appleSize = cell * 0.84;
-    ctx.save();
-    ctx.translate(boardX + food.x * cell + cell / 2, boardY + food.y * cell + cell * 0.52);
-    this.roundedRect(ctx, -appleSize * 0.5, -appleSize * 0.5, appleSize, appleSize, appleSize * 0.4);
-    ctx.fillStyle = "#df2338";
-    ctx.fill();
-    ctx.strokeStyle = "rgba(122, 16, 30, 0.95)";
-    ctx.lineWidth = Math.max(1, cell * 0.05);
-    ctx.stroke();
-    if (includeStem) {
-      ctx.strokeStyle = "#6b4728";
-      ctx.lineWidth = Math.max(1.1, cell * 0.05);
-      ctx.lineCap = "round";
-      ctx.beginPath();
-      ctx.moveTo(0, -appleSize * 0.46);
-      ctx.quadraticCurveTo(appleSize * 0.03, -appleSize * 0.60, appleSize * 0.10, -appleSize * 0.72);
-      ctx.stroke();
-      ctx.lineCap = "butt";
-      ctx.fillStyle = "#5ba93a";
-      ctx.beginPath();
-      ctx.ellipse(appleSize * 0.18, -appleSize * 0.54, appleSize * 0.16, appleSize * 0.08, -0.35, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.restore();
-  }
-
-  drawSnakeBody(ctx, boardX, boardY, cell, snake, options = {}) {
-    if (!Array.isArray(snake) || !snake.length) return null;
-    const centerOf = (segment) => ({ x: boardX + segment.x * cell + cell / 2, y: boardY + segment.y * cell + cell / 2 });
-    if (snake.length > 1) {
-      ctx.strokeStyle = "#44c8a2";
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      ctx.lineWidth = Math.max(options.minLineWidth ?? 6, cell * (options.lineRatio ?? 0.58));
-      ctx.beginPath();
-      snake.forEach((segment, index) => {
-        const center = centerOf(segment);
-        if (index === 0) ctx.moveTo(center.x, center.y);
-        else ctx.lineTo(center.x, center.y);
-      });
-      ctx.stroke();
-    }
-    snake.slice().reverse().forEach((segment, reverseIndex) => {
-      const index = snake.length - 1 - reverseIndex;
-      const x = boardX + segment.x * cell + cell * 0.04;
-      const y = boardY + segment.y * cell + cell * 0.04;
-      const sizePx = cell * 0.92;
-      this.roundedRect(ctx, x, y, sizePx, sizePx, Math.max(options.minRadius ?? 8, cell * (options.radiusRatio ?? 0.4)));
-      ctx.fillStyle = index === 0 ? "#d7fff4" : index === snake.length - 1 ? "#36b28b" : "#5cd6ad";
-      ctx.fill();
-    });
-    return snake[0];
-  }
-
-  // Оптимизированный рендеринг следа змеи (без строковой конкатенации в цикле)
-  drawFoodTrail(ctx, boardX, boardY, cell, trail, options = {}) {
-    if (!Array.isArray(trail) || !trail.length) return;
-    const guard = options.guard ?? (() => true);
-    const baseAlpha = options.baseAlpha ?? 0.16;
-    const alphaScale = options.alphaScale ?? 0.20;
-    const baseSizeRatio = options.baseSizeRatio ?? 0.24;
-    const sizeScale = options.sizeScale ?? 0.10;
-    const strokeRgb = options.strokeRgb ?? "255, 214, 220";
-    const strokeAlphaScale = options.strokeAlphaScale ?? 0.7;
-
-    ctx.save();
-    // Использование глобальной альфы контекста вместо генерации строк rgba
-    ctx.fillStyle = "#ff526c";
-    ctx.strokeStyle = `rgb(${strokeRgb})`;
-    ctx.lineWidth = Math.max(options.minLineWidth ?? 1, cell * (options.lineRatio ?? 0.03));
-
-    trail.forEach((marker, index) => {
-      if (!marker || !guard(marker)) return;
-      const freshness = (index + 1) / Math.max(1, trail.length);
-      const alpha = baseAlpha + freshness * alphaScale;
-      const sizePx = cell * (baseSizeRatio + freshness * sizeScale);
-      const offset = (cell - sizePx) / 2;
-
-      this.roundedRect(ctx, boardX + marker.x * cell + offset, boardY + marker.y * cell + offset, sizePx, sizePx, Math.max(3, sizePx * 0.30));
-      
-      ctx.globalAlpha = alpha;
-      ctx.fill();
-      
-      ctx.globalAlpha = alpha * strokeAlphaScale;
-      ctx.stroke();
-    });
-    ctx.restore();
-  }
-
-  drawSnakeHead(ctx, boardX, boardY, cell, head, options = {}) {
-    if (!head) return null;
-    const headX = boardX + head.x * cell + cell * 0.04;
-    const headY = boardY + head.y * cell + cell * 0.04;
-    const sizePx = cell * 0.92;
-    this.roundedRect(ctx, headX, headY, sizePx, sizePx, Math.max(options.minRadius ?? 8, cell * (options.radiusRatio ?? 0.42)));
-    ctx.fillStyle = "#d7fff4";
-    ctx.fill();
-    ctx.strokeStyle = "rgba(9, 19, 27, 0.25)";
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    if (Number.isInteger(options.direction)) {
-      const eyeRadius = Math.max(1.5, cell * 0.06);
-      const eyeLayouts = [
-        [[0.3, 0.32], [0.7, 0.32]],
-        [[0.68, 0.3], [0.68, 0.7]],
-        [[0.3, 0.68], [0.7, 0.68]],
-        [[0.32, 0.3], [0.32, 0.7]]
-      ];
-      ctx.fillStyle = "#08131d";
-      eyeLayouts[options.direction]?.forEach(([ex, ey]) => {
-        ctx.beginPath();
-        ctx.arc(headX + sizePx * ex, headY + sizePx * ey, eyeRadius, 0, Math.PI * 2);
-        ctx.fill();
-      });
-    }
-    return { headX, headY, sizePx };
-  }
-
-  drawSnakeScene(ctx, width, height, scene, options = {}) {
-    const deathPreset = options.variant === "death" ? {
-      boardPadding: 2,
-      frameOptions: { glow: 0, outerLineWidth: 1.25, innerLineWidth: 1 },
-      clearOccupiedCells: true,
-      clearCellOptions: { fill: "rgba(13, 30, 41, 0.96)", insetRatio: 0.05, rounded: false },
-      bodyOptions: { minLineWidth: 4, lineRatio: 0.54, minRadius: 6, radiusRatio: 0.38 },
-      trailOptions: { baseAlpha: 0.24, alphaScale: 0.30, baseSizeRatio: 0.28, sizeScale: 0.14, strokeRgb: "255, 233, 237", strokeAlphaScale: 0.92, minLineWidth: 1.2, lineRatio: 0.04 },
-      headOptions: { minRadius: 6, radiusRatio: 0.4 }
-    } : {};
-    const mergeSceneOption = (key) => (deathPreset[key] || options[key] ? { ...(deathPreset[key] ?? {}), ...(options[key] ?? {}) } : undefined);
-    const sceneOptions = {
-      ...deathPreset, ...options,
-      frameOptions: mergeSceneOption("frameOptions"),
-      foodCellOptions: mergeSceneOption("foodCellOptions"),
-      clearCellOptions: mergeSceneOption("clearCellOptions"),
-      appleOptions: mergeSceneOption("appleOptions"),
-      bodyOptions: mergeSceneOption("bodyOptions"),
-      trailOptions: mergeSceneOption("trailOptions"),
-      headOptions: mergeSceneOption("headOptions")
-    };
-    const size = Number(scene.size ?? 0) || 1;
-    const snake = Array.isArray(scene.snake) ? scene.snake : [];
-    const food = scene.food;
-    const trail = Array.isArray(scene.eatenFoodTrail) ? scene.eatenFoodTrail : [];
-    const boardPadding = Number(sceneOptions.boardPadding ?? 18);
-    const boardSize = Math.min(width, height) - boardPadding * 2;
-    const boardX = Math.round((width - boardSize) / 2);
-    const boardY = Math.round((height - boardSize) / 2);
-    const cell = boardSize / size;
-
-    // Пропуск отрисовки рамки, если она уже нарисована на фоновом слое
-    if (!options.skipFrame) {
-      this.drawBoardFrame(ctx, boardX, boardY, boardSize, size, sceneOptions.frameOptions ?? {});
-    }
-
-    if (food) this.fillBoardCell(ctx, boardX, boardY, cell, food.x, food.y, sceneOptions.foodCellOptions ?? { insetRatio: 0.08, radiusRatio: 0.24 });
-    if (sceneOptions.clearOccupiedCells) {
-      const clearOptions = sceneOptions.clearCellOptions ?? { fill: "rgba(13, 30, 41, 0.96)", insetRatio: 0.05, rounded: false };
-      if (food) this.fillBoardCell(ctx, boardX, boardY, cell, food.x, food.y, clearOptions);
-      snake.forEach((segment) => this.fillBoardCell(ctx, boardX, boardY, cell, segment.x, segment.y, clearOptions));
-    } else {
-      snake.forEach((segment, index) => {
-        const insetRatio = index === 0 ? 0.04 : 0.05;
-        const radiusRatio = index === 0 ? 0.26 : 0.24;
-        this.fillBoardCell(ctx, boardX, boardY, cell, segment.x, segment.y, { insetRatio, radiusRatio });
-      });
-    }
-    this.drawApple(ctx, boardX, boardY, cell, food, sceneOptions.appleOptions ?? {});
-    this.drawSnakeBody(ctx, boardX, boardY, cell, snake, sceneOptions.bodyOptions ?? {});
-    if (sceneOptions.showTrail !== false && trail.length) {
-      this.drawFoodTrail(ctx, boardX, boardY, cell, trail, sceneOptions.trailOptions ?? {});
-    }
-    const head = snake[0];
-    if (head) this.drawSnakeHead(ctx, boardX, boardY, cell, head, sceneOptions.headOptions ?? {});
-    return { boardX, boardY, boardSize, cell, snake, head, food };
-  }
-
   bindEvents() {
     window.addEventListener("keydown", (event) => this.handleKeydown(event));
     document.addEventListener("visibilitychange", () => {
@@ -536,7 +271,6 @@ class SnakeLabApp {
       this.refreshState({ forceDetails: true, forceNetwork: this.shouldUseNetworkVisuals() });
       this.safeRenderAll();
     });
-    this.inputModeSelect?.addEventListener("change", () => { this.sendCommand("set_input_mode", this.inputModeSelect.value); });
     this.agentModeSelect?.addEventListener("change", () => {
       const selectedAgent = this.agentModeSelect.value;
       this.agentModeFocused = false;
@@ -579,6 +313,67 @@ class SnakeLabApp {
       const nextIndex = Number(button.getAttribute("data-death-step"));
       if (Number.isFinite(nextIndex)) { this.selectedDeathStepIndex = nextIndex; this.renderLastDeathSnapshot(); }
     });
+    this.networkCanvas?.addEventListener("mousemove", (event) => this.handleNetworkPointerMove(event));
+    this.networkCanvas?.addEventListener("mouseleave", () => this.clearNetworkHover());
+  }
+
+  getNetworkHoverKey(hoverState) {
+    if (!hoverState) return "";
+    return `${hoverState.layer}:${hoverState.index}`;
+  }
+
+  hitTestNetworkGraph(x, y) {
+    const cache = this.networkHitCache;
+    if (!cache) return null;
+
+    for (const circleList of [cache.hidden1, cache.hidden2]) {
+      for (const item of circleList || []) {
+        const dx = x - item.x;
+        const dy = y - item.y;
+        const hitRadius = item.r + 4;
+        if (dx * dx + dy * dy <= hitRadius * hitRadius) {
+          return { ...item, anchorX: x, anchorY: y };
+        }
+      }
+    }
+
+    for (const rectList of [cache.signals, cache.outputs]) {
+      for (const item of rectList || []) {
+        if (x >= item.x && x <= item.x + item.w && y >= item.y && y <= item.y + item.h) {
+          return { ...item, anchorX: x, anchorY: y };
+        }
+      }
+    }
+
+    return null;
+  }
+
+  handleNetworkPointerMove(event) {
+    if (!this.networkCanvas) return;
+    const rect = this.networkCanvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const nextHover = this.hitTestNetworkGraph(x, y);
+    const prevKey = this.getNetworkHoverKey(this.networkHoverState);
+    const nextKey = this.getNetworkHoverKey(nextHover);
+
+    this.networkCanvas.style.cursor = nextHover ? "pointer" : "default";
+    if (!nextHover && !this.networkHoverState) return;
+
+    this.networkHoverState = nextHover;
+    if (prevKey !== nextKey || nextHover) {
+      this.renderNetworkGraph();
+    }
+  }
+
+  clearNetworkHover() {
+    if (!this.networkCanvas) return;
+    this.networkCanvas.style.cursor = "default";
+    if (!this.networkHoverState) return;
+    this.networkHoverState = null;
+    this.renderNetworkGraph();
   }
 
   async sendCommand(type, value = undefined) {
@@ -639,7 +434,7 @@ class SnakeLabApp {
       DEFERRED_STATE_FIELDS.forEach((key) => { if (!(key in nextState) && key in previousState) nextState[key] = previousState[key]; });
       if (previousState.network && !nextState.network) nextState.network = previousState.network;
     };
-    const stateShapeChanged = previousState.input_grid !== nextState.input_grid || previousState.agent_kind !== nextState.agent_kind || previousState.mode !== nextState.mode || previousState.game?.size !== nextState.game?.size;
+    const stateShapeChanged = previousState.agent_kind !== nextState.agent_kind || previousState.mode !== nextState.mode || previousState.game?.size !== nextState.game?.size;
     if (stateShapeChanged) { carryDeferredFields(); return nextState; }
     const previousFrameId = Number(previousState.frame_id ?? -1);
     const nextFrameId = Number(nextState.frame_id ?? previousFrameId);
@@ -675,7 +470,7 @@ class SnakeLabApp {
   async shutdownBackend() {
     this.setDecisionText("Выключаю backend и закрываю консоль. Страница больше не будет обновляться.");
     try { await apiJson("/api/command", { method: "POST", body: JSON.stringify({ type: "shutdown_server", close_console: true }), timeoutMs: 1800 }); } catch (error) { console.warn("Backend shutdown command interrupted:", error); }
-    if (this.pollHandle) { window.clearTimeout(this.pollHandle); this.pollHandle = null; }
+    if (this.pollHandle) { window.clearInterval(this.pollHandle); this.pollHandle = null; }
     if (this.framePollHandle) { window.clearTimeout(this.framePollHandle); this.framePollHandle = null; }
     if (this.renderFrameHandle) { window.cancelAnimationFrame(this.renderFrameHandle); this.renderFrameHandle = null; }
     if (this.liveFrameRenderHandle) { window.cancelAnimationFrame(this.liveFrameRenderHandle); this.liveFrameRenderHandle = null; }
@@ -810,7 +605,7 @@ class SnakeLabApp {
 
       if (shouldRenderNetworkVisuals && shouldRenderNetwork) {
         this.lastNetworkRenderAt = now;
-        this.queueHeavyRender("networkGraph", () => { if (this.shouldUseNetworkVisuals() && this.shouldShowNetworkGraph()) this.renderNetworkGraph(); });
+        this.queueHeavyRender("networkGraph", () => { if (this.shouldUseNetworkVisuals()) this.renderNetworkGraph(); });
       }
       if (shouldRenderChart) {
         this.lastChartRenderAt = now;
@@ -835,19 +630,15 @@ class SnakeLabApp {
   updateVisualizationVisibility() {
     const showVisuals = this.shouldUseNetworkVisuals();
     this.setHidden(this.networkPanel, false);
-    this.setHidden(this.networkGraphCard, !showVisuals || !this.shouldShowNetworkGraph());
+    this.setHidden(this.networkGraphCard, !showVisuals);
   }
 
   syncControlsFromState() {
     if (this.state.mode === "smart") this.smartContextActive = true;
     else if (this.state.mode === "ai") this.smartContextActive = false;
-    if (this.inputModeSelect) {
-      const nextInputMode = this.state?.input_mode ?? "signals";
-      if (this.inputModeSelect.value !== nextInputMode) this.inputModeSelect.value = nextInputMode;
-    }
     if (this.agentModeSelect) {
       if (!this.agentModeFocused) {
-        const nextAgentMode = this.smartContextActive ? "smart" : this.state.agent_kind ?? "evolution";
+        const nextAgentMode = this.smartContextActive ? "smart" : this.state.agent_kind ?? "dqn";
         if (this.agentModeSelect.value !== nextAgentMode) this.agentModeSelect.value = nextAgentMode;
         const smartOption = this.agentModeSelect.querySelector('option[value="smart"]');
         if (smartOption) { smartOption.disabled = false; smartOption.textContent = "Zmey-smart"; }
@@ -895,12 +686,16 @@ class SnakeLabApp {
 
   captureStableHeroProfile() {
     if (!this.state) return;
-    const mode = this.inputMode();
     const signalCount = (this.state?.global_signals?.labels ?? []).length;
-    const grid = this.currentInputGrid();
-    const inputLabel = mode === "signals" ? `${signalCount} сигналов` : mode === "map" ? `Карта ${grid}x${grid}` : `Карта ${grid}x${grid} + ${signalCount} сигналов`;
     const isSmartContext = this.smartContextActive || this.state.mode === "smart";
-    this.stableHeroProfile = { device: this.state.device_kind ?? "CPU", boardSize: this.state?.game?.size ?? 25, inputLabel, networkSource: isSmartContext ? "Zmey-smart" : this.state.network_source ?? "Evolution policy" };
+    const isPpo = !isSmartContext && this.state.agent_kind === "ppo";
+    const inputLabel = isPpo ? `${signalCount} сигн. + 9×9` : `${signalCount} сигналов`;
+    this.stableHeroProfile = {
+      device: this.state.device_kind ?? "CPU",
+      boardSize: this.state?.game?.size ?? 10,
+      inputLabel,
+      networkSource: isSmartContext ? "Zmey-smart" : this.state.network_source ?? "DQN policy",
+    };
   }
 
   updateHeroBadges() {
@@ -931,9 +726,14 @@ class SnakeLabApp {
     const mode = this.state.mode;
     const agentKind = this.state.agent_kind;
     if (mode === "smart") actionHeader = "Оценки действий (↑ / ← / →): ";
-    else if (agentKind === "evolution") actionHeader = "Оценки действий (↑ / ← / →): ";
+    else if (agentKind === "ppo") actionHeader = "Политика π (↑ / ← / →): ";
     else if (agentKind === "dqn") actionHeader = "Q-values (↑ / ← / →): ";
-    const lines = [`${actionHeader}${qValues || "-"}`, `Выбор сети: ${networkChoice}`, `Награда: ${rewardReason} (${rewardValue})`, `Штрафы: ${penaltyReasons || "-"}`];
+    const lines = [`${actionHeader}${qValues || "-"}`, `Выбор сети: ${networkChoice}`];
+    if (mode !== "smart" && agentKind === "ppo") {
+      const valueEst = Number(this.state.stats?.value_estimate ?? 0);
+      lines.push(`Оценка V(s): ${valueEst >= 0 ? "+" : ""}${valueEst.toFixed(2)}`);
+    }
+    lines.push(`Награда: ${rewardReason} (${rewardValue})`, `Штрафы: ${penaltyReasons || "-"}`);
     return lines.join("\n");
   }
 
@@ -1123,7 +923,7 @@ class SnakeLabApp {
       return;
     }
     const size = Number(selectedStep.size ?? 0) || 1;
-    const { boardX, boardY, boardSize, cell, snake, head } = this.drawSnakeScene(ctx, width, height, { size, snake: selectedStep.snake ?? [], food: selectedStep.food, eatenFoodTrail: selectedStep.eaten_food_trail ?? [] }, { variant: "death", headOptions: { direction: selectedStep.direction } });
+    const { boardX, boardY, boardSize, cell, snake, head } = SnakeRenderers.drawSnakeScene(ctx, width, height, { size, snake: selectedStep.snake ?? [], food: selectedStep.food, eatenFoodTrail: selectedStep.eaten_food_trail ?? [] }, { variant: "death", headOptions: { direction: selectedStep.direction } });
     const plannedTarget = selectedStep.planned_target;
     const hasPlannedTarget = plannedTarget && Number.isFinite(plannedTarget.x) && Number.isFinite(plannedTarget.y);
     if (head && hasPlannedTarget) {
@@ -1182,6 +982,7 @@ class SnakeLabApp {
   updateStats() {
     const modeLabels = { manual: "Игрок", ai: "ИИ", smart: "Zmey-smart" };
     const isSmart = this.state.mode === "smart";
+    const isPpo = this.state.agent_kind === "ppo" && !isSmart;
     const isDqn = this.state.agent_kind === "dqn" && !isSmart;
     const modeText = this.state.training ? "Обучение" : modeLabels[this.state.mode] ?? "ИИ";
     this.setText(this.modeStat, modeText);
@@ -1190,16 +991,41 @@ class SnakeLabApp {
     this.setText(this.bestScoreStat, String(this.state.stats.best_score));
     this.setText(this.avgScoreStat, Number(this.state.stats.average_score_100 ?? 0).toFixed(1));
     if (this.avgScoreStat) { const averageWindow = Number(this.state.stats.average_score_window ?? 0); this.avgScoreStat.title = averageWindow ? `Средний счет по ${averageWindow} эпизодам` : ""; }
-    this.setText(this.lossStat?.previousElementSibling, isDqn ? "Epsilon" : isSmart ? "Модель" : "Fitness");
+    this.setText(this.lossStat?.previousElementSibling, isSmart ? "Модель" : isPpo ? "V(s)" : "Epsilon");
     this.setText(this.epsilonStat?.previousElementSibling, "");
-    this.setText(this.bufferStat?.previousElementSibling, isDqn ? "Replay" : isSmart ? "Эпизоды" : "Поколение");
-    this.setText(this.leaderStat?.previousElementSibling, isDqn ? "Updates" : isSmart ? "Режим" : "Лидер");
-    this.setText(this.aliveStat?.previousElementSibling, isDqn ? "Статус" : isSmart ? "Статус" : "Живых");
-    if (isSmart) { this.setText(this.lossStat, this.state.smart_model?.loaded ? "loaded" : "нет"); this.renderHungerStat(); this.setText(this.bufferStat, String(this.state.stats.episode)); this.setText(this.leaderStat, this.state.running ? "run" : "idle"); this.setText(this.aliveStat, this.state.smart_model?.loaded ? "ok" : "нет"); }
-    else if (isDqn) { this.setText(this.lossStat, Number(this.state.stats.epsilon ?? 0).toFixed(3)); this.renderHungerStat(); this.setText(this.bufferStat, String(this.state.stats.buffer ?? 0)); this.setText(this.leaderStat, String(this.state.stats.updates ?? 0)); this.setText(this.aliveStat, this.state.training ? "train" : "idle"); }
-    else { this.setText(this.lossStat, Number(this.state.stats.fitness ?? 0).toFixed(3)); this.renderHungerStat(); this.setText(this.bufferStat, String(this.state.stats.generation ?? 0)); this.setText(this.leaderStat, this.state.training ? `${this.state.stats.leader ?? 0}/${this.state.stats.population ?? 0}` : "best"); this.setText(this.aliveStat, this.state.training ? `${this.state.stats.alive ?? 0}/${this.state.stats.population ?? 0}` : "-"); }
-    this.setText(this.chartMetricLabel, isDqn ? "Loss" : isSmart ? "Счет" : "Fitness");
-    this.setText(this.chartMetricDescription, isSmart ? "История Zmey-smart по выбранной модели: счет, награда и средний счет за последние эпизоды." : isDqn ? "Ошибка DQN при обновлении Q-сети: чем ниже значение, тем стабильнее прогнозы." : "Оценка особи для селекции: учитывает счет, выживание, награду, ловушки и причину завершения.");
+    this.setText(this.bufferStat?.previousElementSibling, isSmart ? "Эпизоды" : isPpo ? "Rollout" : "Replay");
+    this.setText(this.leaderStat?.previousElementSibling, isSmart ? "Режим" : "Updates");
+    this.setText(this.aliveStat?.previousElementSibling, isSmart ? "Статус" : isPpo ? "Среды" : "Статус");
+    if (isSmart) {
+      this.setText(this.lossStat, this.state.smart_model?.loaded ? "loaded" : "нет");
+      this.renderHungerStat();
+      this.setText(this.bufferStat, String(this.state.stats.episode));
+      this.setText(this.leaderStat, this.state.running ? "run" : "idle");
+      this.setText(this.aliveStat, this.state.smart_model?.loaded ? "ok" : "нет");
+    } else if (isPpo) {
+      const valueEst = Number(this.state.stats.value_estimate ?? 0);
+      this.setText(this.lossStat, `${valueEst >= 0 ? "+" : ""}${valueEst.toFixed(2)}`);
+      this.renderHungerStat();
+      const cap = Number(this.state.stats.rollout_capacity ?? 0);
+      this.setText(this.bufferStat, cap > 0 ? `${this.state.stats.buffer ?? 0}/${cap}` : String(this.state.stats.buffer ?? 0));
+      this.setText(this.leaderStat, String(this.state.stats.updates ?? 0));
+      this.setText(this.aliveStat, this.state.training ? `${this.state.stats.alive ?? 0}/${this.state.stats.population ?? 0}` : "idle");
+    } else {
+      this.setText(this.lossStat, Number(this.state.stats.epsilon ?? 0).toFixed(3));
+      this.renderHungerStat();
+      this.setText(this.bufferStat, String(this.state.stats.buffer ?? 0));
+      this.setText(this.leaderStat, String(this.state.stats.updates ?? 0));
+      this.setText(this.aliveStat, this.state.training ? "train" : "idle");
+    }
+    this.setText(this.chartMetricLabel, isSmart ? "Счет" : "Loss");
+    this.setText(
+      this.chartMetricDescription,
+      isSmart
+        ? "История Zmey-smart по выбранной модели: счет, награда и средний счет за последние эпизоды."
+        : isPpo
+          ? "Суммарный Loss (policy + value - entropy) при обновлении PPO с эгоцентричной картой 9×9."
+          : "Ошибка DQN при обновлении Q-сети: чем ниже значение, тем стабильнее прогнозы."
+    );
     this.setText(this.stepStat, String(this.state.stats.steps));
     this.setDecisionText(this.buildDecisionText());
     this.renderDecisionStats();
@@ -1251,14 +1077,14 @@ class SnakeLabApp {
 
 
       const cleanEvents = effectTags
-        .map(t => String(t).trim())
+        .map(t => escapeText(String(t).trim()))
         .filter(t => t && t !== "-" && t !== "  ");
 
       const headerParts = [stepStr, rewardText, moveArrow];
       const extraParts = [...cleanEvents, sourceLabel];
       const logText = headerParts.join(" ") + (extraParts.length ? " • " + extraParts.join(" • ") : "");
 
-      const isCollision = penalties.includes("wall_collision") || penalties.includes("body_collision");
+      const isCollision = penalties.includes("wall_collision") || penalties.includes("body_collision") || entry.reason === "starvation";
       const isTailLoss = penalties.includes("tail_loss");
       const tookApple = entry.reason === "apple";
 
@@ -1280,81 +1106,57 @@ class SnakeLabApp {
     this.forceStepLogScroll = false;
   }
 
-  // Отрисовка статической части сцены на фоновом слое холста
-  drawStaticBackground(ctx, width, height, size) {
-    ctx.clearRect(0, 0, width, height);
-    
-    // Рисование однотонного фона
-    ctx.fillStyle = "#0c1924";
-    ctx.fillRect(0, 0, width, height);
-
-    // Рисование сетки и рамки
-    const boardPadding = 18;
-    const boardSize = Math.min(width, height) - boardPadding * 2;
-    const boardX = Math.round((width - boardSize) / 2);
-    const boardY = Math.round((height - boardSize) / 2);
-    const cell = this.drawBoardFrame(ctx, boardX, boardY, boardSize, size, {
-      glow: 6,
-      outerLineWidth: 1.5,
-      innerLineWidth: 1.5
-    });
-
-    // Сохранение разметки во внутренний кеш
-    this.boardLayout = { boardX, boardY, boardSize, cell };
-  }
-
   // Оптимизированный рендеринг игры с поддержкой офскрин-слоя фона
   renderGame() {
     if (!this.gameCtx || !this.gameCanvas || !this.state) return;
     const ctx = this.gameCtx;
     const size = this.state.game.size;
-    
+
     const dim = this.canvasDimensions.get(this.gameCanvas) || { width: this.gameCanvas.width, height: this.gameCanvas.height };
     const frameId = this.state.frame_id ?? `${this.state.game.score}:${this.state.game.step_count}:${this.state.game.direction}`;
-    const gameSignature = [dim.width, dim.height, size, frameId, this.state.training ? 1 : 0, this.currentInputGrid()].join("|");
-    
+    const gameSignature = [dim.width, dim.height, size, frameId, this.state.training ? 1 : 0].join("|");
+
     if (!dim.dirty && gameSignature === this.lastGameRenderSignature) return;
     this.lastGameRenderSignature = gameSignature;
 
     const { width, height, resized } = this.resizeCanvas(this.gameCanvas, ctx);
 
-    // Перерисовка фонового холста только при реальном изменении размеров окна
     if (resized || !this.bgDrawn) {
       this.gameBgCanvas.width = this.gameCanvas.width;
       this.gameBgCanvas.height = this.gameCanvas.height;
       const dpr = Math.max(1, window.devicePixelRatio || 1);
       this.gameBgCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      
-      this.drawStaticBackground(this.gameBgCtx, width, height, size);
+
+      this.boardLayout = SnakeRenderers.drawStaticBackground(this.gameBgCtx, width, height, size);
       this.bgDrawn = true;
     }
-    
+
     ctx.clearRect(0, 0, width, height);
 
-    // Быстрый перенос пикселей из фонового холста (без повторной отрисовки путей сетки)
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.drawImage(this.gameBgCanvas, 0, 0);
     ctx.restore();
 
-    // Отрисовка динамической части сцены ( skipFrame: true отключает избыточную перерисовку рамки )
     const snake = this.state.game.snake ?? [];
     const food = this.state.game.food;
     const eatenFoodTrail = this.state.game.eaten_food_trail ?? [];
     const occupiedBody = new Set(snake.slice(1).map((segment) => `${segment.x}:${segment.y}`));
-    
-    this.drawSnakeScene(ctx, width, height, 
-      { size, snake, food, eatenFoodTrail }, 
-      { 
-        boardPadding: 18, 
-        skipFrame: true, // Пропускаем отрисовку рамки/сетки поверх готового фона
-        showTrail: !this.state.training, 
-        trailOptions: { guard: (marker) => occupiedBody.has(`${marker.x}:${marker.y}`) }, 
-        headOptions: { direction: this.state.game.direction } 
+
+    SnakeRenderers.drawSnakeScene(
+      ctx,
+      width,
+      height,
+      { size, snake, food, eatenFoodTrail },
+      {
+        boardPadding: 18,
+        skipFrame: true,
+        showTrail: !this.state.training,
+        trailOptions: { guard: (marker) => occupiedBody.has(`${marker.x}:${marker.y}`) },
+        headOptions: { direction: this.state.game.direction }
       }
     );
 
-    // Отрисовка виджета счета с динамической шириной под размер текста
     const scoreText = `Счет: ${this.state.game.score}`;
     const boardText = `Поле: ${size}x${size}`;
 
@@ -1386,204 +1188,27 @@ class SnakeLabApp {
 
     const dim = this.canvasDimensions.get(this.networkCanvas) || { width: this.networkCanvas.width, height: this.networkCanvas.height };
     const frameId = this.state.frame_id ?? "";
-    const renderSignature = [dim.width, dim.height, frameId, this.state.input_mode].join("|");
+    const hoverSig = this.networkHoverState
+      ? `${this.networkHoverState.layer}:${this.networkHoverState.index}:${Math.round(this.networkHoverState.anchorX)},${Math.round(this.networkHoverState.anchorY)}`
+      : "";
+    const renderSignature = [dim.width, dim.height, frameId, hoverSig].join("|");
 
     if (!dim.dirty && renderSignature === this.lastNetworkRenderSignature) return;
     this.lastNetworkRenderSignature = renderSignature;
 
     const ctx = this.networkCtx;
     const { width, height } = this.resizeCanvas(this.networkCanvas, ctx);
-    const network = this.state.network ?? {};
-    const globalSignalPayload = network.global_signals ?? this.state.global_signals ?? {};
-    const globalSignalLabels = globalSignalPayload.labels ?? [];
-    const globalSignalValues = globalSignalPayload.values ?? [];
-    const hidden1 = network.hidden1 ?? [];
-    const hidden2 = network.hidden2 ?? [];
-    const output = network.output ?? [];
-    const connections = network.connections ?? {};
     const labels = this.outputLabels();
-    if (hidden1.length > 500 || hidden2.length > 500) { ctx.fillStyle = "#edf6f9"; ctx.font = "600 18px Aptos, Trebuchet MS, sans-serif"; ctx.fillText("Сеть слишком большая для визуализации", 28, 42); return; }
-    ctx.clearRect(0, 0, width, height);
-    const gradient = ctx.createLinearGradient(0, 0, width, height);
-    gradient.addColorStop(0, "#08131d");
-    gradient.addColorStop(1, "#102333");
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, width, height);
-    if (!Array.isArray(globalSignalLabels) || !Array.isArray(globalSignalValues) || globalSignalLabels.length !== globalSignalValues.length) {
-      ctx.fillStyle = "#edf6f9"; ctx.font = "600 18px Aptos, Trebuchet MS, sans-serif"; ctx.fillText("Граф сети временно недоступен", 28, 42);
-      ctx.fillStyle = "#b4c7cf"; ctx.font = "500 14px Aptos, Trebuchet MS, sans-serif"; ctx.fillText(`Ожидались актуальные сигналы, получено ${Array.isArray(globalSignalValues) ? globalSignalValues.length : 0}.`, 28, 70); return;
-    }
-    const globalSignalLabelSet = new Set(globalSignalLabels);
-    const globalSignalIndexByLabel = new Map(globalSignalLabels.map((label, index) => [label, index]));
-    const padX = 26; const titleY = 32; const contentTop = 54; const contentBottom = height - 20; const contentHeight = Math.max(160, contentBottom - contentTop);
-    const signalGroups = [
-      {
-        title: "Еда",
-        rows: [
-          ["food_ahead", "food_left", "food_right", "food_behind"],
-          ["apple_step_forward", "apple_step_left", "apple_step_right", "food_reachable"]
-        ]
-      },
-      {
-        title: "Хвост",
-        rows: [
-          ["tail_ahead", "tail_left", "tail_right", "tail_behind"],
-          ["tail_close_forward", "tail_close_left", "tail_close_right"]
-        ]
-      },
-      {
-        title: "Риск",
-        rows: [
-          ["danger_forward", "danger_left", "danger_right"],
-          ["tail_blocked_forward", "tail_blocked_left", "tail_blocked_right"],
-          ["space_tight_forward", "space_tight_left", "space_tight_right"],
-          ["partition_forward", "partition_left", "partition_right"]
-        ]
-      }
-    ].map((group) => {
-      const filteredRows = group.rows
-        .map((row) => row.filter((label) => globalSignalLabelSet.has(label)))
-        .filter((row) => row.length > 0);
-      return { ...group, rows: filteredRows };
-    }).filter((group) => group.rows.length > 0);
-    const inputWidth = Math.max(180, Math.min(250, width * 0.25)); const inputX = padX; const inputY = contentTop + 4;
-    const outputX = width - padX - 74;
-    const hidden1X = inputX + inputWidth + (outputX - (inputX + inputWidth)) * 0.28;
-    const hidden2X = inputX + inputWidth + (outputX - (inputX + inputWidth)) * 0.60;
-    const hidden1Indices = this.pickTopIndices(hidden1, 14); const hidden2Indices = this.pickTopIndices(hidden2, 10);
-    const outputIndices = this.outputDisplayOrder(labels).filter((index) => index < output.length);
-    const hidden1Positions = this.createColumnPositions(hidden1X, contentTop + contentHeight / 2, hidden1Indices.length, Math.min(32, contentHeight / Math.max(1, hidden1Indices.length)));
-    const hidden2Positions = this.createColumnPositions(hidden2X, contentTop + contentHeight / 2, hidden2Indices.length, Math.min(38, contentHeight / Math.max(1, hidden2Indices.length)));
-    const outputCenterY = contentTop + contentHeight / 2; const outputPositions = this.createColumnPositions(outputX, outputCenterY, outputIndices.length, Math.min(64, contentHeight / Math.max(1, outputIndices.length)));
-    const hidden1Map = new Map(hidden1Indices.map((index, position) => [index, hidden1Positions[position]])); const hidden2Map = new Map(hidden2Indices.map((index, position) => [index, hidden2Positions[position]]));
-    const outputMap = new Map(outputIndices.map((index, position) => [index, outputPositions[position]])); const signalMap = new Map();
-    if (globalSignalLabels.length) {
-      const groupGap = 5; const groupPadding = 8; const pillGap = 6;
-      const pillHeight = 18; const pillVerticalGap = 6; const pillRowGap = pillHeight + pillVerticalGap;
-      const totalSignalHeight = signalGroups.reduce((sum, group) => sum + 23 + group.rows.length * pillRowGap, Math.max(0, signalGroups.length - 1) * groupGap);
-      let currentY = inputY + Math.max(0, (contentHeight - totalSignalHeight) / 2);
-      signalGroups.forEach((group) => {
-        const groupHeight = 23 + group.rows.length * pillRowGap; this.roundedRect(ctx, inputX, currentY, inputWidth, groupHeight, 10);
-        ctx.fillStyle = "rgba(255,255,255,0.045)"; ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,0.075)"; ctx.lineWidth = 1; ctx.stroke();
-        ctx.fillStyle = "#ffcf66"; ctx.font = "700 10.5px Aptos, Trebuchet MS, sans-serif"; ctx.fillText(group.title.toUpperCase(), inputX + groupPadding, currentY + 14.5);
-        group.rows.forEach((rowLabels, rowIndex) => {
-          const cols = rowLabels.length;
-          const pillWidth = (inputWidth - groupPadding * 2 - pillGap * (cols - 1)) / cols;
-          rowLabels.forEach((label, colIndex) => {
-            const signalIndex = globalSignalIndexByLabel.get(label) ?? -1; if (signalIndex < 0) return;
-            const x = inputX + groupPadding + colIndex * (pillWidth + pillGap); const y = currentY + 21 + rowIndex * pillRowGap;
-            const value = globalSignalValues[signalIndex] ?? 0; this.roundedRect(ctx, x, y, pillWidth, pillHeight, 7);
-            ctx.fillStyle = value > 0.66 ? "rgba(255, 179, 71, 0.24)" : value > 0.05 ? "rgba(92, 214, 173, 0.18)" : "rgba(255,255,255,0.06)"; ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,0.055)"; ctx.stroke();
-            const displayValue = Math.abs(value - Math.round(value)) < 0.005 ? String(Math.round(value)) : value.toFixed(2);
-            ctx.fillStyle = "#edf6f9";
-            ctx.font = "700 11px Aptos, Trebuchet MS, sans-serif";
-            ctx.fillText(`${formatSignalLabel(label)} ${displayValue}`, x + 5, y + 13);
-            signalMap.set(signalIndex, { x: x + pillWidth, y: y + pillHeight / 2 });
-          });
-        });
-        currentY += groupHeight + groupGap;
-      });
-    }
-    this.drawConnections(ctx, connections.global_hidden1, signalMap, hidden1Map, {
-      xOffsetFrom: 0, xOffsetTo: -10, cpX1: 34, cpX2: -48,
-      alphaMult: 4.2, alphaMin: 0.20, alphaMax: 0.78,
-      widthMult: 2.2, widthMin: 1.05, widthMax: 3.0,
-      posRgb: "127, 208, 255", negRgb: "255, 179, 71"
-    });
-    this.drawConnections(ctx, connections.hidden1_hidden2, hidden1Map, hidden2Map, {
-      xOffsetFrom: 10, xOffsetTo: -10, cpX1: 55, cpX2: -55,
-      alphaMult: 4.4, alphaMin: 0.16, alphaMax: 0.76,
-      widthMult: 3.0, widthMin: 1.0, widthMax: 3.2,
-      posRgb: "92, 214, 173", negRgb: "255, 179, 71"
-    });
-    this.drawConnections(ctx, connections.hidden2_output, hidden2Map, outputMap, {
-      xOffsetFrom: 12, xOffsetTo: -12, cpX1: 46, cpX2: -46,
-      alphaMult: 4.6, alphaMin: 0.18, alphaMax: 0.82,
-      widthMult: 3.2, widthMin: 1.1, widthMax: 3.6,
-      posRgb: "92, 214, 173", negRgb: "255, 179, 71"
-    });
-    this.drawIndexedLayer(ctx, hidden1Indices, hidden1Positions, hidden1, 10, "H1"); this.drawIndexedLayer(ctx, hidden2Indices, hidden2Positions, hidden2, 12, "H2"); this.drawOutputLayer(ctx, outputIndices, outputPositions, output, labels, "q");
-    const isMobile = width < 680;
-    const headerInput = isMobile ? "Вход" : "Входные признаки";
-    const headerH1 = isMobile ? "H1" : "Скрытый H1";
-    const headerH2 = isMobile ? "H2" : "Скрытый H2";
-    const headerOutput = isMobile ? "Выход" : "Решения";
-
-    ctx.fillStyle = "#edf6f9";
-    ctx.font = "600 13.5px Aptos, Trebuchet MS, sans-serif";
-    
-    // Входные признаки выравниваем по левому краю (начало блока)
-    ctx.textAlign = "start";
-    ctx.fillText(headerInput, inputX - 2, titleY);
-    
-    // H1, H2 и Решения центрируем над их колонками
-    ctx.textAlign = "center";
-    ctx.fillText(headerH1, hidden1X, titleY);
-    ctx.fillText(headerH2, hidden2X, titleY);
-    ctx.fillText(headerOutput, outputX + 16, titleY);
-    ctx.textAlign = "start";
-  }
-
-  createColumnPositions(centerX, centerY, count, spacing) { const positions = []; const startY = centerY - ((count - 1) * spacing) / 2; for (let index = 0; index < count; index += 1) positions.push({ x: centerX, y: startY + index * spacing }); return positions; }
-  drawIndexedLayer(ctx, indices, positions, values, radius, prefix) { positions.forEach((position, offset) => { const index = indices[offset]; const value = values[index] ?? 0; ctx.beginPath(); ctx.arc(position.x, position.y, radius, 0, Math.PI * 2); ctx.fillStyle = value === 0 ? "rgba(255,255,255,0.08)" : colorForActivation(value); ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,0.14)"; ctx.stroke(); ctx.fillStyle = "#b4c7cf"; ctx.font = "600 12.5px Aptos, Trebuchet MS, sans-serif"; ctx.fillText(`${prefix}-${index}`, position.x + 16, position.y + 4.5); }); }
-  drawOutputLayer(ctx, indices, positions, values, labels, mode = "q") { positions.forEach((position, offset) => { const index = indices[offset]; const value = values[index] ?? 0; this.roundedRect(ctx, position.x - 26, position.y - 18, 116, 36, 18); ctx.fillStyle = value === 0 ? "rgba(255,255,255,0.06)" : colorForActivation(value); ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,0.12)"; ctx.stroke(); ctx.fillStyle = "#08131d"; ctx.font = "700 14.5px Aptos, Trebuchet MS, sans-serif"; ctx.fillText(`${labels[index] ?? `Out-${index}`}`, position.x - 10, position.y + 5); }); }
-
-  drawConnections(ctx, connectionList, fromMap, toMap, options) {
-    if (!Array.isArray(connectionList) || !connectionList.length) return;
-    
-    const xOffsetFrom = options.xOffsetFrom ?? 0;
-    const xOffsetTo = options.xOffsetTo ?? 0;
-    const cpX1 = options.cpX1 ?? 0;
-    const cpX2 = options.cpX2 ?? 0;
-    const alphaMult = options.alphaMult ?? 1.0;
-    const alphaMin = options.alphaMin ?? 0.20;
-    const alphaMax = options.alphaMax ?? 0.80;
-    const widthMult = options.widthMult ?? 1.0;
-    const widthMin = options.widthMin ?? 1.0;
-    const widthMax = options.widthMax ?? 3.0;
-    const posRgb = options.posRgb ?? "127, 208, 255";
-    const negRgb = options.negRgb ?? "255, 179, 71";
-
-    const groups = {};
-
-    connectionList.forEach((connection) => {
-      const from = fromMap.get(connection.from_index);
-      const to = toMap.get(connection.to_index);
-      if (!from || !to) return;
-
-      const alpha = clamp(connection.influence * alphaMult, alphaMin, alphaMax);
-      const weight = connection.weight ?? 0;
-      const lineWidth = clamp(Math.abs(weight) * widthMult, widthMin, widthMax);
-
-      const roundedAlpha = Math.round(alpha * 10) / 10;
-      const roundedLineWidth = Math.round(lineWidth * 10) / 10;
-      const isPos = weight >= 0 ? 1 : 0;
-      
-      const key = `${isPos}|${roundedAlpha}|${roundedLineWidth}`;
-      if (!groups[key]) {
-        groups[key] = [];
-      }
-      groups[key].push({ from, to });
-    });
-
-    for (const [key, paths] of Object.entries(groups)) {
-      const [isPosStr, alphaStr, lineWidthStr] = key.split("|");
-      const isPos = isPosStr === "1";
-      const alpha = parseFloat(alphaStr);
-      const lineWidth = parseFloat(lineWidthStr);
-      const rgb = isPos ? posRgb : negRgb;
-
-      ctx.strokeStyle = `rgba(${rgb}, ${alpha})`;
-      ctx.lineWidth = lineWidth;
-      ctx.beginPath();
-      
-      paths.forEach(({ from, to }) => {
-        ctx.moveTo(from.x + xOffsetFrom, from.y);
-        ctx.bezierCurveTo(from.x + cpX1, from.y, to.x + cpX2, to.y, to.x + xOffsetTo, to.y);
-      });
-      
-      ctx.stroke();
-    }
+    SnakeRenderers.drawNetworkGraph(
+      ctx,
+      width,
+      height,
+      this.state,
+      labels,
+      this.outputDisplayOrder(labels),
+      this.networkHoverState,
+      this.networkHitCache
+    );
   }
 
   renderChart() {
@@ -1592,71 +1217,16 @@ class SnakeLabApp {
     const dim = this.canvasDimensions.get(this.chartCanvas) || { width: this.chartCanvas.width, height: this.chartCanvas.height };
     const points = this.state.history ?? [];
     const isSmart = this.state.mode === "smart";
-    const isDqn = this.state.agent_kind === "dqn" && !isSmart;
+    const usesLossMetric = !isSmart;
     const lastEpisode = points.length ? points[points.length - 1].episode ?? "" : "";
-    const renderSignature = [dim.width, dim.height, points.length, lastEpisode, isSmart, isDqn].join("|");
+    const renderSignature = [dim.width, dim.height, points.length, lastEpisode, isSmart, usesLossMetric].join("|");
 
     if (!dim.dirty && renderSignature === this.lastChartRenderSignature) return;
     this.lastChartRenderSignature = renderSignature;
 
     const ctx = this.chartCtx;
     const { width, height } = this.resizeCanvas(this.chartCanvas, ctx);
-    const metricLabel = isDqn ? "Loss" : isSmart ? "Счет" : "Fitness";
-
-    ctx.clearRect(0, 0, width, height); 
-    const gradient = ctx.createLinearGradient(0, 0, width, height); 
-    gradient.addColorStop(0, "#08131d"); 
-    gradient.addColorStop(1, "#0f2231"); 
-    ctx.fillStyle = gradient; 
-    ctx.fillRect(0, 0, width, height);
-
-    if (points.length < 2) { 
-      ctx.fillStyle = "#b4c7cf"; 
-      ctx.textAlign = "center"; 
-      ctx.font = "500 15px Aptos, Trebuchet MS, sans-serif"; 
-      drawCanvasLines(ctx, ["После нескольких эпизодов", `здесь появятся счет, награда и ${metricLabel.toLowerCase()}.`], width / 2, height / 2 - 8, 20); 
-      ctx.textAlign = "start"; 
-      return; 
-    }
-    const scores = points.map((point) => point.score); const rewards = points.map((point) => point.reward);
-    const fitnesses = points.map((point) => { const value = Number(isDqn ? point.loss ?? 0 : isSmart ? point.score ?? 0 : point.fitness ?? 0); return Number.isFinite(value) ? value : 0; });
-    const finiteFitnesses = fitnesses.filter(Number.isFinite); const movingAverage = (series, windowSize) => series.map((_, index) => { const start = Math.max(0, index - windowSize + 1); return average(series.slice(start, index + 1)); });
-    const scoreAverage20 = movingAverage(scores, 20); const mainMax = Math.max(1, ...scores, ...rewards, ...scoreAverage20); const mainMin = Math.min(-2, ...scores, ...rewards, ...scoreAverage20); const mainRange = Math.max(1, mainMax - mainMin);
-    const fitnessLow = quantile(finiteFitnesses, 0.05); const fitnessHigh = quantile(finiteFitnesses, 0.95); const fitnessPad = Math.max(5, (fitnessHigh - fitnessLow) * 0.18); const fitnessMax = Math.max(0.1, fitnessHigh + fitnessPad); const fitnessMin = Math.min(0, fitnessLow - fitnessPad); const fitnessRange = Math.max(0.1, fitnessMax - fitnessMin);
-    const padLeft = 56; const padRight = 52; const padTop = 38; const padBottom = 34; const chartWidth = width - padLeft - padRight; const chartHeight = height - padTop - padBottom;
-    const mapMainY = (value) => padTop + chartHeight - ((value - mainMin) / mainRange) * chartHeight;
-    const mapFitnessY = (value) => { const clipped = clamp(value, fitnessMin, fitnessMax); return padTop + chartHeight - ((clipped - fitnessMin) / fitnessRange) * chartHeight; };
-    const episodeSeries = points.map((point, index) => {
-      const value = Number(point?.episode);
-      return Number.isFinite(value) ? value : (index + 1);
-    });
-    const minEpisode = Math.min(...episodeSeries);
-    const maxEpisode = Math.max(...episodeSeries);
-    const episodeRange = Math.max(1, maxEpisode - minEpisode);
-    const mapX = (episodeValue) => padLeft + ((episodeValue - minEpisode) / episodeRange) * chartWidth;
-    for (let index = 0; index <= 4; index += 1) { const value = mainMin + (mainRange / 4) * index; const y = mapMainY(value); ctx.beginPath(); ctx.moveTo(padLeft, y); ctx.lineTo(width - padRight, y); ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1; ctx.stroke(); ctx.fillStyle = "rgba(180,199,207,0.75)"; ctx.font = "11px Aptos, Trebuchet MS, sans-serif"; ctx.fillText(value.toFixed(1), 12, y + 4); }
-    for (let index = 0; index <= 4; index += 1) { const value = fitnessMin + (fitnessRange / 4) * index; const y = mapFitnessY(value); ctx.fillStyle = "rgba(127,208,255,0.78)"; ctx.font = "11px Aptos, Trebuchet MS, sans-serif"; ctx.fillText(value.toFixed(2), width - padRight + 8, y + 4); }
-    const drawSeries = (series, stroke, fillAlpha, mapY) => { const points2d = series.map((value, index) => ({ x: mapX(episodeSeries[index]), y: mapY(value) })); ctx.beginPath(); ctx.moveTo(points2d[0].x, points2d[0].y); for (let index = 1; index < points2d.length; index += 1) { const prev = points2d[index - 1]; const current = points2d[index]; const controlX = (prev.x + current.x) / 2; ctx.quadraticCurveTo(controlX, prev.y, current.x, current.y); } ctx.strokeStyle = stroke; ctx.lineWidth = 2.4; ctx.stroke(); ctx.beginPath(); ctx.moveTo(points2d[0].x, chartHeight + padTop); ctx.lineTo(points2d[0].x, points2d[0].y); for (let index = 1; index < points2d.length; index += 1) { const prev = points2d[index - 1]; const current = points2d[index]; const controlX = (prev.x + current.x) / 2; ctx.quadraticCurveTo(controlX, prev.y, current.x, current.y); } ctx.lineTo(points2d[points2d.length - 1].x, chartHeight + padTop); ctx.closePath(); ctx.fillStyle = `${stroke}${fillAlpha}`; ctx.fill(); };
-    
-    const drawLineSeries = (series, stroke, mapY, lineWidth = 3.2) => { 
-      const points2d = series.map((value, index) => ({ x: mapX(episodeSeries[index]), y: mapY(value) })); 
-      ctx.save(); 
-      ctx.beginPath(); 
-      ctx.moveTo(points2d[0].x, points2d[0].y); 
-      for (let index = 1; index < points2d.length; index += 1) { 
-        const prev = points2d[index - 1]; 
-        const current = points2d[index]; 
-        const controlX = (prev.x + current.x) / 2; 
-        ctx.quadraticCurveTo(controlX, prev.y, current.x, current.y); 
-      } 
-      ctx.strokeStyle = stroke; 
-      ctx.lineWidth = lineWidth; 
-      ctx.lineCap = "round"; 
-      ctx.stroke(); 
-      ctx.restore(); 
-    };
-    drawSeries(scores, "#5cd6ad", "18", mapMainY); drawSeries(rewards, "#ffb347", "12", mapMainY); drawSeries(fitnesses, "#7fd0ff", "0f", mapFitnessY); drawLineSeries(scoreAverage20, "#edf6f9", mapMainY);
-    [["Счет", "#5cd6ad", padLeft], ["Награда", "#ffb347", padLeft + 84], ["Срд счет", "#edf6f9", padLeft + 190], [metricLabel, "#7fd0ff", width - padRight - 76]].forEach(([label, color, x]) => { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, 18, 5, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = "#edf6f9"; ctx.font = "600 13px Aptos, Trebuchet MS, sans-serif"; ctx.fillText(label, x + 12, 22); });
+    SnakeRenderers.drawTrainingChart(ctx, width, height, points, isSmart, usesLossMetric);
   }
 }
 

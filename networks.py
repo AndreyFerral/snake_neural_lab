@@ -9,6 +9,8 @@ from backend_config import (
     NETWORK_INPUT_ADAPTER_MODE,
     NETWORK_INPUT_WARN_ON_ADAPT,
     NETWORK_INPUT_PAD_VALUE,
+    PPO_MAP_CHANNELS,
+    PPO_MAP_SIZE,
 )
 
 class BaseSignalNetwork(nn.Module):
@@ -16,17 +18,21 @@ class BaseSignalNetwork(nn.Module):
         self,
         input_size: int = len(GLOBAL_SIGNAL_LABELS),
         *,
+        hidden1: int = HIDDEN_LAYER_1,
+        hidden2: int = HIDDEN_LAYER_2,
         input_adapter_mode: str = NETWORK_INPUT_ADAPTER_MODE,
         warn_on_adapt: bool = NETWORK_INPUT_WARN_ON_ADAPT,
     ) -> None:
         super().__init__()
         self.input_size = input_size
+        self.hidden1_size = int(hidden1)
+        self.hidden2_size = int(hidden2)
         self.input_adapter_mode = input_adapter_mode
         self.warn_on_adapt = warn_on_adapt
         self._adapter_warning_emitted = False
 
-        self.hidden1_layer = nn.Linear(self.input_size, HIDDEN_LAYER_1)
-        self.hidden2_layer = nn.Linear(HIDDEN_LAYER_1, HIDDEN_LAYER_2)
+        self.hidden1_layer = nn.Linear(self.input_size, self.hidden1_size)
+        self.hidden2_layer = nn.Linear(self.hidden1_size, self.hidden2_size)
 
     def load_state_dict(self, state_dict, strict=True):
         key = "hidden1_layer.weight"
@@ -125,11 +131,23 @@ class BaseSignalNetwork(nn.Module):
         }
 
 class QNetwork(BaseSignalNetwork):
-    def __init__(self, input_size: int = len(GLOBAL_SIGNAL_LABELS), *, input_adapter_mode: str = NETWORK_INPUT_ADAPTER_MODE) -> None:
-        super().__init__(input_size, input_adapter_mode=input_adapter_mode)
-        self.value_head = nn.Linear(HIDDEN_LAYER_2, 1)
+    def __init__(
+        self,
+        input_size: int = len(GLOBAL_SIGNAL_LABELS),
+        *,
+        hidden1: int = HIDDEN_LAYER_1,
+        hidden2: int = HIDDEN_LAYER_2,
+        input_adapter_mode: str = NETWORK_INPUT_ADAPTER_MODE,
+    ) -> None:
+        super().__init__(
+            input_size,
+            hidden1=hidden1,
+            hidden2=hidden2,
+            input_adapter_mode=input_adapter_mode,
+        )
+        self.value_head = nn.Linear(self.hidden2_size, 1)
         self.value_head.bias.data.zero_()
-        self.advantage_head = nn.Linear(HIDDEN_LAYER_2, len(MODEL_ACTION_LABELS))
+        self.advantage_head = nn.Linear(self.hidden2_size, len(MODEL_ACTION_LABELS))
         self.advantage_head.bias.data.zero_()
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -148,20 +166,120 @@ class QNetwork(BaseSignalNetwork):
         activations["value"] = value.squeeze(0)
         return activations
 
-class PolicyNetwork(BaseSignalNetwork):
-    def __init__(self, input_size: int = len(GLOBAL_SIGNAL_LABELS), *, input_adapter_mode: str = NETWORK_INPUT_ADAPTER_MODE) -> None:
-        super().__init__(input_size, input_adapter_mode=input_adapter_mode)
-        self.output = nn.Linear(HIDDEN_LAYER_2, len(MODEL_ACTION_LABELS))
-        self.output.bias.data.zero_()
+def _ortho_init(layer: nn.Module, gain: float = 1.41421356237) -> None:
+    if isinstance(layer, (nn.Linear, nn.Conv2d)):
+        nn.init.orthogonal_(layer.weight, gain=gain)
+        if layer.bias is not None:
+            nn.init.zeros_(layer.bias)
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        _, hidden2 = self.forward_features(inputs)
-        return self.output(hidden2)
 
-    def forward_with_activations(self, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
-        activations = super().forward_with_activations(inputs)
-        hidden2 = activations["hidden2"].unsqueeze(0)
-        output = self.output(hidden2)
-        activations["output"] = output.squeeze(0)
-        activations["value"] = torch.empty(0, dtype=output.dtype, device=output.device)
-        return activations
+class PPOMapNetwork(nn.Module):
+    """Гибридная Actor-Critic сеть для PPO: эгоцентричная 2D-карта (4x9x9) + вектор глобальных сигналов."""
+
+    def __init__(
+        self,
+        input_size: int = len(GLOBAL_SIGNAL_LABELS),
+        *,
+        map_channels: int = PPO_MAP_CHANNELS,
+        map_size: int = PPO_MAP_SIZE,
+        map_feat_size: int = 32,
+        hidden1: int = HIDDEN_LAYER_1,
+        hidden2: int = HIDDEN_LAYER_2,
+    ) -> None:
+        super().__init__()
+        self.input_size = int(input_size)
+        self.map_channels = int(map_channels)
+        self.map_size = int(map_size)
+        self.map_feat_size = int(map_feat_size)
+        self.hidden1_size = int(hidden1)
+        self.hidden2_size = int(hidden2)
+
+        self.map_conv = nn.Sequential(
+            nn.Conv2d(self.map_channels, 16, kernel_size=3, padding=0),
+            nn.Tanh(),
+            nn.Conv2d(16, 24, kernel_size=3, stride=2, padding=0),
+            nn.Tanh(),
+            nn.Flatten(),
+        )
+        with torch.no_grad():
+            dummy = torch.zeros(1, self.map_channels, self.map_size, self.map_size)
+            conv_out_dim = int(self.map_conv(dummy).shape[1])
+
+        self.map_proj = nn.Linear(conv_out_dim, self.map_feat_size)
+        # Первые input_size столбцов напрямую соответствуют GLOBAL_SIGNAL_LABELS для визуализации графа
+        self.hidden1_layer = nn.Linear(self.input_size + self.map_feat_size, self.hidden1_size)
+        self.hidden2_layer = nn.Linear(self.hidden1_size, self.hidden2_size)
+        self.output = nn.Linear(self.hidden2_size, len(MODEL_ACTION_LABELS))
+        self.value_head = nn.Linear(self.hidden2_size, 1)
+
+        for mod in self.map_conv:
+            _ortho_init(mod, gain=1.41421356237)
+        _ortho_init(self.map_proj, gain=0.25)
+        _ortho_init(self.hidden1_layer, gain=1.41421356237)
+        _ortho_init(self.hidden2_layer, gain=1.41421356237)
+        _ortho_init(self.output, gain=0.01)
+        _ortho_init(self.value_head, gain=1.0)
+
+    def _prepare_pair(
+        self,
+        signals: torch.Tensor,
+        ego_map: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if signals.dim() == 1:
+            signals = signals.unsqueeze(0)
+        if signals.dim() != 2 or int(signals.shape[1]) != self.input_size:
+            raise ValueError(f"Expected signals shape (*, {self.input_size}), got {tuple(signals.shape)}")
+        target_dtype = self.hidden1_layer.weight.dtype
+        target_device = self.hidden1_layer.weight.device
+        signals = signals.to(device=target_device, dtype=target_dtype)
+
+        if ego_map is None:
+            ego_map = torch.zeros(
+                (signals.shape[0], self.map_channels, self.map_size, self.map_size),
+                dtype=target_dtype,
+                device=target_device,
+            )
+        else:
+            if ego_map.dim() == 3:
+                ego_map = ego_map.unsqueeze(0)
+            ego_map = ego_map.to(device=target_device, dtype=target_dtype)
+        return signals, ego_map
+
+    def forward_features(
+        self,
+        signals: torch.Tensor,
+        ego_map: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        sig_t, map_t = self._prepare_pair(signals, ego_map)
+        map_feat = torch.tanh(self.map_proj(self.map_conv(map_t)))
+        fused = torch.cat((sig_t, map_feat), dim=1)
+        hidden1 = torch.tanh(self.hidden1_layer(fused))
+        hidden2 = torch.tanh(self.hidden2_layer(hidden1))
+        return sig_t, map_feat, hidden1, hidden2
+
+    def forward(
+        self,
+        signals: torch.Tensor,
+        ego_map: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        _, _, _, hidden2 = self.forward_features(signals, ego_map)
+        logits = self.output(hidden2)
+        value = self.value_head(hidden2).squeeze(-1)
+        return logits, value
+
+    def forward_with_activations(
+        self,
+        signals: torch.Tensor,
+        ego_map: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        sig_t, map_feat, hidden1, hidden2 = self.forward_features(signals, ego_map)
+        logits = self.output(hidden2)
+        value = self.value_head(hidden2)
+        return {
+            "input": sig_t.squeeze(0),
+            "map_features": map_feat.squeeze(0),
+            "hidden1": hidden1.squeeze(0),
+            "hidden2": hidden2.squeeze(0),
+            "output": logits.squeeze(0),
+            "value": value.squeeze(0),
+        }
