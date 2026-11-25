@@ -42,6 +42,7 @@ from backend_config import (
     POCKET_SPLIT_START_IDX,
     PPO_MAP_CHANNELS,
     PPO_MAP_SIZE,
+    PPO_SIGNAL_LABELS,
     SAVE_THROTTLE_SECONDS,
     SLOW_API_MS,
     SLOW_NETWORK_MS,
@@ -103,9 +104,10 @@ def safe_hunger_budget_for(score: int, board_size: int) -> float:
 # ЖЁСТКАЯ ФИКСАЦИЯ: ТОЛЬКО СИГНАЛЫ + АВТОПОДПИСЬ АРХИТЕКТУРЫ
 # =========================================================================
 GLOBAL_SIGNAL_COUNT = len(GLOBAL_SIGNAL_LABELS)
+PPO_SIGNAL_COUNT = len(PPO_SIGNAL_LABELS)
 # Подпись меняется автоматически при изменении количества сигналов или размеров слоёв
 ARCH_SIGNATURE = f"sig_{GLOBAL_SIGNAL_COUNT}_{HIDDEN_LAYER_1}_{HIDDEN_LAYER_2}"
-PPO_ARCH_SIGNATURE = f"ppo_map{PPO_MAP_CHANNELS}x{PPO_MAP_SIZE}_c3x3_sig{GLOBAL_SIGNAL_COUNT}_{HIDDEN_LAYER_1}_{HIDDEN_LAYER_2}"
+PPO_ARCH_SIGNATURE = f"ppo_split_map{PPO_MAP_CHANNELS}x{PPO_MAP_SIZE}_c3x3_sig{PPO_SIGNAL_COUNT}_{HIDDEN_LAYER_1}_{HIDDEN_LAYER_2}"
 
 
 def arch_signature_for_agent(agent_kind: str) -> str:
@@ -249,14 +251,19 @@ class SnakeWebBackend:
         self.replay_manager.shutdown(wait=not fast)
 
     def _current_observation(self) -> np.ndarray:
-        # Всегда возвращает только вектор сигналов
+        if self.agent_kind == "ppo":
+            return self.game.get_ppo_signals()
+        # Для DQN всегда возвращаем базовый вектор из 34 сигналов
         return self.game.get_observation_grid()
 
     def _checkpoint_path(self) -> Path:
         return checkpoint_path_for_agent(self.agent_kind)
 
     def _expected_state_size(self) -> int:
-        return GLOBAL_SIGNAL_COUNT
+        return PPO_SIGNAL_COUNT if self.agent_kind == "ppo" else GLOBAL_SIGNAL_COUNT
+
+    def _current_signal_labels(self) -> list[str]:
+        return list(PPO_SIGNAL_LABELS) if self.agent_kind == "ppo" else list(GLOBAL_SIGNAL_LABELS)
 
     def _sync_board_best_score(self) -> None:
         self.board_best_scores[int(self.game.board_size)] = max(
@@ -363,7 +370,7 @@ class SnakeWebBackend:
         if self.mode == "smart":
             self.network_source = self.smart_agent.label
         elif self.agent_kind == "ppo":
-            self.network_source = "PPO (9x9 Map)"
+            self.network_source = f"PPO ({PPO_MAP_SIZE}x{PPO_MAP_SIZE} Map)"
         else:
             self.network_source = "DQN policy"
 
@@ -614,8 +621,13 @@ class SnakeWebBackend:
         prev_updates = int(getattr(self.agent, "total_updates", 0))
         with self.agent_lock:
             completed = self.training_runner.step_alive(self.agent, record_replays=self.record_replays)
+        new_best_policy = False
         for item in completed:
             self._record_training_completion(item)
+            if isinstance(self.agent, PPOAgent):
+                with self.agent_lock:
+                    if self.agent.record_full_episode(int(item.get("score", 0)), str(item.get("reason", ""))):
+                        new_best_policy = True
             replay_steps = item.get("replay_steps")
             if self.record_replays and isinstance(replay_steps, list) and replay_steps:
                 self._save_replay(
@@ -625,7 +637,11 @@ class SnakeWebBackend:
                     prefix=f"ppo_u{int(getattr(self.agent, 'total_updates', 0))}",
                 )
 
-        if int(getattr(self.agent, "total_updates", 0)) > prev_updates or any(item.get("reason") == "victory" for item in completed):
+        if (
+            new_best_policy
+            or int(getattr(self.agent, "total_updates", 0)) > prev_updates
+            or any(item.get("reason") == "victory" for item in completed)
+        ):
             self._schedule_save(urgent=True)
 
         self.training_display_index = self.training_runner.update_leader()
@@ -1066,6 +1082,8 @@ class SnakeWebBackend:
                 "last_value_loss": float(getattr(self.agent, "last_value_loss", 0.0)),
                 "last_entropy": float(getattr(self.agent, "last_entropy", 0.0)),
                 "last_value": float(getattr(self.agent, "last_value", 0.0)),
+                "last_approx_kl": float(getattr(self.agent, "last_approx_kl", 0.0)),
+                "best_avg_score": float(getattr(self.agent, "best_avg_score", 0.0)),
             }
         return {
             "epsilon": float(getattr(self.agent, "epsilon", 1.0)),
@@ -1103,6 +1121,11 @@ class SnakeWebBackend:
             self.agent.last_value_loss = float(payload.get("last_value_loss", getattr(self.agent, "last_value_loss", 0.0)))
             self.agent.last_entropy = float(payload.get("last_entropy", getattr(self.agent, "last_entropy", 0.0)))
             self.agent.last_value = float(payload.get("last_value", getattr(self.agent, "last_value", 0.0)))
+            self.agent.last_approx_kl = float(payload.get("last_approx_kl", getattr(self.agent, "last_approx_kl", 0.0)))
+            self.agent.best_avg_score = max(
+                float(getattr(self.agent, "best_avg_score", 0.0)),
+                float(payload.get("best_avg_score", 0.0) or 0.0),
+            )
             return
         raw_best_fitness = payload.get("best_fitness")
         loaded_best_fitness = float("-inf") if raw_best_fitness is None else float(raw_best_fitness)
@@ -1514,6 +1537,10 @@ class SnakeWebBackend:
         self._sync_board_best_score()
         self.game = SnakeEnv(board_size=board_size)
         self._reset_training_runner(board_size)
+        if isinstance(self.agent, PPOAgent):
+            with self.agent_lock:
+                self.agent.clear_rollout()
+                self.agent.reset_progress_tracker(keep_best_snapshot=True)
         self._select_board_best_score(board_size)
         self._reset_environment_state()
         self._schedule_save(urgent=True)
@@ -1530,7 +1557,8 @@ class SnakeWebBackend:
         
         started_at = time.perf_counter()
         cache_used = False
-        global_signal_labels = list(GLOBAL_SIGNAL_LABELS)
+        global_signal_labels = self._current_signal_labels()
+        expected_signal_count = self._expected_state_size()
         
         self._ensure_runtime_consistency()
         locked = self.agent_lock.acquire(timeout=0.02 if self.running else -1)
@@ -1574,7 +1602,7 @@ class SnakeWebBackend:
                 if self.agent_kind == "ppo"
                 else self.agent.snapshot(self.last_state)
             )
-            input_values = np.asarray(snapshot.get("input", np.zeros(GLOBAL_SIGNAL_COUNT)), dtype=np.float32)
+            input_values = np.asarray(snapshot.get("input", np.zeros(expected_signal_count)), dtype=np.float32)
             hidden1_values = np.asarray(snapshot.get("hidden1", np.zeros(HIDDEN_LAYER_1)), dtype=np.float32)
             hidden2_values = np.asarray(snapshot.get("hidden2", np.zeros(HIDDEN_LAYER_2)), dtype=np.float32)
             output_values = np.asarray(snapshot.get("output", np.zeros(len(MODEL_ACTION_LABELS))), dtype=np.float32)
@@ -1622,8 +1650,9 @@ class SnakeWebBackend:
                 
                 if hasattr(net, 'value_head'):
                     w_val = net.value_head.weight.detach().cpu().numpy()
+                    val_source = np.asarray(snapshot.get("critic_hidden2", hidden2_values), dtype=np.float32)
                     hidden2_value_connections = build_connection_payload(
-                        hidden2_values, value_values, w_val,
+                        val_source, value_values, w_val,
                         10, len(value_values), 16
                     )
             except Exception as e:
@@ -1877,6 +1906,7 @@ class SnakeWebBackend:
                 "device_mode": self.device_mode,
                 "available_devices": self.available_devices,
                 "model_input_size": int(self.last_state.size),
+                "ppo_map_size": PPO_MAP_SIZE,
                 "network_input_adapter_mode": NETWORK_INPUT_ADAPTER_MODE,
                 "agent_kind": self.agent_kind,
                 "available_agent_kinds": list(AGENT_KINDS),
@@ -1941,7 +1971,7 @@ class SnakeWebBackend:
                     "step_review_history": list(self.step_review_history),
                     "observation": self.last_state.tolist(),
                     "global_signals": {
-                        "labels": list(GLOBAL_SIGNAL_LABELS),
+                        "labels": self._current_signal_labels(),
                         "values": self.last_state.tolist(),
                     },
                     "last_death_snapshot": self.last_death_snapshot,

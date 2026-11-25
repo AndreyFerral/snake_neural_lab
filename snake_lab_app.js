@@ -689,7 +689,8 @@ class SnakeLabApp {
     const signalCount = (this.state?.global_signals?.labels ?? []).length;
     const isSmartContext = this.smartContextActive || this.state.mode === "smart";
     const isPpo = !isSmartContext && this.state.agent_kind === "ppo";
-    const inputLabel = isPpo ? `${signalCount} сигн. + 9×9` : `${signalCount} сигналов`;
+    const ppoMapSize = Number(this.state?.ppo_map_size ?? this.state?.network?.ego_map?.[0]?.length ?? 11);
+    const inputLabel = isPpo ? `${signalCount} сигн. + ${ppoMapSize}×${ppoMapSize}` : `${signalCount} сигналов`;
     this.stableHeroProfile = {
       device: this.state.device_kind ?? "CPU",
       boardSize: this.state?.game?.size ?? 10,
@@ -1017,13 +1018,14 @@ class SnakeLabApp {
       this.setText(this.leaderStat, String(this.state.stats.updates ?? 0));
       this.setText(this.aliveStat, this.state.training ? "train" : "idle");
     }
+    const ppoMapSize = Number(this.state?.ppo_map_size ?? this.state?.network?.ego_map?.[0]?.length ?? 11);
     this.setText(this.chartMetricLabel, isSmart ? "Счет" : "Loss");
     this.setText(
       this.chartMetricDescription,
       isSmart
         ? "История Zmey-smart по выбранной модели: счет, награда и средний счет за последние эпизоды."
         : isPpo
-          ? "Суммарный Loss (policy + value - entropy) при обновлении PPO с эгоцентричной картой 9×9."
+          ? `Суммарный Loss (policy + value - entropy) при обновлении PPO с эгоцентричной картой ${ppoMapSize}×${ppoMapSize}.`
           : "Ошибка DQN при обновлении Q-сети: чем ниже значение, тем стабильнее прогнозы."
     );
     this.setText(this.stepStat, String(this.state.stats.steps));

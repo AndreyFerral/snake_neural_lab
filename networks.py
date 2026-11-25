@@ -11,6 +11,7 @@ from backend_config import (
     NETWORK_INPUT_PAD_VALUE,
     PPO_MAP_CHANNELS,
     PPO_MAP_SIZE,
+    PPO_SIGNAL_LABELS,
 )
 
 class BaseSignalNetwork(nn.Module):
@@ -174,11 +175,15 @@ def _ortho_init(layer: nn.Module, gain: float = 1.41421356237) -> None:
 
 
 class PPOMapNetwork(nn.Module):
-    """Гибридная Actor-Critic сеть для PPO: эгоцентричная 2D-карта (4x9x9) + вектор глобальных сигналов."""
+    """Гибридная Actor-Critic сеть для PPO: эгоцентричная 2D-карта + вектор глобальных сигналов.
+
+    После fusion-слоя ветки Actor (policy) и Critic (value) разделены на независимые
+    скрытые слои, чтобы градиенты value-функции не разрушали политику.
+    """
 
     def __init__(
         self,
-        input_size: int = len(GLOBAL_SIGNAL_LABELS),
+        input_size: int = len(PPO_SIGNAL_LABELS),
         *,
         map_channels: int = PPO_MAP_CHANNELS,
         map_size: int = PPO_MAP_SIZE,
@@ -206,10 +211,17 @@ class PPOMapNetwork(nn.Module):
             conv_out_dim = int(self.map_conv(dummy).shape[1])
 
         self.map_proj = nn.Linear(conv_out_dim, self.map_feat_size)
-        # Первые input_size столбцов напрямую соответствуют GLOBAL_SIGNAL_LABELS для визуализации графа
-        self.hidden1_layer = nn.Linear(self.input_size + self.map_feat_size, self.hidden1_size)
+        fused_dim = self.input_size + self.map_feat_size
+
+        # Ветка Actor (policy): первые input_size столбцов hidden1_layer напрямую
+        # соответствуют GLOBAL_SIGNAL_LABELS для совместимости с графом сети в UI.
+        self.hidden1_layer = nn.Linear(fused_dim, self.hidden1_size)
         self.hidden2_layer = nn.Linear(self.hidden1_size, self.hidden2_size)
         self.output = nn.Linear(self.hidden2_size, len(MODEL_ACTION_LABELS))
+
+        # Независимая ветка Critic (value) после fusion-слоя
+        self.critic_hidden1_layer = nn.Linear(fused_dim, self.hidden1_size)
+        self.critic_hidden2_layer = nn.Linear(self.hidden1_size, self.hidden2_size)
         self.value_head = nn.Linear(self.hidden2_size, 1)
 
         for mod in self.map_conv:
@@ -218,6 +230,8 @@ class PPOMapNetwork(nn.Module):
         _ortho_init(self.hidden1_layer, gain=1.41421356237)
         _ortho_init(self.hidden2_layer, gain=1.41421356237)
         _ortho_init(self.output, gain=0.01)
+        _ortho_init(self.critic_hidden1_layer, gain=1.41421356237)
+        _ortho_init(self.critic_hidden2_layer, gain=1.41421356237)
         _ortho_init(self.value_head, gain=1.0)
 
     def _prepare_pair(
@@ -249,22 +263,24 @@ class PPOMapNetwork(nn.Module):
         self,
         signals: torch.Tensor,
         ego_map: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         sig_t, map_t = self._prepare_pair(signals, ego_map)
         map_feat = torch.tanh(self.map_proj(self.map_conv(map_t)))
         fused = torch.cat((sig_t, map_feat), dim=1)
-        hidden1 = torch.tanh(self.hidden1_layer(fused))
-        hidden2 = torch.tanh(self.hidden2_layer(hidden1))
-        return sig_t, map_feat, hidden1, hidden2
+        actor_h1 = torch.tanh(self.hidden1_layer(fused))
+        actor_h2 = torch.tanh(self.hidden2_layer(actor_h1))
+        critic_h1 = torch.tanh(self.critic_hidden1_layer(fused))
+        critic_h2 = torch.tanh(self.critic_hidden2_layer(critic_h1))
+        return sig_t, map_feat, actor_h1, actor_h2, critic_h1, critic_h2
 
     def forward(
         self,
         signals: torch.Tensor,
         ego_map: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        _, _, _, hidden2 = self.forward_features(signals, ego_map)
-        logits = self.output(hidden2)
-        value = self.value_head(hidden2).squeeze(-1)
+        _, _, _, actor_h2, _, critic_h2 = self.forward_features(signals, ego_map)
+        logits = self.output(actor_h2)
+        value = self.value_head(critic_h2).squeeze(-1)
         return logits, value
 
     def forward_with_activations(
@@ -272,14 +288,16 @@ class PPOMapNetwork(nn.Module):
         signals: torch.Tensor,
         ego_map: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        sig_t, map_feat, hidden1, hidden2 = self.forward_features(signals, ego_map)
-        logits = self.output(hidden2)
-        value = self.value_head(hidden2)
+        sig_t, map_feat, actor_h1, actor_h2, critic_h1, critic_h2 = self.forward_features(signals, ego_map)
+        logits = self.output(actor_h2)
+        value = self.value_head(critic_h2)
         return {
             "input": sig_t.squeeze(0),
             "map_features": map_feat.squeeze(0),
-            "hidden1": hidden1.squeeze(0),
-            "hidden2": hidden2.squeeze(0),
+            "hidden1": actor_h1.squeeze(0),
+            "hidden2": actor_h2.squeeze(0),
+            "critic_hidden1": critic_h1.squeeze(0),
+            "critic_hidden2": critic_h2.squeeze(0),
             "output": logits.squeeze(0),
             "value": value.squeeze(0),
         }

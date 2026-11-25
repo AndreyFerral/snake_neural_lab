@@ -15,6 +15,7 @@ from backend_config import (
     DANGER_START_IDX,
     PPO_MAP_CHANNELS,
     PPO_MAP_SIZE,
+    PPO_SIGNAL_LABELS,
     TAIL_BLOCKED_START_IDX,
     TAIL_LOSS_PENALTY,
 )
@@ -102,11 +103,133 @@ class TestAgents(unittest.TestCase):
 
         with torch.no_grad():
             agent.online_net.hidden1_layer.weight.fill_(0.15)
+            agent.online_net.critic_hidden1_layer.weight.fill_(-0.25)
+        self.assertEqual(agent.global_signal_count, len(PPO_SIGNAL_LABELS))
+        snap = agent.snapshot(sig, ego_map=ego)
+        self.assertIn("critic_hidden2", snap)
+        self.assertEqual(snap["hidden1"].shape[0], agent.online_net.hidden1_size)
+        self.assertEqual(snap["hidden2"].shape[0], agent.online_net.hidden2_size)
+
         ckpt = agent.export_checkpoint()
         restored = PPOAgent(device=torch.device("cpu"), num_envs=2, rollout_steps=8)
         restored.import_checkpoint(ckpt)
         self.assertEqual(restored.total_updates, agent.total_updates)
         self.assertAlmostEqual(float(restored.online_net.hidden1_layer.weight[0, 0].detach()), 0.15, places=4)
+        self.assertAlmostEqual(float(restored.online_net.critic_hidden1_layer.weight[0, 0].detach()), -0.25, places=4)
+
+    def test_ppo_kl_early_stop_tail_soft_bias_and_best_snapshot_protection(self) -> None:
+        torch.manual_seed(11)
+        np.random.seed(11)
+        agent = PPOAgent(
+            device=torch.device("cpu"),
+            num_envs=2,
+            rollout_steps=8,
+            minibatch_size=8,
+            epochs=6,
+            lr=0.05,
+            target_kl=0.001,
+            tail_blocked_logit_bias=0.5,
+        )
+        # Soft preference for non-tail_blocked moves when safe alternative exists
+        with torch.no_grad():
+            agent.online_net.output.weight.zero_()
+            agent.online_net.output.bias.zero_()
+        sig = np.zeros(agent.global_signal_count, dtype=np.float32)
+        sig[TAIL_BLOCKED_START_IDX + 0] = 1.0  # forward tail_blocked; left & right OK
+        ego = np.zeros((PPO_MAP_CHANNELS, PPO_MAP_SIZE, PPO_MAP_SIZE), dtype=np.float32)
+        _, probs, _, _ = agent.select_action(sig, ego_map=ego, training=False)
+        self.assertLess(float(probs[0]), float(probs[1]))
+        self.assertLess(float(probs[0]), float(probs[2]))
+
+        # Large lr + tight target_kl should trigger KL early stopping cleanly
+        runner = ParallelPPORunner(2, 10, env_factory=SnakeEnv)
+        for _ in range(9):
+            runner.step_alive(agent, record_replays=False)
+        self.assertGreaterEqual(agent.total_updates, 1)
+        self.assertGreaterEqual(agent.kl_early_stops, 1)
+        self.assertTrue(np.isfinite(agent.last_approx_kl))
+
+        # Best policy snapshot & soft rollback on sustained degradation
+        with torch.no_grad():
+            agent.online_net.hidden2_layer.weight.fill_(0.42)
+        for _ in range(agent.best_min_episodes):
+            agent.record_full_episode(40, "body_collision")
+        self.assertIsNotNone(agent.best_policy_state)
+        self.assertAlmostEqual(agent.best_avg_score, 40.0, places=3)
+
+        # Corrupt policy weights and feed low episode scores to trigger soft restore
+        with torch.no_grad():
+            agent.online_net.hidden2_layer.weight.fill_(-0.99)
+        for _ in range(35):
+            agent.record_full_episode(5, "wall_collision")
+        self.assertGreaterEqual(agent.restores_from_best, 1)
+        self.assertAlmostEqual(float(agent.online_net.hidden2_layer.weight[0, 0].detach()), 0.42, places=4)
+
+        # Best policy snapshot survives checkpoint round-trip
+        ckpt = agent.export_checkpoint()
+        self.assertIn("best_policy_net", ckpt)
+        restored = PPOAgent(device=torch.device("cpu"))
+        restored.import_checkpoint(ckpt)
+        self.assertIsNotNone(restored.best_policy_state)
+        self.assertAlmostEqual(restored.best_avg_score, 40.0, places=3)
+
+    def test_parallel_ppo_runner_failure_replay_and_honest_stats(self) -> None:
+        torch.manual_seed(3)
+        np.random.seed(3)
+        agent = PPOAgent(device=torch.device("cpu"), num_envs=4, rollout_steps=64)
+        runner = ParallelPPORunner(
+            4,
+            10,
+            env_factory=SnakeEnv,
+            replay_env_count=1,
+            failure_min_score=25,
+            failure_snapshot_interval=2,
+            failure_rewind_target=4,
+        )
+        # Seed env 0 with score >= 25 and several snapshots, then force imminent wall collision
+        env0 = runner.envs[0]
+        env0.reset()
+        env0.score = 30
+        env0.step_count = 10
+        env0.snake = [(5, 5), (4, 5), (3, 5)]
+        env0.direction = 1
+        env0.food = (0, 0)
+        env0._clear_observation_cache()
+        runner._state_snapshots[0].append((10, env0.export_state()))
+        # Move env0 into a doomed position (all 3 moves blocked: wall, wall, non-tail body) at step 22
+        env0.step_count = 22
+        env0.snake = [(9, 0), (8, 0), (8, 1), (9, 1), (9, 2)]
+        env0.direction = 1
+        env0.food = (0, 9)
+        env0._clear_observation_cache()
+
+        completed = runner.step_alive(agent, record_replays=False)
+        honest_indices = [c["index"] for c in completed]
+        self.assertIn(0, honest_indices)
+        self.assertEqual(len(runner.failure_replay_buffer), 1)
+
+        # Force replay slot (index 3) to finish its initial game and load from failure buffer
+        env3 = runner.envs[3]
+        env3.snake = [(9, 0), (8, 0), (8, 1), (9, 1), (9, 2)]
+        env3.direction = 1
+        env3.food = (0, 9)
+        env3._clear_observation_cache()
+        runner.step_alive(agent, record_replays=False)
+        self.assertTrue(runner.is_replay_env[3])
+
+        # Now kill the replay episode on slot 3: it must NOT appear in `completed`
+        env3.snake = [(9, 0), (8, 0), (8, 1), (9, 1), (9, 2)]
+        env3.direction = 1
+        env3.food = (0, 9)
+        env3._clear_observation_cache()
+        completed_after = runner.step_alive(agent, record_replays=False)
+        self.assertNotIn(3, [c["index"] for c in completed_after])
+        self.assertGreaterEqual(runner.failure_replays_completed, 1)
+
+        # Board size change / reset_all clears failure replay buffer
+        runner.reset_all(board_size=15)
+        self.assertEqual(len(runner.failure_replay_buffer), 0)
+        self.assertFalse(any(runner.is_replay_env))
 
     def test_shared_dqn_step_helpers(self) -> None:
         env = SnakeEnv(board_size=10)

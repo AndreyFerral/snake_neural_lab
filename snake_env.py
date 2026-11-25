@@ -99,6 +99,10 @@ class SnakeEnv:
         self.board_size = board_size
         self._obs_cache_step: int = -1
         self._obs_cache_vec: np.ndarray | None = None
+        self._area_ratio_cache_step: int = -1
+        self._area_ratio_cache_vec: np.ndarray | None = None
+        self._ppo_obs_cache_step: int = -1
+        self._ppo_obs_cache_vec: np.ndarray | None = None
         self._ego_map_cache_step: int = -1
         self._ego_map_cache_size: int = 0
         self._ego_map_cache_arr: np.ndarray | None = None
@@ -120,6 +124,10 @@ class SnakeEnv:
     def _clear_observation_cache(self) -> None:
         self._obs_cache_step = -1
         self._obs_cache_vec = None
+        self._area_ratio_cache_step = -1
+        self._area_ratio_cache_vec = None
+        self._ppo_obs_cache_step = -1
+        self._ppo_obs_cache_vec = None
         self._ego_map_cache_step = -1
         self._ego_map_cache_size = 0
         self._ego_map_cache_arr = None
@@ -904,8 +912,66 @@ class SnakeEnv:
         self._ego_map_cache_arr = grid
         return grid
 
+    def get_ppo_area_ratios(self) -> np.ndarray:
+        """Возвращает 3 признака свободной достижимой площади после каждого относительного хода."""
+        if self.step_count == self._area_ratio_cache_step and self._area_ratio_cache_vec is not None:
+            return self._area_ratio_cache_vec
+
+        n = self.board_size
+        board_cells = n * n
+        snake = self.snake
+        snake_len = len(snake)
+        head_x, head_y = snake[0]
+        food_x, food_y = self.food
+        tail_x, tail_y = snake[-1]
+        tail_idx = tail_y * n + tail_x
+        direction = self.direction
+
+        self._ensure_bfs_buffers(n)
+        b_stamp = self._next_block_stamp()
+        blk = self._bfs_blocked
+        for bx, by in snake[:-1]:
+            blk[by * n + bx] = b_stamp
+
+        ratios = np.zeros(3, dtype=np.float32)
+        for act in (0, 1, 2):
+            abs_dir = direction if act == 0 else ((direction - 1) % 4 if act == 1 else (direction + 1) % 4)
+            mx, my = DIRECTIONS[abs_dir]
+            nx, ny = head_x + mx, head_y + my
+            if not (0 <= nx < n and 0 <= ny < n):
+                continue
+            will_eat = (nx == food_x and ny == food_y)
+            next_idx = ny * n + nx
+            if blk[next_idx] == b_stamp or (will_eat and next_idx == tail_idx):
+                continue
+            saved_tail = blk[tail_idx]
+            if will_eat:
+                blk[tail_idx] = b_stamp
+                new_len = snake_len + 1
+            else:
+                new_len = snake_len
+            free_cells = max(1, board_cells - new_len)
+            reach = self._fast_reachable_space(next_idx, b_stamp)
+            blk[tail_idx] = saved_tail
+            ratios[act] = min(1.0, float(reach) / float(free_cells))
+
+        self._area_ratio_cache_step = self.step_count
+        self._area_ratio_cache_vec = ratios
+        return ratios
+
+    def get_ppo_signals(self, target_size: int = STARTUP_BOARD_SIZE) -> np.ndarray:
+        """Расширенный вектор сигналов для PPO: 34 базовых + 3 признака свободной площади."""
+        if self.step_count == self._ppo_obs_cache_step and self._ppo_obs_cache_vec is not None:
+            return self._ppo_obs_cache_vec
+        base = self.get_extra_signals(target_size)
+        ratios = self.get_ppo_area_ratios()
+        vec = np.concatenate((base, ratios), axis=0).astype(np.float32)
+        self._ppo_obs_cache_step = self.step_count
+        self._ppo_obs_cache_vec = vec
+        return vec
+
     def get_observation_grid(self, target_size: int = STARTUP_BOARD_SIZE) -> np.ndarray:
-        # Возвращаем вектор сигналов (общая база признаков для DQN и PPO).
+        # Возвращаем вектор сигналов (общая база признаков для DQN).
         return self.get_extra_signals(target_size)
 
     def export_state(self) -> dict[str, object]:

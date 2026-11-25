@@ -77,8 +77,14 @@ ENDGAME_MERGE_BONUS = 0.25
 CPU_BATCH_SIZE = 64
 HIDDEN_LAYER_1 = 64
 HIDDEN_LAYER_2 = 32
-PPO_MAP_SIZE = 9
+PPO_MAP_SIZE = 11
 PPO_MAP_CHANNELS = 4
+PPO_EXTRA_SIGNAL_LABELS = (
+    "area_ratio_forward",
+    "area_ratio_left",
+    "area_ratio_right",
+)
+PPO_SIGNAL_LABELS = GLOBAL_SIGNAL_LABELS + PPO_EXTRA_SIGNAL_LABELS
 
 
 STEP_REASON_ORDER = (
@@ -174,6 +180,9 @@ SIGNAL_LABELS = {
     "pocket_merge_forward": "🔗↑",
     "pocket_merge_left": "🔗←",
     "pocket_merge_right": "🔗→",
+    "area_ratio_forward": "📐↑",
+    "area_ratio_left": "📐←",
+    "area_ratio_right": "📐→",
 }
 
 TERMINAL_REASONS = (

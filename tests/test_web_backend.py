@@ -16,7 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import web_api
 import web_backend
-from backend_config import GLOBAL_SIGNAL_LABELS, PPO_MAP_CHANNELS, PPO_MAP_SIZE
+from backend_config import GLOBAL_SIGNAL_LABELS, PPO_MAP_CHANNELS, PPO_MAP_SIZE, PPO_SIGNAL_LABELS
 from dqn_agent import DQNAgent
 from ppo_agent import PPOAgent
 
@@ -72,11 +72,41 @@ class TestWebBackendAndApi(unittest.TestCase):
                     self.assertIsNotNone(ego_map)
                     self.assertEqual(len(ego_map), PPO_MAP_CHANNELS)
                     self.assertEqual(len(ego_map[0]), PPO_MAP_SIZE)
+                    self.assertEqual(ppo_snap["ppo_map_size"], PPO_MAP_SIZE)
+                    self.assertEqual(ppo_snap["model_input_size"], len(PPO_SIGNAL_LABELS))
+                    self.assertEqual(len(ppo_snap["global_signals"]["labels"]), len(PPO_SIGNAL_LABELS))
+
+                    # Failure-replay episodes in PPO runner must NOT leak into UI stats/history
+                    assert backend.training_runner is not None
+                    saved_state = backend.training_runner.envs[0].export_state()
+                    backend.training_runner.failure_replay_buffer.append(saved_state)
+                    replay_slot = backend.training_runner.num_envs - 1
+                    backend.training_runner.is_replay_env[replay_slot] = True
+                    r_env = backend.training_runner.envs[replay_slot]
+                    r_env.score = 77
+                    r_env.snake = [(9, 0), (8, 0), (8, 1), (9, 1), (9, 2)]
+                    r_env.direction = 1
+                    r_env.food = (0, 9)
+                    r_env._clear_observation_cache()
+                    with backend.lock:
+                        backend._perform_parallel_training_step()
+                    self.assertGreaterEqual(backend.training_runner.failure_replays_completed, 1)
+                    self.assertEqual(backend.episode_counter, 0)
+                    self.assertEqual(backend.best_score, 0)
+                    self.assertEqual(len(backend.history), 0)
+
+                    # Changing board size clears PPO failure replay buffer
+                    res_board = backend.handle_command({"type": "set_board_size", "value": 15})
+                    self.assertTrue(res_board["ok"])
+                    self.assertEqual(len(backend.training_runner.failure_replay_buffer), 0)
+                    backend.handle_command({"type": "set_board_size", "value": 10})
 
                     res = backend.handle_command({"type": "set_agent_kind", "value": "dqn"})
                     self.assertTrue(res["ok"])
                     dqn_w = float(backend.agent.online_net.hidden1_layer.weight[0, 0].detach())
                     self.assertAlmostEqual(dqn_w, 0.1234, places=4)
+                    dqn_snap = backend.state_snapshot(include_network=True, include_details=True)
+                    self.assertEqual(dqn_snap["model_input_size"], len(GLOBAL_SIGNAL_LABELS))
 
                     backend.handle_command({"type": "set_mode", "value": "manual"})
                     with backend.lock:

@@ -9,7 +9,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend_config import GLOBAL_SIGNAL_LABELS, DEATH_PENALTY, APPLE_REWARD, PPO_MAP_CHANNELS, PPO_MAP_SIZE
+from backend_config import (
+    APPLE_REWARD,
+    DEATH_PENALTY,
+    GLOBAL_SIGNAL_LABELS,
+    PPO_MAP_CHANNELS,
+    PPO_MAP_SIZE,
+    PPO_SIGNAL_LABELS,
+)
 from snake_env import SnakeEnv, relative_to_absolute
 
 
@@ -166,6 +173,31 @@ class TestSnakeEnv(unittest.TestCase):
         # Reachable open cell at (9, 4) -> reach=1.0; wall cell has reach=0.0
         self.assertEqual(float(ego_map[3, center, center - 1]), 1.0)
         self.assertEqual(float(ego_map[3, center - 1, center]), 0.0)
+
+    def test_ppo_area_ratios_and_extended_signals_do_not_change_dqn_signals(self) -> None:
+        env = SnakeEnv(board_size=10)
+        env.reset()
+        # Head at right wall (9, 5) facing right -> forward is wall (0.0), left/right open (> 0.5)
+        env.snake = [(9, 5), (8, 5), (7, 5)]
+        env.direction = 1
+        env.food = (2, 2)
+        env._clear_observation_cache()
+
+        dqn_obs = env.get_observation_grid()
+        self.assertEqual(dqn_obs.shape, (len(GLOBAL_SIGNAL_LABELS),))
+        self.assertEqual(len(GLOBAL_SIGNAL_LABELS), 34)
+
+        ratios = env.get_ppo_area_ratios()
+        self.assertEqual(ratios.shape, (3,))
+        self.assertEqual(float(ratios[0]), 0.0)
+        self.assertGreater(float(ratios[1]), 0.8)
+        self.assertGreater(float(ratios[2]), 0.8)
+
+        ppo_obs = env.get_ppo_signals()
+        self.assertEqual(ppo_obs.shape, (len(PPO_SIGNAL_LABELS),))
+        self.assertTrue(np.array_equal(ppo_obs[: len(GLOBAL_SIGNAL_LABELS)], dqn_obs))
+        self.assertTrue(np.array_equal(ppo_obs[len(GLOBAL_SIGNAL_LABELS) :], ratios))
+        self.assertEqual(PPO_MAP_SIZE, 11)
 
 
 if __name__ == "__main__":

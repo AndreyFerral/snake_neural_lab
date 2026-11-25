@@ -299,6 +299,9 @@ const SnakeRenderers = {
     pocket_merge_forward: "Ход прямо склеивает карманы обратно",
     pocket_merge_left: "Ход влево склеивает карманы обратно",
     pocket_merge_right: "Ход вправо склеивает карманы обратно",
+    area_ratio_forward: "Доля доступной свободной площади после хода прямо",
+    area_ratio_left: "Доля доступной свободной площади после хода влево",
+    area_ratio_right: "Доля доступной свободной площади после хода вправо",
   },
 
   createColumnPositions(centerX, centerY, count, spacing) {
@@ -545,7 +548,8 @@ const SnakeRenderers = {
           ["tail_blocked_forward", "tail_blocked_left", "tail_blocked_right"],
           ["partition_forward", "partition_left", "partition_right"],
           ["pocket_split_forward", "pocket_split_left", "pocket_split_right"],
-          ["pocket_merge_forward", "pocket_merge_left", "pocket_merge_right"]
+          ["pocket_merge_forward", "pocket_merge_left", "pocket_merge_right"],
+          ["area_ratio_forward", "area_ratio_left", "area_ratio_right"]
         ]
       }
     ];
@@ -605,8 +609,12 @@ const SnakeRenderers = {
     const valueBadgeH = showPpoValueBadge ? 28 : 0;
     const policyCardH = policyHeaderH + outputsBlockH + valueBadgeGap + valueBadgeH + 8;
     const rightGroupGap = 14;
+    const egoMapCols = showEgoMapCard ? Math.max(3, (egoMap[0] && egoMap[0].length) || 11) : 11;
+    const rawMapGridSize = showEgoMapCard
+      ? clamp(Math.floor(Math.min(rightCardWidth - 28, contentHeight - policyCardH - rightGroupGap - 54)), 88, 132)
+      : 0;
     const mapGridSize = showEgoMapCard
-      ? clamp(Math.floor(Math.min(rightCardWidth - 32, contentHeight - policyCardH - rightGroupGap - 54)), 81, 126)
+      ? Math.max(egoMapCols * 8, Math.floor(rawMapGridSize / egoMapCols) * egoMapCols)
       : 0;
     const mapCardH = showEgoMapCard ? (24 + mapGridSize + 22) : 0;
     const totalRightStackH = showEgoMapCard ? (policyCardH + rightGroupGap + mapCardH) : 0;
@@ -864,8 +872,8 @@ const SnakeRenderers = {
     const chBody = egoMap[1] || [];
     const chFood = egoMap[2] || [];
     const chReach = egoMap[3] || [];
-    const rows = chWall.length || 9;
-    const cols = (chWall[0] && chWall[0].length) || 9;
+    const rows = chWall.length || 11;
+    const cols = (chWall[0] && chWall[0].length) || 11;
     const gx = x + Math.round((cardW - gridSize) / 2);
     const gy = y + 24;
     const cell = gridSize / cols;
@@ -936,7 +944,9 @@ const SnakeRenderers = {
     const lines = [];
     if (hoverState.layer === "IN") {
       const desc = this.SIGNAL_DESCRIPTIONS[hoverState.label] || hoverState.label;
-      lines.push(`${formatSignalLabel(hoverState.label)}  ${hoverState.label} = ${Number(hoverState.value).toFixed(0)}`);
+      const numVal = Number(hoverState.value);
+      const valText = Math.abs(numVal - Math.round(numVal)) < 0.005 ? numVal.toFixed(0) : numVal.toFixed(2);
+      lines.push(`${formatSignalLabel(hoverState.label)}  ${hoverState.label} = ${valText}`);
       lines.push(desc);
       const topConns = (connections.global_hidden1 || [])
         .filter((c) => c.from_index === hoverState.index)
