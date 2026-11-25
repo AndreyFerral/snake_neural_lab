@@ -565,10 +565,7 @@ class SnakeWebBackend:
             )
 
     def _visual_speed(self) -> int:
-        speed = max(1, int(self.speed))
-        if self.training and self.agent_kind == "ppo":
-            return min(20, speed)
-        return speed
+        return max(1, int(self.speed))
 
     def _training_burst(self) -> int:
         speed = max(1, int(self.speed))
