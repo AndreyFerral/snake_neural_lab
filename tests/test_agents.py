@@ -268,6 +268,32 @@ class TestAgents(unittest.TestCase):
         restored.import_checkpoint(ckpt)
         self.assertAlmostEqual(restored.best_fill_by_board.get(15, 0.0), agent.best_fill_by_board[15], places=4)
 
+        # SWA->EMA averaging activates once fill >= 0.90, feeds inference_net, round-trips, and resets on board switch
+        ema_agent = PPOAgent(device=torch.device("cpu"))
+        ema_agent.best_fill_ratio = 0.95
+        with torch.no_grad():
+            ema_agent.online_net.output.weight.fill_(1.0)
+        for _ in range(4):
+            ema_agent._update_ema_policy()
+        with torch.no_grad():
+            ema_agent.online_net.output.weight.fill_(3.0)
+        for _ in range(4):
+            ema_agent._update_ema_policy()
+        ema_agent.sync_inference_net()
+        self.assertTrue(ema_agent.ema_active)
+        self.assertEqual(ema_agent.ema_updates, 8)
+        # Running SWA mean of four 1.0s and four 3.0s is exactly 2.0
+        self.assertAlmostEqual(float(ema_agent.inference_net.output.weight[0, 0].detach()), 2.0, places=4)
+        ema_ckpt = ema_agent.export_checkpoint()
+        ema_restored = PPOAgent(device=torch.device("cpu"))
+        ema_restored.import_checkpoint(ema_ckpt)
+        self.assertTrue(ema_restored.ema_active)
+        self.assertEqual(ema_restored.ema_updates, 8)
+        self.assertAlmostEqual(float(ema_restored.inference_net.output.weight[0, 0].detach()), 2.0, places=4)
+        ema_restored.on_board_size_changed(20)
+        self.assertFalse(ema_restored.ema_active)
+        self.assertEqual(ema_restored.ema_updates, 0)
+
         # Two-tier endgame failure replay + stale pruning after 6 failures
         runner = ParallelPPORunner(4, 10, env_factory=SnakeEnv, replay_env_count=1, failure_min_score=25)
         env0 = runner.envs[0]

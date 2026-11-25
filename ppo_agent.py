@@ -69,6 +69,9 @@ PPO_FAILURE_STARVATION_REWIND = 22
 PPO_TAIL_BLOCKED_LOGIT_BIAS = 0.5
 PPO_TAIL_BIAS_ANNEAL_START_FILL = 0.70
 PPO_TAIL_BIAS_ANNEAL_END_FILL = 0.90
+PPO_EMA_TAU = 0.988
+PPO_EMA_START_FILL = 0.90
+PPO_EMA_MIN_UPDATES = 5
 
 
 def valid_action_mask_from_signals(signals: torch.Tensor) -> torch.Tensor:
@@ -137,6 +140,9 @@ class PPOAgent:
             hidden2=hidden2,
         ).to(self.device)
         self._inference_lock = threading.Lock()
+        self.ema_tau: float = float(PPO_EMA_TAU)
+        self.ema_updates: int = 0
+        self.ema_policy_state: dict[str, torch.Tensor] | None = None
         self.sync_inference_net()
         self.optimizer = torch.optim.AdamW(self.online_net.parameters(), lr=self.base_lr, eps=1e-5)
 
@@ -245,6 +251,9 @@ class PPOAgent:
             self.best_policy_updates = 0
             self._board_adapt_boost = 0.0
             self._critic_warmup_updates = 0
+            self.ema_policy_state = None
+            self.ema_updates = 0
+            self.sync_inference_net()
 
     def on_board_size_changed(self, new_board_size: int) -> None:
         """Сбрасывает локальное окно метрик и мягко адаптирует критик/расписание к новому размеру поля."""
@@ -255,6 +264,9 @@ class PPOAgent:
         self._episodes_since_best_check = 0
         self._degradation_streak = 0
         self.best_fill_ratio = float(self.best_fill_by_board.get(bs, 0.0))
+        self.ema_policy_state = None
+        self.ema_updates = 0
+        self.sync_inference_net()
         if self.best_fill_ratio < 0.70 and (self.total_updates >= 200 or prev_global_fill >= 0.70):
             self._board_adapt_boost = 1.0
             self._critic_warmup_updates = 6 if prev_global_fill >= 0.70 else 0
@@ -308,8 +320,40 @@ class PPOAgent:
                 self._degradation_streak = 0
         return False
 
+    @property
+    def ema_active(self) -> bool:
+        return self.ema_policy_state is not None and self.ema_updates >= PPO_EMA_MIN_UPDATES
+
+    def _update_ema_policy(self) -> None:
+        """Обновляет сглаженные SWA->EMA веса политики на зрелой фазе (fill >= 0.90)."""
+        if self._global_best_fill() < PPO_EMA_START_FILL:
+            return
+        with torch.no_grad():
+            sd = self.online_net.state_dict()
+            if self.ema_policy_state is None or self.ema_updates <= 0:
+                self.ema_policy_state = {k: v.detach().to(device=self.device).clone() for k, v in sd.items()}
+                self.ema_updates = 1
+                return
+            # Точный SWA-разгон (k/(k+1)) на первых ~80 обновлениях, затем плавный Polyak EMA (tau=0.988)
+            eff_tau = min(self.ema_tau, float(self.ema_updates) / float(self.ema_updates + 1))
+            alpha = 1.0 - eff_tau
+            for k, v in sd.items():
+                ema_v = self.ema_policy_state.get(k)
+                if ema_v is None or ema_v.shape != v.shape:
+                    self.ema_policy_state[k] = v.detach().to(device=self.device).clone()
+                elif v.is_floating_point():
+                    ema_v.mul_(eff_tau).add_(v.detach().to(device=self.device, dtype=ema_v.dtype), alpha=alpha)
+                else:
+                    self.ema_policy_state[k] = v.detach().to(device=self.device).clone()
+            self.ema_updates += 1
+
     def sync_inference_net(self) -> None:
-        state = {k: v.detach().clone() for k, v in self.online_net.state_dict().items()}
+        source_state = (
+            self.ema_policy_state
+            if self.ema_active
+            else self.online_net.state_dict()
+        )
+        state = {k: v.detach().to(device=self.device).clone() for k, v in source_state.items()}
         with self._inference_lock:
             self.inference_net.load_state_dict(state)
             self.inference_net.eval()
@@ -341,6 +385,8 @@ class PPOAgent:
             return False
         load_matching_state(self.online_net, self.best_policy_state)
         self.online_net.to(self.device)
+        self.ema_policy_state = None
+        self.ema_updates = 0
         self.sync_inference_net()
         self.optimizer = torch.optim.AdamW(self.online_net.parameters(), lr=self._current_lr(), eps=1e-5)
         self.clear_rollout()
@@ -373,6 +419,8 @@ class PPOAgent:
             return
         self.device = device
         self.online_net = self.online_net.to(self.device)
+        if self.ema_policy_state is not None:
+            self.ema_policy_state = {k: v.to(self.device) for k, v in self.ema_policy_state.items()}
         with self._inference_lock:
             self.inference_net = self.inference_net.to(self.device)
         move_optimizer_state(self.optimizer, self.device)
@@ -415,6 +463,8 @@ class PPOAgent:
         *,
         ego_map: np.ndarray | None = None,
     ) -> tuple[int, np.ndarray, bool, int]:
+        if self.ema_active:
+            return self.select_showcase_action(state, ego_map=ego_map)
         return self.select_action(state, ego_map=ego_map, training=False)
 
     @torch.inference_mode()
@@ -611,6 +661,8 @@ class PPOAgent:
         self.total_updates += 1
         if self._critic_warmup_updates > 0:
             self._critic_warmup_updates -= 1
+        else:
+            self._update_ema_policy()
         if self._board_adapt_boost > 0.0:
             self._board_adapt_boost = max(0.0, self._board_adapt_boost - (1.0 / 120.0))
         self.last_loss = total_loss_acc / batch_updates
@@ -663,7 +715,13 @@ class PPOAgent:
             "best_fill_by_board": {str(k): float(v) for k, v in self.best_fill_by_board.items()},
             "best_policy_updates": int(self.best_policy_updates),
             "restores_from_best": int(self.restores_from_best),
+            "ema_updates": int(self.ema_updates),
         }
+        if self.ema_policy_state is not None and self.ema_updates > 0:
+            payload["ema_policy_net"] = {
+                k: v.detach().to(device="cpu", dtype=torch.float32)
+                for k, v in self.ema_policy_state.items()
+            }
         if self.best_policy_state is not None:
             payload["best_policy_net"] = {
                 k: v.detach().to(device="cpu", dtype=torch.float32)
@@ -712,6 +770,18 @@ class PPOAgent:
             }
         else:
             self.best_policy_state = None
+        ema_state = payload.get("ema_policy_net")
+        ema_updates = int(payload.get("ema_updates", 0) or 0)
+        if isinstance(ema_state, dict) and ema_state and ema_updates > 0:
+            self.ema_policy_state = {
+                k: v.detach().to(device=self.device, dtype=torch.float32).clone()
+                for k, v in ema_state.items()
+                if torch.is_tensor(v)
+            }
+            self.ema_updates = ema_updates
+        else:
+            self.ema_policy_state = None
+            self.ema_updates = 0
         self._recent_episode_scores.clear()
         self._recent_fill_ratios.clear()
         self._episodes_since_best_check = 0

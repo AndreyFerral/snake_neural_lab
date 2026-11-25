@@ -173,6 +173,8 @@ def load_ppo_checkpoint(
     agent.import_checkpoint(payload)
     if use_best_net and isinstance(payload.get("best_policy_net"), dict):
         agent.online_net.load_state_dict(payload["best_policy_net"])
+        agent.ema_policy_state = None
+        agent.ema_updates = 0
         agent.sync_inference_net()
     return agent
 
