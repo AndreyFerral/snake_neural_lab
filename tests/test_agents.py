@@ -293,6 +293,14 @@ class TestAgents(unittest.TestCase):
         ema_restored.on_board_size_changed(20)
         self.assertFalse(ema_restored.ema_active)
         self.assertEqual(ema_restored.ema_updates, 0)
+        # Adaptive polish rollout batch: 88 early -> 176 at fill >= 0.90 (and drops back to 88 during board adapt)
+        batch_agent = PPOAgent(device=torch.device("cpu"))
+        self.assertEqual(batch_agent.effective_rollout_steps(), 88)
+        batch_agent.best_fill_ratio = 0.92
+        self.assertEqual(batch_agent.effective_rollout_steps(), 176)
+        batch_agent.total_updates = 400
+        batch_agent.on_board_size_changed(15)
+        self.assertEqual(batch_agent.effective_rollout_steps(), 88)
 
         # Two-tier endgame failure replay + stale pruning after 6 failures
         runner = ParallelPPORunner(4, 10, env_factory=SnakeEnv, replay_env_count=1, failure_min_score=25)

@@ -39,6 +39,7 @@ from snake_env import relative_to_absolute
 
 PPO_NUM_ENVS = 12
 PPO_ROLLOUT_STEPS = 88
+PPO_POLISH_ROLLOUT_STEPS = 176
 PPO_GAMMA = 0.995
 PPO_GAE_LAMBDA = 0.95
 PPO_CLIP_COEF = 0.2
@@ -70,6 +71,7 @@ PPO_TAIL_BLOCKED_LOGIT_BIAS = 0.5
 PPO_TAIL_BIAS_ANNEAL_START_FILL = 0.70
 PPO_TAIL_BIAS_ANNEAL_END_FILL = 0.90
 PPO_EMA_TAU = 0.988
+PPO_EMA_POLISH_TAU = 0.978
 PPO_EMA_START_FILL = 0.90
 PPO_EMA_MIN_UPDATES = 5
 
@@ -334,8 +336,9 @@ class PPOAgent:
                 self.ema_policy_state = {k: v.detach().to(device=self.device).clone() for k, v in sd.items()}
                 self.ema_updates = 1
                 return
-            # Точный SWA-разгон (k/(k+1)) на первых ~80 обновлениях, затем плавный Polyak EMA (tau=0.988)
-            eff_tau = min(self.ema_tau, float(self.ema_updates) / float(self.ema_updates + 1))
+            # Точный SWA-разгон (k/(k+1)) на первых ~50-80 обновлениях, затем плавный Polyak EMA
+            target_tau = PPO_EMA_POLISH_TAU if self.effective_rollout_steps() >= PPO_POLISH_ROLLOUT_STEPS else self.ema_tau
+            eff_tau = min(target_tau, float(self.ema_updates) / float(self.ema_updates + 1))
             alpha = 1.0 - eff_tau
             for k, v in sd.items():
                 ema_v = self.ema_policy_state.get(k)
@@ -397,13 +400,23 @@ class PPOAgent:
         self.restores_from_best += 1
         return True
 
+    def effective_rollout_steps(self) -> int:
+        """В зрелой фазе полировки (fill >= 0.90) удваивает размер батча (88 -> 176) для снижения дисперсии PPO."""
+        if (
+            self.rollout_steps == PPO_ROLLOUT_STEPS
+            and self._global_best_fill() >= PPO_EMA_START_FILL
+            and self._board_adapt_boost <= 0.0
+        ):
+            return PPO_POLISH_ROLLOUT_STEPS
+        return self.rollout_steps
+
     @property
     def rollout_buffer_len(self) -> int:
         return len(self._rollout_actions) * self.num_envs
 
     @property
     def rollout_capacity(self) -> int:
-        return self.rollout_steps * self.num_envs
+        return self.effective_rollout_steps() * self.num_envs
 
     def clear_rollout(self) -> None:
         self._rollout_signals.clear()
@@ -527,7 +540,7 @@ class PPOAgent:
         self._rollout_values.append(np.asarray(values, dtype=np.float32).copy())
 
     def ready_to_optimize(self) -> bool:
-        return len(self._rollout_actions) >= self.rollout_steps
+        return len(self._rollout_actions) >= self.effective_rollout_steps()
 
     def optimize(self, next_values: np.ndarray) -> float | None:
         if not self._rollout_actions:
@@ -1103,7 +1116,9 @@ class ParallelPPORunner:
                         fill_ratio >= adaptive_min_fill
                         and (self.board_size != 10 or int(env.score) >= self.failure_min_score)
                     )
-                    if reason != "victory" and passes_min:
+                    had_recent_random = any(bool(e.get("random", False)) for e in list(self.step_logs[idx])[-12:])
+                    allow_failure_record = (not had_recent_random) or len(self.failure_replay_buffer) < 12
+                    if reason != "victory" and passes_min and allow_failure_record:
                         rewind_target = (
                             PPO_FAILURE_STARVATION_REWIND
                             if reason == "starvation"
