@@ -17,13 +17,17 @@ from backend_config import (
     ENDGAME_SPLIT_PENALTY,
     FOOD_REACHABLE_IDX,
     GLOBAL_SIGNAL_LABELS,
-    HIDDEN_LAYER_1,
-    HIDDEN_LAYER_2,
     HUNGER_CRITICAL_IDX,
+    HUNGER_HIGH_IDX,
     MODEL_ACTION_LABELS,
     POCKET_MERGE_START_IDX,
     POCKET_SPLIT_START_IDX,
+    PPO_CONV1_CHANNELS,
+    PPO_CONV2_CHANNELS,
+    PPO_HIDDEN_LAYER_1,
+    PPO_HIDDEN_LAYER_2,
     PPO_MAP_CHANNELS,
+    PPO_MAP_FEAT_SIZE,
     PPO_MAP_SIZE,
     PPO_SIGNAL_LABELS,
     TAIL_BLOCKED_START_IDX,
@@ -37,9 +41,9 @@ from dqn_agent import (
 from networks import PPOMapNetwork
 from snake_env import relative_to_absolute
 
-PPO_NUM_ENVS = 12
-PPO_ROLLOUT_STEPS = 88
-PPO_POLISH_ROLLOUT_STEPS = 176
+PPO_NUM_ENVS = 16
+PPO_ROLLOUT_STEPS = 66
+PPO_POLISH_ROLLOUT_STEPS = 132
 PPO_GAMMA = 0.995
 PPO_GAE_LAMBDA = 0.95
 PPO_CLIP_COEF = 0.2
@@ -49,10 +53,11 @@ PPO_ENT_COEF = 0.025
 PPO_ENT_MIN = 0.0002
 PPO_VF_COEF = 0.5
 PPO_LR = 4e-4
-PPO_LR_MIN = 2.5e-5
+PPO_LR_MIN = 5e-6
 PPO_SCHEDULE_UPDATES = 3600.0
 PPO_EPOCHS = 4
 PPO_MINIBATCH_SIZE = 256
+PPO_POLISH_MINIBATCH_SIZE = 512
 PPO_MAX_GRAD_NORM = 0.5
 PPO_REWARD_SCALE = 0.1
 PPO_VICTORY_EXTRA_BONUS = 20.0
@@ -74,6 +79,7 @@ PPO_EMA_TAU = 0.988
 PPO_EMA_POLISH_TAU = 0.978
 PPO_EMA_START_FILL = 0.90
 PPO_EMA_MIN_UPDATES = 5
+PPO_HUNGRY_SAMPLE_MIN_PROB = 0.05
 
 
 def valid_action_mask_from_signals(signals: torch.Tensor) -> torch.Tensor:
@@ -92,8 +98,11 @@ class PPOAgent:
         device: torch.device,
         map_channels: int = PPO_MAP_CHANNELS,
         map_size: int = PPO_MAP_SIZE,
-        hidden1: int = HIDDEN_LAYER_1,
-        hidden2: int = HIDDEN_LAYER_2,
+        conv1_channels: int = PPO_CONV1_CHANNELS,
+        conv2_channels: int = PPO_CONV2_CHANNELS,
+        map_feat_size: int = PPO_MAP_FEAT_SIZE,
+        hidden1: int = PPO_HIDDEN_LAYER_1,
+        hidden2: int = PPO_HIDDEN_LAYER_2,
         num_envs: int = PPO_NUM_ENVS,
         rollout_steps: int = PPO_ROLLOUT_STEPS,
         gamma: float = PPO_GAMMA,
@@ -112,6 +121,11 @@ class PPOAgent:
         self.global_signal_count = int(global_signal_count)
         self.map_channels = int(map_channels)
         self.map_size = int(map_size)
+        self.conv1_channels = int(conv1_channels)
+        self.conv2_channels = int(conv2_channels)
+        self.map_feat_size = int(map_feat_size)
+        self.hidden1 = int(hidden1)
+        self.hidden2 = int(hidden2)
         self.num_envs = int(num_envs)
         self.rollout_steps = int(rollout_steps)
         self.gamma = float(gamma)
@@ -130,16 +144,22 @@ class PPOAgent:
             input_size=self.global_signal_count,
             map_channels=self.map_channels,
             map_size=self.map_size,
-            hidden1=hidden1,
-            hidden2=hidden2,
+            conv1_channels=self.conv1_channels,
+            conv2_channels=self.conv2_channels,
+            map_feat_size=self.map_feat_size,
+            hidden1=self.hidden1,
+            hidden2=self.hidden2,
         ).to(self.device)
         # Лёгкая копия весов для неблокирующего показа живой игры во время optimize()
         self.inference_net = PPOMapNetwork(
             input_size=self.global_signal_count,
             map_channels=self.map_channels,
             map_size=self.map_size,
-            hidden1=hidden1,
-            hidden2=hidden2,
+            conv1_channels=self.conv1_channels,
+            conv2_channels=self.conv2_channels,
+            map_feat_size=self.map_feat_size,
+            hidden1=self.hidden1,
+            hidden2=self.hidden2,
         ).to(self.device)
         self._inference_lock = threading.Lock()
         self.ema_tau: float = float(PPO_EMA_TAU)
@@ -162,6 +182,7 @@ class PPOAgent:
         self.best_min_episodes = PPO_BEST_MIN_EPISODES
         self._recent_episode_scores: Deque[int] = deque(maxlen=self.best_window_size)
         self._recent_fill_ratios: Deque[float] = deque(maxlen=self.best_window_size)
+        self._last_recent_avg_fill: float = 0.0
         self.best_avg_score: float = 0.0
         self.best_fill_ratio: float = 0.0
         self.best_fill_by_board: dict[int, float] = {}
@@ -172,6 +193,7 @@ class PPOAgent:
         self.restores_from_best: int = 0
         self._board_adapt_boost: float = 0.0
         self._critic_warmup_updates: int = 0
+        self._post_restore_cooldown: int = 0
 
         self._rollout_signals: list[np.ndarray] = []
         self._rollout_maps: list[np.ndarray] = []
@@ -220,11 +242,39 @@ class PPOAgent:
         lr = PPO_LR_MIN + (self.base_lr - PPO_LR_MIN) * cosine
         g_fill = self._global_best_fill()
         if g_fill >= 0.88:
-            lr = min(lr, max(PPO_LR_MIN, self.base_lr * 0.22))
+            # Плавное охлаждение LR в эндшпиле (8.8e-5 при 0.88 -> 1.2e-5 при 0.95 -> 6e-6 при 0.985)
+            if g_fill >= 0.95:
+                ultra_frac = min(1.0, (g_fill - 0.95) / 0.04)
+                ultra_cap = 1.6e-5 * (1.0 - ultra_frac) + 6.0e-6 * ultra_frac
+                lr = min(lr, max(PPO_LR_MIN, ultra_cap))
+            else:
+                lr = min(lr, max(PPO_LR_MIN, self.base_lr * 0.22))
+        if self._post_restore_cooldown > 0:
+            lr *= 0.6
         if self._board_adapt_boost > 0.0:
             # Мягкий transfer LR при переходе на новую карту: не разрушает зрелую политику
             lr = min(max(lr, 6e-5) + self._board_adapt_boost * 4e-5, 1.3e-4 if g_fill >= 0.75 else self.base_lr)
         return max(PPO_LR_MIN, lr)
+
+    def _current_clip_coef(self) -> float:
+        if self._board_adapt_boost > 0.0:
+            return self.clip_coef
+        g_fill = self._global_best_fill()
+        if g_fill >= 0.97:
+            return min(self.clip_coef, 0.10)
+        if g_fill >= 0.94:
+            return min(self.clip_coef, 0.12)
+        return self.clip_coef
+
+    def _current_target_kl(self) -> float | None:
+        if self.target_kl is None or self._board_adapt_boost > 0.0:
+            return self.target_kl
+        g_fill = self._global_best_fill()
+        if g_fill >= 0.97:
+            return min(self.target_kl, 0.008)
+        if g_fill >= 0.94:
+            return min(self.target_kl, 0.010)
+        return self.target_kl
 
     def _current_ent_coef(self) -> float:
         progress = min(1.0, float(self.total_updates) / PPO_SCHEDULE_UPDATES)
@@ -243,6 +293,7 @@ class PPOAgent:
     def reset_progress_tracker(self, *, keep_best_snapshot: bool = False) -> None:
         self._recent_episode_scores.clear()
         self._recent_fill_ratios.clear()
+        self._last_recent_avg_fill = 0.0
         self._episodes_since_best_check = 0
         self._degradation_streak = 0
         if not keep_best_snapshot:
@@ -253,6 +304,7 @@ class PPOAgent:
             self.best_policy_updates = 0
             self._board_adapt_boost = 0.0
             self._critic_warmup_updates = 0
+            self._post_restore_cooldown = 0
             self.ema_policy_state = None
             self.ema_updates = 0
             self.sync_inference_net()
@@ -263,8 +315,10 @@ class PPOAgent:
         prev_global_fill = self._global_best_fill()
         self._recent_episode_scores.clear()
         self._recent_fill_ratios.clear()
+        self._last_recent_avg_fill = 0.0
         self._episodes_since_best_check = 0
         self._degradation_streak = 0
+        self._post_restore_cooldown = 0
         self.best_fill_ratio = float(self.best_fill_by_board.get(bs, 0.0))
         self.ema_policy_state = None
         self.ema_updates = 0
@@ -280,8 +334,8 @@ class PPOAgent:
         """Обновляет трекер скользящего среднего только по честным полным эпизодам.
 
         Отслеживает универсальную заполненность поля (fill_ratio) для каждого размера карты,
-        сохраняет снимок весов при новом лучшем среднем и мягко откатывает веса при
-        устойчивой сильной просадке в длинной сессии.
+        сохраняет снимок весов (приоритетно сглаженный EMA) при новом лучшем среднем и
+        жёстко защищает эндшпиль от просадки (95 -> 85) в длинной сессии.
         """
         bs = max(3, int(board_size))
         fill_ratio = min(1.0, float(int(score) + 3) / float(bs * bs))
@@ -292,15 +346,17 @@ class PPOAgent:
 
         avg_score = float(sum(self._recent_episode_scores)) / float(len(self._recent_episode_scores))
         avg_fill = float(sum(self._recent_fill_ratios)) / float(len(self._recent_fill_ratios))
+        self._last_recent_avg_fill = avg_fill
         prev_board_best = float(self.best_fill_by_board.get(bs, 0.0))
 
         if avg_fill > prev_board_best or (bs == 10 and avg_score > self.best_avg_score):
             self.best_avg_score = max(self.best_avg_score, avg_score) if bs == 10 else avg_score
             self.best_fill_ratio = max(prev_board_best, avg_fill)
             self.best_fill_by_board[bs] = self.best_fill_ratio
+            source_sd = self.ema_policy_state if self.ema_active else self.online_net.state_dict()
             self.best_policy_state = {
                 k: v.detach().to(device="cpu", dtype=torch.float32).clone()
-                for k, v in self.online_net.state_dict().items()
+                for k, v in source_sd.items()
             }
             self.best_policy_updates = int(self.total_updates)
             self._episodes_since_best_check = 0
@@ -314,7 +370,12 @@ class PPOAgent:
             and self._episodes_since_best_check >= 15
         ):
             self._episodes_since_best_check = 0
-            if avg_fill < self.best_fill_ratio * 0.72 and (self.best_fill_ratio - avg_fill) >= 0.06:
+            # В эндшпиле (best_fill >= 0.92) ловим дрейф на -6.5% (напр. 95 -> 88), не ждём обвала до 67!
+            if self.best_fill_ratio >= 0.92:
+                is_degraded = (self.best_fill_ratio - avg_fill) >= 0.065
+            else:
+                is_degraded = avg_fill < self.best_fill_ratio * 0.72 and (self.best_fill_ratio - avg_fill) >= 0.06
+            if is_degraded:
                 self._degradation_streak += 1
                 if self._degradation_streak >= 2:
                     self.restore_best_policy()
@@ -327,8 +388,16 @@ class PPOAgent:
         return self.ema_policy_state is not None and self.ema_updates >= PPO_EMA_MIN_UPDATES
 
     def _update_ema_policy(self) -> None:
-        """Обновляет сглаженные SWA->EMA веса политики на зрелой фазе (fill >= 0.90)."""
+        """Quality-Gated SWA->EMA: сглаживает веса на зрелой фазе и замораживает EMA при просадке online_net."""
         if self._global_best_fill() < PPO_EMA_START_FILL:
+            return
+        # Если online_net заметно просела относительно пика — не отравляем EMA деградировавшими весами!
+        if (
+            self.ema_active
+            and len(self._recent_fill_ratios) >= self.best_min_episodes
+            and self.best_fill_ratio >= PPO_EMA_START_FILL
+            and self._last_recent_avg_fill < (self.best_fill_ratio - 0.035)
+        ):
             return
         with torch.no_grad():
             sd = self.online_net.state_dict()
@@ -361,6 +430,20 @@ class PPOAgent:
             self.inference_net.load_state_dict(state)
             self.inference_net.eval()
 
+    def _pick_eval_action(self, probs_np: np.ndarray, sig_t: torch.Tensor) -> tuple[int, bool, int]:
+        greedy_action = int(np.argmax(probs_np))
+        # При высоком голоде (hunger_high=1) используем стохастику самой обученной политики π (p >= 0.05),
+        # чтобы память-независимая 1-step политика могла выходить из детерминированных циклов без lookahead.
+        if sig_t.shape[1] > HUNGER_HIGH_IDX and float(sig_t[0, HUNGER_HIGH_IDX].item()) > 0.5:
+            filtered = np.where(probs_np >= PPO_HUNGRY_SAMPLE_MIN_PROB, probs_np.astype(np.float64), 0.0)
+            total = float(filtered.sum())
+            if total > 0.0:
+                p_norm = filtered / total
+                if int((p_norm > 0.0).sum()) >= 2:
+                    chosen = int(np.random.choice(len(p_norm), p=p_norm))
+                    return chosen, (chosen != greedy_action), greedy_action
+        return greedy_action, False, greedy_action
+
     @torch.inference_mode()
     def select_showcase_action(
         self,
@@ -368,7 +451,7 @@ class PPOAgent:
         *,
         ego_map: np.ndarray | None = None,
     ) -> tuple[int, np.ndarray, bool, int]:
-        """Неблокирующий выбор жадного хода для плавного показа поля во время обучения."""
+        """Неблокирующий выбор хода для плавного показа поля и инференса EMA."""
         sig_t = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
         map_t = (
             torch.as_tensor(ego_map, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -379,22 +462,33 @@ class PPOAgent:
             logits, value = self.inference_net(sig_t, map_t)
         masked_logits = self._masked_policy_logits(logits, sig_t)
         probs = torch.softmax(masked_logits, dim=-1)
-        greedy_action = int(torch.argmax(probs[0]).item())
+        probs_np = probs[0].detach().cpu().numpy().astype(np.float32)
         self.last_value = float(value[0].item())
-        return greedy_action, probs[0].detach().cpu().numpy().astype(np.float32), False, greedy_action
+        action, was_random, greedy_action = self._pick_eval_action(probs_np, sig_t)
+        return action, probs_np, was_random, greedy_action
 
     def restore_best_policy(self) -> bool:
         if self.best_policy_state is None:
             return False
         load_matching_state(self.online_net, self.best_policy_state)
         self.online_net.to(self.device)
-        self.ema_policy_state = None
-        self.ema_updates = 0
+        # Сохраняем лучший снимок как базу EMA (не теряем сглаженный пик при откате)
+        if self._global_best_fill() >= PPO_EMA_START_FILL:
+            self.ema_policy_state = {
+                k: v.detach().to(device=self.device).clone()
+                for k, v in self.online_net.state_dict().items()
+            }
+            self.ema_updates = max(PPO_EMA_MIN_UPDATES, 10)
+        else:
+            self.ema_policy_state = None
+            self.ema_updates = 0
+        self._post_restore_cooldown = 40
         self.sync_inference_net()
         self.optimizer = torch.optim.AdamW(self.online_net.parameters(), lr=self._current_lr(), eps=1e-5)
         self.clear_rollout()
         self._recent_episode_scores.clear()
         self._recent_fill_ratios.clear()
+        self._last_recent_avg_fill = self.best_fill_ratio
         self._episodes_since_best_check = 0
         self._degradation_streak = 0
         self.restores_from_best += 1
@@ -478,7 +572,20 @@ class PPOAgent:
     ) -> tuple[int, np.ndarray, bool, int]:
         if self.ema_active:
             return self.select_showcase_action(state, ego_map=ego_map)
-        return self.select_action(state, ego_map=ego_map, training=False)
+        self.online_net.eval()
+        sig_t = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+        map_t = (
+            torch.as_tensor(ego_map, dtype=torch.float32, device=self.device).unsqueeze(0)
+            if ego_map is not None
+            else None
+        )
+        logits, value = self.online_net(sig_t, map_t)
+        masked_logits = self._masked_policy_logits(logits, sig_t)
+        probs = torch.softmax(masked_logits, dim=-1)
+        probs_np = probs[0].detach().cpu().numpy().astype(np.float32)
+        self.last_value = float(value[0].item())
+        action, was_random, greedy_action = self._pick_eval_action(probs_np, sig_t)
+        return action, probs_np, was_random, greedy_action
 
     @torch.inference_mode()
     def select_batch_actions(
@@ -572,12 +679,15 @@ class PPOAgent:
         b_returns = torch.as_tensor(returns.reshape(-1), dtype=torch.float32, device=self.device)
 
         total_samples = int(b_actions.shape[0])
-        minibatch = max(32, min(self.minibatch_size, total_samples))
+        base_mb = PPO_POLISH_MINIBATCH_SIZE if (self.minibatch_size == PPO_MINIBATCH_SIZE and total_samples >= 2000) else self.minibatch_size
+        minibatch = max(32, min(base_mb, total_samples))
         if b_advantages.numel() > 1:
             b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std(unbiased=False) + 1e-8)
 
         cur_ent_coef = self._current_ent_coef()
         cur_lr = self._current_lr()
+        cur_clip = self._current_clip_coef()
+        cur_target_kl = self._current_target_kl()
         for pg in self.optimizer.param_groups:
             pg["lr"] = cur_lr
 
@@ -616,13 +726,13 @@ class PPOAgent:
                 with torch.no_grad():
                     approx_kl = float(((ratio - 1.0) - log_ratio).mean().item())
 
-                if not critic_only and self.target_kl is not None and batch_updates > 0 and approx_kl > 1.5 * self.target_kl:
+                if not critic_only and cur_target_kl is not None and batch_updates > 0 and approx_kl > 1.5 * cur_target_kl:
                     early_stopped = True
                     break
 
                 adv_mb = b_advantages[idx]
                 pg_loss1 = -adv_mb * ratio
-                pg_loss2 = -adv_mb * torch.clamp(ratio, 1.0 - self.clip_coef, 1.0 + self.clip_coef)
+                pg_loss2 = -adv_mb * torch.clamp(ratio, 1.0 - cur_clip, 1.0 + cur_clip)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                 old_val_mb = b_values[idx]
@@ -660,7 +770,7 @@ class PPOAgent:
 
             if early_stopped:
                 break
-            if not critic_only and self.target_kl is not None and epoch_batches > 0 and (epoch_kl_sum / epoch_batches) > self.target_kl:
+            if not critic_only and cur_target_kl is not None and epoch_batches > 0 and (epoch_kl_sum / epoch_batches) > cur_target_kl:
                 early_stopped = True
                 break
 
@@ -672,6 +782,8 @@ class PPOAgent:
             self.kl_early_stops += 1
 
         self.total_updates += 1
+        if self._post_restore_cooldown > 0:
+            self._post_restore_cooldown -= 1
         if self._critic_warmup_updates > 0:
             self._critic_warmup_updates -= 1
         else:
@@ -858,8 +970,9 @@ class ParallelPPORunner:
         self.last_profile_ms: dict[str, float] = {}
         self.last_completed_env_payload: dict[str, Any] | None = None
 
-    def _is_replay_slot(self, idx: int) -> bool:
-        return self.replay_env_count > 0 and idx >= (self.num_envs - self.replay_env_count)
+    def _is_replay_slot(self, idx: int, *, active_count: int | None = None) -> bool:
+        cnt = self.replay_env_count if active_count is None else max(0, min(self.replay_env_count, int(active_count)))
+        return cnt > 0 and idx >= (self.num_envs - cnt)
 
     def clear_failure_buffer(self) -> None:
         self.failure_replay_buffer.clear()
@@ -962,7 +1075,7 @@ class ParallelPPORunner:
             return chosen["state"], chosen
         return chosen, None
 
-    def _reset_env_slot(self, idx: int) -> None:
+    def _reset_env_slot(self, idx: int, *, active_replay_count: int | None = None) -> None:
         env = self.envs[idx]
         self.episode_rewards[idx] = 0.0
         self.step_logs[idx].clear()
@@ -970,7 +1083,7 @@ class ParallelPPORunner:
         self._state_snapshots[idx].clear()
         self._active_replay_entry[idx] = None
         has_any_failure = len(self.failure_replay_buffer) > 0 or len(self.endgame_failure_buffer) > 0
-        if self._is_replay_slot(idx) and has_any_failure:
+        if self._is_replay_slot(idx, active_count=active_replay_count) and has_any_failure:
             saved_state, entry_ref = self._sample_failure_entry(idx)
             if saved_state is not None:
                 env.load_state(saved_state)
@@ -1154,7 +1267,9 @@ class ParallelPPORunner:
                     }
                     completed.append(finished_snapshot)
                     self.last_completed_env_payload = finished_snapshot
-                self._reset_env_slot(idx)
+                # На пике (best_fill >= 0.95) оставляем 1 слот Failure-Replay вместо 2, чтобы не забывать мидгейм
+                active_replay_cnt = 1 if (self.replay_env_count >= 2 and float(getattr(agent, "best_fill_ratio", 0.0)) >= 0.95) else self.replay_env_count
+                self._reset_env_slot(idx, active_replay_count=active_replay_cnt)
 
         agent.store_rollout_step(
             states,

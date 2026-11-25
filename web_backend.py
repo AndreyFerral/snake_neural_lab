@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import os
-# Настройки окружения
+# Настройки окружения и потоков CPU (баланс скорости PPO-батчей и отзывчивости UI/SSE)
+_CPU_TORCH_THREADS = max(1, min(8, (os.cpu_count() or 4) // 2 + 2))
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['OMP_NUM_THREADS'] = '1'
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
-os.environ['MKL_NUM_THREADS'] = '1'
-os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
-os.environ['NUMEXPR_NUM_THREADS'] = '1'
+os.environ['OMP_NUM_THREADS'] = str(_CPU_TORCH_THREADS)
+os.environ['OPENBLAS_NUM_THREADS'] = str(_CPU_TORCH_THREADS)
+os.environ['MKL_NUM_THREADS'] = str(_CPU_TORCH_THREADS)
+os.environ['VECLIB_MAXIMUM_THREADS'] = str(_CPU_TORCH_THREADS)
+os.environ['NUMEXPR_NUM_THREADS'] = str(_CPU_TORCH_THREADS)
 
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -22,7 +23,7 @@ import time
 from typing import Any, Deque, Iterator
 import numpy as np
 import torch
-torch.set_num_threads(1)
+torch.set_num_threads(_CPU_TORCH_THREADS)
 torch.set_num_interop_threads(1)
 
 try:
@@ -69,7 +70,12 @@ from backend_config import (
     NETWORK_INPUT_ADAPTER_MODE,
     POCKET_MERGE_START_IDX,
     POCKET_SPLIT_START_IDX,
+    PPO_CONV1_CHANNELS,
+    PPO_CONV2_CHANNELS,
+    PPO_HIDDEN_LAYER_1,
+    PPO_HIDDEN_LAYER_2,
     PPO_MAP_CHANNELS,
+    PPO_MAP_FEAT_SIZE,
     PPO_MAP_SIZE,
     PPO_SIGNAL_LABELS,
     SAVE_THROTTLE_SECONDS,
@@ -136,7 +142,10 @@ GLOBAL_SIGNAL_COUNT = len(GLOBAL_SIGNAL_LABELS)
 PPO_SIGNAL_COUNT = len(PPO_SIGNAL_LABELS)
 # Подпись меняется автоматически при изменении количества сигналов или размеров слоёв
 ARCH_SIGNATURE = f"sig_{GLOBAL_SIGNAL_COUNT}_{HIDDEN_LAYER_1}_{HIDDEN_LAYER_2}"
-PPO_ARCH_SIGNATURE = f"ppo_split_p1_map{PPO_MAP_CHANNELS}x{PPO_MAP_SIZE}_c3x3_sig{PPO_SIGNAL_COUNT}_{HIDDEN_LAYER_1}_{HIDDEN_LAYER_2}"
+PPO_ARCH_SIGNATURE = (
+    f"ppo_split_p1_c{PPO_CONV1_CHANNELS}_{PPO_CONV2_CHANNELS}_f{PPO_MAP_FEAT_SIZE}_"
+    f"map{PPO_MAP_CHANNELS}x{PPO_MAP_SIZE}_sig{PPO_SIGNAL_COUNT}_{PPO_HIDDEN_LAYER_1}_{PPO_HIDDEN_LAYER_2}"
+)
 
 
 def arch_signature_for_agent(agent_kind: str) -> str:
@@ -1856,13 +1865,15 @@ class SnakeWebBackend:
                     log_perf("slow_network_payload", elapsed_ms, cache=cache_used, locked=False)
                 return cached
             
+            net_h1 = int(getattr(self.agent.online_net, "hidden1_size", HIDDEN_LAYER_1))
+            net_h2 = int(getattr(self.agent.online_net, "hidden2_size", HIDDEN_LAYER_2))
             payload = {
                 "global_signals": {
                     "labels": global_signal_labels,
                     "values": self.last_state.tolist(),
                 },
-                "hidden1": [0.0] * HIDDEN_LAYER_1,
-                "hidden2": [0.0] * HIDDEN_LAYER_2,
+                "hidden1": [0.0] * net_h1,
+                "hidden2": [0.0] * net_h2,
                 "output": output_values.tolist(),
                 "value": [],
                 "connections": {
@@ -1884,13 +1895,15 @@ class SnakeWebBackend:
                 if self.agent_kind == "ppo"
                 else self.agent.snapshot(self.last_state)
             )
+            net = self.agent.online_net
+            net_h1 = int(getattr(net, "hidden1_size", HIDDEN_LAYER_1))
+            net_h2 = int(getattr(net, "hidden2_size", HIDDEN_LAYER_2))
             input_values = np.asarray(snapshot.get("input", np.zeros(expected_signal_count)), dtype=np.float32)
-            hidden1_values = np.asarray(snapshot.get("hidden1", np.zeros(HIDDEN_LAYER_1)), dtype=np.float32)
-            hidden2_values = np.asarray(snapshot.get("hidden2", np.zeros(HIDDEN_LAYER_2)), dtype=np.float32)
+            hidden1_values = np.asarray(snapshot.get("hidden1", np.zeros(net_h1)), dtype=np.float32)
+            hidden2_values = np.asarray(snapshot.get("hidden2", np.zeros(net_h2)), dtype=np.float32)
             output_values = np.asarray(snapshot.get("output", np.zeros(len(MODEL_ACTION_LABELS))), dtype=np.float32)
             value_values = np.asarray(snapshot.get("value", np.array([], dtype=np.float32)), dtype=np.float32)
 
-            net = self.agent.online_net
             input_hidden1_connections = []
             hidden1_hidden2_connections = []
             hidden2_output_connections = []
@@ -2315,6 +2328,11 @@ class SnakeWebBackend:
                     device=torch.device("cpu"),
                     map_channels=self.agent.map_channels,
                     map_size=self.agent.map_size,
+                    conv1_channels=self.agent.conv1_channels,
+                    conv2_channels=self.agent.conv2_channels,
+                    map_feat_size=self.agent.map_feat_size,
+                    hidden1=self.agent.hidden1,
+                    hidden2=self.agent.hidden2,
                     tail_blocked_logit_bias=0.0,
                 )
                 with self.agent._inference_lock:

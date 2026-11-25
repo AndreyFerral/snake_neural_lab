@@ -22,10 +22,13 @@ from backend_config import (
     DANGER_START_IDX,
     DIRECTIONS,
     FOOD_REACHABLE_IDX,
-    HIDDEN_LAYER_1,
-    HIDDEN_LAYER_2,
     POCKET_SPLIT_START_IDX,
+    PPO_CONV1_CHANNELS,
+    PPO_CONV2_CHANNELS,
+    PPO_HIDDEN_LAYER_1,
+    PPO_HIDDEN_LAYER_2,
     PPO_MAP_CHANNELS,
+    PPO_MAP_FEAT_SIZE,
     PPO_MAP_SIZE,
     PPO_SIGNAL_LABELS,
     TAIL_BLOCKED_START_IDX,
@@ -134,16 +137,19 @@ def load_ppo_checkpoint(
     w1 = net_state.get("hidden1_layer.weight")
     w2 = net_state.get("hidden2_layer.weight")
     c0 = net_state.get("map_conv.0.weight")
+    c2 = net_state.get("map_conv.2.weight")
     mp = net_state.get("map_proj.weight")
 
     map_channels = int(c0.shape[1]) if torch.is_tensor(c0) else PPO_MAP_CHANNELS
-    map_feat_size = int(mp.shape[0]) if torch.is_tensor(mp) else 32
-    hidden1 = int(w1.shape[0]) if torch.is_tensor(w1) else HIDDEN_LAYER_1
-    hidden2 = int(w2.shape[0]) if torch.is_tensor(w2) else HIDDEN_LAYER_2
+    conv1_channels = int(c0.shape[0]) if torch.is_tensor(c0) else PPO_CONV1_CHANNELS
+    conv2_channels = int(c2.shape[0]) if torch.is_tensor(c2) else PPO_CONV2_CHANNELS
+    map_feat_size = int(mp.shape[0]) if torch.is_tensor(mp) else PPO_MAP_FEAT_SIZE
+    hidden1 = int(w1.shape[0]) if torch.is_tensor(w1) else PPO_HIDDEN_LAYER_1
+    hidden2 = int(w2.shape[0]) if torch.is_tensor(w2) else PPO_HIDDEN_LAYER_2
     sig_count = int(w1.shape[1]) - map_feat_size if torch.is_tensor(w1) else len(PPO_SIGNAL_LABELS)
 
     # Определяем map_size по conv_out_dim
-    conv_out_dim = int(mp.shape[1]) if torch.is_tensor(mp) else 384
+    conv_out_dim = int(mp.shape[1]) if torch.is_tensor(mp) else 800
     map_size = PPO_MAP_SIZE
     for cand in (9, 11, 13, 15):
         probe = PPOAgent(
@@ -151,6 +157,9 @@ def load_ppo_checkpoint(
             device=torch.device("cpu"),
             map_channels=map_channels,
             map_size=cand,
+            conv1_channels=conv1_channels,
+            conv2_channels=conv2_channels,
+            map_feat_size=map_feat_size,
             hidden1=hidden1,
             hidden2=hidden2,
         )
@@ -163,6 +172,9 @@ def load_ppo_checkpoint(
         "device": torch.device("cpu"),
         "map_channels": map_channels,
         "map_size": map_size,
+        "conv1_channels": conv1_channels,
+        "conv2_channels": conv2_channels,
+        "map_feat_size": map_feat_size,
         "hidden1": hidden1,
         "hidden2": hidden2,
     }

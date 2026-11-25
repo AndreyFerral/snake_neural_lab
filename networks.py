@@ -9,7 +9,12 @@ from backend_config import (
     NETWORK_INPUT_ADAPTER_MODE,
     NETWORK_INPUT_WARN_ON_ADAPT,
     NETWORK_INPUT_PAD_VALUE,
+    PPO_CONV1_CHANNELS,
+    PPO_CONV2_CHANNELS,
+    PPO_HIDDEN_LAYER_1,
+    PPO_HIDDEN_LAYER_2,
     PPO_MAP_CHANNELS,
+    PPO_MAP_FEAT_SIZE,
     PPO_MAP_SIZE,
     PPO_SIGNAL_LABELS,
 )
@@ -187,23 +192,27 @@ class PPOMapNetwork(nn.Module):
         *,
         map_channels: int = PPO_MAP_CHANNELS,
         map_size: int = PPO_MAP_SIZE,
-        map_feat_size: int = 32,
-        hidden1: int = HIDDEN_LAYER_1,
-        hidden2: int = HIDDEN_LAYER_2,
+        conv1_channels: int = PPO_CONV1_CHANNELS,
+        conv2_channels: int = PPO_CONV2_CHANNELS,
+        map_feat_size: int = PPO_MAP_FEAT_SIZE,
+        hidden1: int = PPO_HIDDEN_LAYER_1,
+        hidden2: int = PPO_HIDDEN_LAYER_2,
     ) -> None:
         super().__init__()
         self.input_size = int(input_size)
         self.map_channels = int(map_channels)
         self.map_size = int(map_size)
+        self.conv1_channels = int(conv1_channels)
+        self.conv2_channels = int(conv2_channels)
         self.map_feat_size = int(map_feat_size)
         self.hidden1_size = int(hidden1)
         self.hidden2_size = int(hidden2)
 
         self.map_conv = nn.Sequential(
-            nn.Conv2d(self.map_channels, 16, kernel_size=3, padding=1),
-            nn.Tanh(),
-            nn.Conv2d(16, 24, kernel_size=3, stride=2, padding=0),
-            nn.Tanh(),
+            nn.Conv2d(self.map_channels, self.conv1_channels, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(self.conv1_channels, self.conv2_channels, kernel_size=3, stride=2, padding=0),
+            nn.ReLU(),
             nn.Flatten(),
         )
         with torch.no_grad():

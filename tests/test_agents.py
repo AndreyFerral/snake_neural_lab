@@ -293,14 +293,45 @@ class TestAgents(unittest.TestCase):
         ema_restored.on_board_size_changed(20)
         self.assertFalse(ema_restored.ema_active)
         self.assertEqual(ema_restored.ema_updates, 0)
-        # Adaptive polish rollout batch: 88 early -> 176 at fill >= 0.90 (and drops back to 88 during board adapt)
+        # Adaptive polish rollout batch: 66 early -> 132 at fill >= 0.90 (and drops back to 66 during board adapt)
         batch_agent = PPOAgent(device=torch.device("cpu"))
-        self.assertEqual(batch_agent.effective_rollout_steps(), 88)
+        self.assertEqual(batch_agent.num_envs, 16)
+        self.assertEqual(batch_agent.online_net.hidden1_size, 128)
+        self.assertEqual(batch_agent.online_net.hidden2_size, 64)
+        self.assertEqual(batch_agent.effective_rollout_steps(), 66)
         batch_agent.best_fill_ratio = 0.92
-        self.assertEqual(batch_agent.effective_rollout_steps(), 176)
+        self.assertEqual(batch_agent.effective_rollout_steps(), 132)
+        batch_agent.best_fill_ratio = 0.98
+        self.assertLessEqual(batch_agent._current_lr(), 1.2e-5)
+        self.assertAlmostEqual(batch_agent._current_clip_coef(), 0.10, places=4)
+        self.assertAlmostEqual(float(batch_agent._current_target_kl() or 0.0), 0.008, places=4)
         batch_agent.total_updates = 400
         batch_agent.on_board_size_changed(15)
-        self.assertEqual(batch_agent.effective_rollout_steps(), 88)
+        self.assertEqual(batch_agent.effective_rollout_steps(), 66)
+
+        # Anti-drift: Quality-Gated EMA freezes on drop > 3.5%, and tight endgame rollback fires on -6.5% drop
+        drift_agent = PPOAgent(device=torch.device("cpu"))
+        for _ in range(drift_agent.best_min_episodes):
+            drift_agent.record_full_episode(95, "body_collision", board_size=10)
+        self.assertGreaterEqual(drift_agent.best_fill_ratio, 0.97)
+        with torch.no_grad():
+            drift_agent.online_net.output.weight.fill_(1.0)
+        for _ in range(6):
+            drift_agent._update_ema_policy()
+        ema_before = float(drift_agent.ema_policy_state["output.weight"][0, 0].detach())
+        # Simulate degradation (score 85 -> fill 0.88 vs best 0.98 -> drop 0.10 > 0.035 & > 0.065)
+        with torch.no_grad():
+            drift_agent.online_net.output.weight.fill_(-5.0)
+        for _ in range(drift_agent.best_min_episodes):
+            drift_agent.record_full_episode(85, "body_collision", board_size=10)
+        # EMA must stay frozen while degraded
+        drift_agent._update_ema_policy()
+        self.assertAlmostEqual(float(drift_agent.ema_policy_state["output.weight"][0, 0].detach()), ema_before, places=4)
+        # Sustained endgame drift triggers rollback without waiting for score 67
+        for _ in range(32):
+            drift_agent.record_full_episode(85, "body_collision", board_size=10)
+        self.assertGreaterEqual(drift_agent.restores_from_best, 1)
+        self.assertGreater(drift_agent._post_restore_cooldown, 0)
 
         # Two-tier endgame failure replay + stale pruning after 6 failures
         runner = ParallelPPORunner(4, 10, env_factory=SnakeEnv, replay_env_count=1, failure_min_score=25)
