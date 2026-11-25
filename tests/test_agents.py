@@ -229,7 +229,74 @@ class TestAgents(unittest.TestCase):
         # Board size change / reset_all clears failure replay buffer
         runner.reset_all(board_size=15)
         self.assertEqual(len(runner.failure_replay_buffer), 0)
+        self.assertEqual(len(runner.endgame_failure_buffer), 0)
         self.assertFalse(any(runner.is_replay_env))
+
+    def test_ppo_tail_bias_annealing_board_switch_and_endgame_failure_replay(self) -> None:
+        agent = PPOAgent(device=torch.device("cpu"), tail_blocked_logit_bias=0.5)
+        agent.best_fill_ratio = 0.50
+        self.assertAlmostEqual(agent.effective_tail_bias(), 0.5, places=5)
+        agent.best_fill_ratio = 0.80
+        self.assertAlmostEqual(agent.effective_tail_bias(), 0.25, places=5)
+        agent.best_fill_ratio = 0.90
+        self.assertAlmostEqual(agent.effective_tail_bias(), 0.0, places=5)
+        agent.best_fill_ratio = 0.98
+        self.assertAlmostEqual(agent.effective_tail_bias(), 0.0, places=5)
+
+        # Board size switch adapts LR/entropy on unseen larger map and preserves per-board fill
+        agent.total_updates = 600
+        for _ in range(agent.best_min_episodes):
+            agent.record_full_episode(90, "body_collision", board_size=10)
+        self.assertGreater(agent.best_fill_by_board.get(10, 0.0), 0.90)
+        lr_polished = agent._current_lr()
+        ent_polished = agent._current_ent_coef()
+
+        agent.on_board_size_changed(15)
+        self.assertAlmostEqual(agent._board_adapt_boost, 1.0, places=4)
+        self.assertEqual(agent._critic_warmup_updates, 6)
+        self.assertAlmostEqual(agent.effective_tail_bias(), 0.0, places=5)
+        self.assertGreater(agent._current_lr(), lr_polished)
+        self.assertLessEqual(agent._current_lr(), 1.31e-4)
+        self.assertGreater(agent._current_ent_coef(), ent_polished)
+        self.assertLessEqual(agent._current_ent_coef(), 0.0031)
+
+        for _ in range(agent.best_min_episodes):
+            agent.record_full_episode(150, "starvation", board_size=15)
+        self.assertGreater(agent.best_fill_by_board.get(15, 0.0), 0.60)
+        ckpt = agent.export_checkpoint()
+        restored = PPOAgent(device=torch.device("cpu"))
+        restored.import_checkpoint(ckpt)
+        self.assertAlmostEqual(restored.best_fill_by_board.get(15, 0.0), agent.best_fill_by_board[15], places=4)
+
+        # Two-tier endgame failure replay + stale pruning after 6 failures
+        runner = ParallelPPORunner(4, 10, env_factory=SnakeEnv, replay_env_count=1, failure_min_score=25)
+        env0 = runner.envs[0]
+        env0.reset()
+        env0.score = 82
+        env0.step_count = 10
+        env0.snake = [(5, 5), (4, 5), (3, 5)]
+        env0.direction = 1
+        env0.food = (0, 0)
+        env0._clear_observation_cache()
+        runner._state_snapshots[0].append((10, env0.export_state()))
+        env0.step_count = 25
+        env0.snake = [(9, 0), (8, 0), (8, 1), (9, 1), (9, 2)]
+        env0.direction = 1
+        env0.food = (0, 9)
+        env0._clear_observation_cache()
+        runner.step_alive(agent, record_replays=False)
+        self.assertEqual(len(runner.endgame_failure_buffer), 1)
+        entry = runner.endgame_failure_buffer[0]
+        entry["fails"] = 5
+        runner.is_replay_env[3] = True
+        runner._active_replay_entry[3] = entry
+        env3 = runner.envs[3]
+        env3.snake = [(9, 0), (8, 0), (8, 1), (9, 1), (9, 2)]
+        env3.direction = 1
+        env3.food = (0, 9)
+        env3._clear_observation_cache()
+        runner.step_alive(agent, record_replays=False)
+        self.assertEqual(len(runner.endgame_failure_buffer), 0)
 
     def test_shared_dqn_step_helpers(self) -> None:
         env = SnakeEnv(board_size=10)

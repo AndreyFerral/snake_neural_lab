@@ -19,6 +19,7 @@ from backend_config import (
     GLOBAL_SIGNAL_LABELS,
     HIDDEN_LAYER_1,
     HIDDEN_LAYER_2,
+    HUNGER_CRITICAL_IDX,
     MODEL_ACTION_LABELS,
     POCKET_MERGE_START_IDX,
     POCKET_SPLIT_START_IDX,
@@ -38,25 +39,36 @@ from snake_env import relative_to_absolute
 
 PPO_NUM_ENVS = 12
 PPO_ROLLOUT_STEPS = 88
-PPO_GAMMA = 0.992
+PPO_GAMMA = 0.995
 PPO_GAE_LAMBDA = 0.95
 PPO_CLIP_COEF = 0.2
 PPO_VF_CLIP_COEF = 0.25
 PPO_TARGET_KL = 0.015
 PPO_ENT_COEF = 0.025
+PPO_ENT_MIN = 0.0002
 PPO_VF_COEF = 0.5
 PPO_LR = 4e-4
+PPO_LR_MIN = 2.5e-5
+PPO_SCHEDULE_UPDATES = 3600.0
 PPO_EPOCHS = 4
 PPO_MINIBATCH_SIZE = 256
 PPO_MAX_GRAD_NORM = 0.5
 PPO_REWARD_SCALE = 0.1
+PPO_VICTORY_EXTRA_BONUS = 20.0
+PPO_CRITICAL_HUNGER_PENALTY = 0.05
 PPO_BEST_WINDOW = 30
 PPO_BEST_MIN_EPISODES = 20
 PPO_FAILURE_MIN_SCORE = 25
+PPO_FAILURE_MIN_FILL = 0.25
+PPO_FAILURE_ENDGAME_FILL = 0.80
 PPO_FAILURE_BUFFER_MAXLEN = 64
-PPO_FAILURE_SNAPSHOT_INTERVAL = 4
-PPO_FAILURE_REWIND_TARGET = 12
+PPO_FAILURE_ENDGAME_MAXLEN = 32
+PPO_FAILURE_SNAPSHOT_INTERVAL = 5
+PPO_FAILURE_REWIND_TARGET = 14
+PPO_FAILURE_STARVATION_REWIND = 22
 PPO_TAIL_BLOCKED_LOGIT_BIAS = 0.5
+PPO_TAIL_BIAS_ANNEAL_START_FILL = 0.70
+PPO_TAIL_BIAS_ANNEAL_END_FILL = 0.90
 
 
 def valid_action_mask_from_signals(signals: torch.Tensor) -> torch.Tensor:
@@ -141,12 +153,17 @@ class PPOAgent:
         self.best_window_size = PPO_BEST_WINDOW
         self.best_min_episodes = PPO_BEST_MIN_EPISODES
         self._recent_episode_scores: Deque[int] = deque(maxlen=self.best_window_size)
+        self._recent_fill_ratios: Deque[float] = deque(maxlen=self.best_window_size)
         self.best_avg_score: float = 0.0
+        self.best_fill_ratio: float = 0.0
+        self.best_fill_by_board: dict[int, float] = {}
         self.best_policy_state: dict[str, torch.Tensor] | None = None
         self.best_policy_updates: int = 0
         self._episodes_since_best_check: int = 0
         self._degradation_streak: int = 0
         self.restores_from_best: int = 0
+        self._board_adapt_boost: float = 0.0
+        self._critic_warmup_updates: int = 0
 
         self._rollout_signals: list[np.ndarray] = []
         self._rollout_maps: list[np.ndarray] = []
@@ -156,43 +173,117 @@ class PPOAgent:
         self._rollout_dones: list[np.ndarray] = []
         self._rollout_values: list[np.ndarray] = []
 
+    def _global_best_fill(self) -> float:
+        """Максимальная достигнутая заполненность по всем размерам карт (монотонный индикатор зрелости политики)."""
+        best = float(self.best_fill_ratio)
+        if self.best_fill_by_board:
+            best = max(best, max(self.best_fill_by_board.values()))
+        return best
+
+    def effective_tail_bias(self) -> float:
+        """Плавно зануляет мягкий сдвиг логита tail_blocked (0.5 -> 0.0) при выходе в эндшпиль."""
+        base = self.tail_blocked_logit_bias
+        if base <= 0.0:
+            return 0.0
+        fill = self._global_best_fill()
+        if fill <= PPO_TAIL_BIAS_ANNEAL_START_FILL:
+            return base
+        if fill >= PPO_TAIL_BIAS_ANNEAL_END_FILL:
+            return 0.0
+        span = max(1e-6, PPO_TAIL_BIAS_ANNEAL_END_FILL - PPO_TAIL_BIAS_ANNEAL_START_FILL)
+        frac = (fill - PPO_TAIL_BIAS_ANNEAL_START_FILL) / span
+        return base * (1.0 - frac)
+
     def _masked_policy_logits(self, logits: torch.Tensor, signals: torch.Tensor) -> torch.Tensor:
         valid_mask = valid_action_mask_from_signals(signals)
         adjusted = logits
-        if self.tail_blocked_logit_bias != 0.0 and signals.shape[1] >= TAIL_BLOCKED_START_IDX + len(MODEL_ACTION_LABELS):
+        eff_bias = self.effective_tail_bias()
+        if eff_bias != 0.0 and signals.shape[1] >= TAIL_BLOCKED_START_IDX + len(MODEL_ACTION_LABELS):
             tail_blocked = signals[:, TAIL_BLOCKED_START_IDX : TAIL_BLOCKED_START_IDX + len(MODEL_ACTION_LABELS)] > 0.5
             safe_and_tail_ok = valid_mask & (~tail_blocked)
             has_tail_ok = safe_and_tail_ok.any(dim=-1, keepdim=True)
             penalize_mask = has_tail_ok & valid_mask & tail_blocked
-            adjusted = torch.where(penalize_mask, adjusted - self.tail_blocked_logit_bias, adjusted)
+            adjusted = torch.where(penalize_mask, adjusted - eff_bias, adjusted)
         return adjusted.masked_fill(~valid_mask, -1e9)
 
     def _current_lr(self) -> float:
-        progress = min(1.0, float(self.total_updates) / 1800.0)
-        return max(4e-5, self.base_lr * (1.0 - 0.90 * progress))
+        progress = min(1.0, float(self.total_updates) / PPO_SCHEDULE_UPDATES)
+        cosine = 0.5 * (1.0 + float(np.cos(np.pi * progress)))
+        lr = PPO_LR_MIN + (self.base_lr - PPO_LR_MIN) * cosine
+        g_fill = self._global_best_fill()
+        if g_fill >= 0.88:
+            lr = min(lr, max(PPO_LR_MIN, self.base_lr * 0.22))
+        if self._board_adapt_boost > 0.0:
+            # Мягкий transfer LR при переходе на новую карту: не разрушает зрелую политику
+            lr = min(max(lr, 6e-5) + self._board_adapt_boost * 4e-5, 1.3e-4 if g_fill >= 0.75 else self.base_lr)
+        return max(PPO_LR_MIN, lr)
+
+    def _current_ent_coef(self) -> float:
+        progress = min(1.0, float(self.total_updates) / PPO_SCHEDULE_UPDATES)
+        cosine = 0.5 * (1.0 + float(np.cos(np.pi * progress)))
+        ent = PPO_ENT_MIN + (self.ent_coef - PPO_ENT_MIN) * cosine
+        g_fill = self._global_best_fill()
+        if g_fill >= 0.88:
+            polish_frac = min(1.0, (g_fill - 0.88) / 0.10)
+            polish_cap = max(PPO_ENT_MIN, 0.0012 * (1.0 - 0.80 * polish_frac))
+            ent = min(ent, polish_cap)
+        if self._board_adapt_boost > 0.0:
+            # Небольшое оживление энтропии (до ~0.0025), без сброса к 0.025
+            ent = min(0.003, max(ent, PPO_ENT_MIN + self._board_adapt_boost * 0.0022)) if g_fill >= 0.75 else max(ent, PPO_ENT_MIN + self._board_adapt_boost * 0.004)
+        return max(PPO_ENT_MIN, ent)
 
     def reset_progress_tracker(self, *, keep_best_snapshot: bool = False) -> None:
         self._recent_episode_scores.clear()
+        self._recent_fill_ratios.clear()
         self._episodes_since_best_check = 0
         self._degradation_streak = 0
         if not keep_best_snapshot:
             self.best_avg_score = 0.0
+            self.best_fill_ratio = 0.0
+            self.best_fill_by_board.clear()
             self.best_policy_state = None
             self.best_policy_updates = 0
+            self._board_adapt_boost = 0.0
+            self._critic_warmup_updates = 0
 
-    def record_full_episode(self, score: int, reason: str = "") -> bool:
+    def on_board_size_changed(self, new_board_size: int) -> None:
+        """Сбрасывает локальное окно метрик и мягко адаптирует критик/расписание к новому размеру поля."""
+        bs = int(new_board_size)
+        prev_global_fill = self._global_best_fill()
+        self._recent_episode_scores.clear()
+        self._recent_fill_ratios.clear()
+        self._episodes_since_best_check = 0
+        self._degradation_streak = 0
+        self.best_fill_ratio = float(self.best_fill_by_board.get(bs, 0.0))
+        if self.best_fill_ratio < 0.70 and (self.total_updates >= 200 or prev_global_fill >= 0.70):
+            self._board_adapt_boost = 1.0
+            self._critic_warmup_updates = 6 if prev_global_fill >= 0.70 else 0
+        else:
+            self._board_adapt_boost = 0.0
+            self._critic_warmup_updates = 0
+
+    def record_full_episode(self, score: int, reason: str = "", board_size: int = 10) -> bool:
         """Обновляет трекер скользящего среднего только по честным полным эпизодам.
 
-        Сохраняет снимок весов при новом лучшем среднем и мягко откатывает веса при
+        Отслеживает универсальную заполненность поля (fill_ratio) для каждого размера карты,
+        сохраняет снимок весов при новом лучшем среднем и мягко откатывает веса при
         устойчивой сильной просадке в длинной сессии.
         """
+        bs = max(3, int(board_size))
+        fill_ratio = min(1.0, float(int(score) + 3) / float(bs * bs))
         self._recent_episode_scores.append(int(score))
+        self._recent_fill_ratios.append(fill_ratio)
         if len(self._recent_episode_scores) < self.best_min_episodes:
             return False
 
         avg_score = float(sum(self._recent_episode_scores)) / float(len(self._recent_episode_scores))
-        if avg_score > self.best_avg_score:
-            self.best_avg_score = avg_score
+        avg_fill = float(sum(self._recent_fill_ratios)) / float(len(self._recent_fill_ratios))
+        prev_board_best = float(self.best_fill_by_board.get(bs, 0.0))
+
+        if avg_fill > prev_board_best or (bs == 10 and avg_score > self.best_avg_score):
+            self.best_avg_score = max(self.best_avg_score, avg_score) if bs == 10 else avg_score
+            self.best_fill_ratio = max(prev_board_best, avg_fill)
+            self.best_fill_by_board[bs] = self.best_fill_ratio
             self.best_policy_state = {
                 k: v.detach().to(device="cpu", dtype=torch.float32).clone()
                 for k, v in self.online_net.state_dict().items()
@@ -205,11 +296,11 @@ class PPOAgent:
         self._episodes_since_best_check += 1
         if (
             self.best_policy_state is not None
-            and self.best_avg_score >= 15.0
+            and self.best_fill_ratio >= 0.18
             and self._episodes_since_best_check >= 15
         ):
             self._episodes_since_best_check = 0
-            if avg_score < self.best_avg_score * 0.72 and (self.best_avg_score - avg_score) >= 6.0:
+            if avg_fill < self.best_fill_ratio * 0.72 and (self.best_fill_ratio - avg_fill) >= 0.06:
                 self._degradation_streak += 1
                 if self._degradation_streak >= 2:
                     self.restore_best_policy()
@@ -254,6 +345,7 @@ class PPOAgent:
         self.optimizer = torch.optim.AdamW(self.online_net.parameters(), lr=self._current_lr(), eps=1e-5)
         self.clear_rollout()
         self._recent_episode_scores.clear()
+        self._recent_fill_ratios.clear()
         self._episodes_since_best_check = 0
         self._degradation_streak = 0
         self.restores_from_best += 1
@@ -421,11 +513,16 @@ class PPOAgent:
         if b_advantages.numel() > 1:
             b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std(unbiased=False) + 1e-8)
 
-        progress = min(1.0, float(self.total_updates) / 1800.0)
-        cur_ent_coef = max(0.0008, self.ent_coef * (1.0 - 0.968 * progress))
+        cur_ent_coef = self._current_ent_coef()
         cur_lr = self._current_lr()
         for pg in self.optimizer.param_groups:
             pg["lr"] = cur_lr
+
+        # Адаптивный масштаб клиппинга критика для переносимости на большие карты (15x15..35x35)
+        ret_std = float(b_returns.std(unbiased=False).item()) if b_returns.numel() > 1 else 1.0
+        eff_vf_clip = max(self.vf_clip_coef, ret_std * 0.5) if self.vf_clip_coef > 0.0 else 0.0
+
+        critic_only = self._critic_warmup_updates > 0
 
         self.online_net.train()
         total_loss_acc = 0.0
@@ -456,7 +553,7 @@ class PPOAgent:
                 with torch.no_grad():
                     approx_kl = float(((ratio - 1.0) - log_ratio).mean().item())
 
-                if self.target_kl is not None and batch_updates > 0 and approx_kl > 1.5 * self.target_kl:
+                if not critic_only and self.target_kl is not None and batch_updates > 0 and approx_kl > 1.5 * self.target_kl:
                     early_stopped = True
                     break
 
@@ -467,11 +564,11 @@ class PPOAgent:
 
                 old_val_mb = b_values[idx]
                 ret_mb = b_returns[idx]
-                if self.vf_clip_coef > 0.0:
+                if eff_vf_clip > 0.0 and not critic_only:
                     v_clipped = old_val_mb + torch.clamp(
                         new_values - old_val_mb,
-                        -self.vf_clip_coef,
-                        self.vf_clip_coef,
+                        -eff_vf_clip,
+                        eff_vf_clip,
                     )
                     v_loss_unclipped = F.smooth_l1_loss(new_values, ret_mb, beta=1.0, reduction="none")
                     v_loss_clipped = F.smooth_l1_loss(v_clipped, ret_mb, beta=1.0, reduction="none")
@@ -479,7 +576,10 @@ class PPOAgent:
                 else:
                     v_loss = F.smooth_l1_loss(new_values, ret_mb, beta=1.0)
 
-                loss = pg_loss - cur_ent_coef * entropy + self.vf_coef * v_loss
+                if critic_only:
+                    loss = self.vf_coef * v_loss
+                else:
+                    loss = pg_loss - cur_ent_coef * entropy + self.vf_coef * v_loss
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -497,7 +597,7 @@ class PPOAgent:
 
             if early_stopped:
                 break
-            if self.target_kl is not None and epoch_batches > 0 and (epoch_kl_sum / epoch_batches) > self.target_kl:
+            if not critic_only and self.target_kl is not None and epoch_batches > 0 and (epoch_kl_sum / epoch_batches) > self.target_kl:
                 early_stopped = True
                 break
 
@@ -509,6 +609,10 @@ class PPOAgent:
             self.kl_early_stops += 1
 
         self.total_updates += 1
+        if self._critic_warmup_updates > 0:
+            self._critic_warmup_updates -= 1
+        if self._board_adapt_boost > 0.0:
+            self._board_adapt_boost = max(0.0, self._board_adapt_boost - (1.0 / 120.0))
         self.last_loss = total_loss_acc / batch_updates
         self.last_policy_loss = pg_loss_acc / batch_updates
         self.last_value_loss = vf_loss_acc / batch_updates
@@ -555,6 +659,8 @@ class PPOAgent:
             "last_approx_kl": float(self.last_approx_kl),
             "kl_early_stops": int(self.kl_early_stops),
             "best_avg_score": float(self.best_avg_score),
+            "best_fill_ratio": float(self.best_fill_ratio),
+            "best_fill_by_board": {str(k): float(v) for k, v in self.best_fill_by_board.items()},
             "best_policy_updates": int(self.best_policy_updates),
             "restores_from_best": int(self.restores_from_best),
         }
@@ -583,6 +689,18 @@ class PPOAgent:
         self.last_approx_kl = float(payload.get("last_approx_kl", 0.0) or 0.0)
         self.kl_early_stops = int(payload.get("kl_early_stops", 0) or 0)
         self.best_avg_score = float(payload.get("best_avg_score", 0.0) or 0.0)
+        self.best_fill_ratio = float(payload.get("best_fill_ratio", 0.0) or 0.0)
+        raw_bfb = payload.get("best_fill_by_board", {})
+        self.best_fill_by_board = {}
+        if isinstance(raw_bfb, dict):
+            for k, v in raw_bfb.items():
+                try:
+                    self.best_fill_by_board[int(k)] = float(v)
+                except (TypeError, ValueError):
+                    continue
+        if self.best_fill_ratio <= 0.0 and self.best_avg_score > 0.0:
+            self.best_fill_ratio = min(1.0, (self.best_avg_score + 3.0) / 100.0)
+            self.best_fill_by_board.setdefault(10, self.best_fill_ratio)
         self.best_policy_updates = int(payload.get("best_policy_updates", 0) or 0)
         self.restores_from_best = int(payload.get("restores_from_best", 0) or 0)
         best_state = payload.get("best_policy_net")
@@ -595,8 +713,11 @@ class PPOAgent:
         else:
             self.best_policy_state = None
         self._recent_episode_scores.clear()
+        self._recent_fill_ratios.clear()
         self._episodes_since_best_check = 0
         self._degradation_streak = 0
+        self._board_adapt_boost = 0.0
+        self._critic_warmup_updates = 0
         self.clear_rollout()
         self.sync_inference_net()
 
@@ -643,7 +764,9 @@ class ParallelPPORunner:
             deque(maxlen=8) for _ in range(self.num_envs)
         ]
         self.is_replay_env: list[bool] = [False for _ in range(self.num_envs)]
-        self.failure_replay_buffer: Deque[dict[str, object]] = deque(maxlen=self.failure_buffer_maxlen)
+        self._active_replay_entry: list[dict[str, Any] | None] = [None for _ in range(self.num_envs)]
+        self.failure_replay_buffer: Deque[dict[str, Any]] = deque(maxlen=self.failure_buffer_maxlen)
+        self.endgame_failure_buffer: Deque[dict[str, Any]] = deque(maxlen=PPO_FAILURE_ENDGAME_MAXLEN)
         self.failure_replays_completed = 0
         self.display_index = 0
         self._last_leader_switch_at = time.monotonic()
@@ -657,6 +780,8 @@ class ParallelPPORunner:
 
     def clear_failure_buffer(self) -> None:
         self.failure_replay_buffer.clear()
+        self.endgame_failure_buffer.clear()
+        self._active_replay_entry = [None for _ in range(self.num_envs)]
         for snap_q in self._state_snapshots:
             snap_q.clear()
 
@@ -669,7 +794,9 @@ class ParallelPPORunner:
         self.replay_histories = [[] for _ in range(self.num_envs)]
         self._state_snapshots = [deque(maxlen=8) for _ in range(self.num_envs)]
         self.is_replay_env = [False for _ in range(self.num_envs)]
+        self._active_replay_entry = [None for _ in range(self.num_envs)]
         self.failure_replay_buffer.clear()
+        self.endgame_failure_buffer.clear()
         self.failure_replays_completed = 0
         self.display_index = 0
         self.last_completed_env_payload = None
@@ -702,11 +829,18 @@ class ParallelPPORunner:
         self.display_index = best_idx
         return best_idx
 
-    def _pick_failure_rewind_snapshot(self, idx: int, death_step: int) -> dict[str, object] | None:
+    def _pick_failure_rewind_snapshot(
+        self,
+        idx: int,
+        death_step: int,
+        *,
+        rewind_target: int | None = None,
+    ) -> dict[str, object] | None:
         snaps = self._state_snapshots[idx]
         if not snaps:
             return None
-        target_step = max(0, death_step - self.failure_rewind_target)
+        rewind = self.failure_rewind_target if rewind_target is None else max(2, int(rewind_target))
+        target_step = max(0, death_step - rewind)
         best_state: dict[str, object] | None = None
         best_dist = 10**9
         for snap_step, state in snaps:
@@ -722,20 +856,49 @@ class ParallelPPORunner:
                 best_state = state
         return best_state
 
+    def _sample_failure_entry(self, idx: int) -> tuple[dict[str, object] | None, dict[str, Any] | None]:
+        # Последний слот приоритетно берёт из эндгейм-буфера (fill >= 0.80), если он не пуст
+        use_endgame = (
+            len(self.endgame_failure_buffer) > 0
+            and (idx == self.num_envs - 1 or len(self.failure_replay_buffer) == 0)
+        )
+        buf = self.endgame_failure_buffer if use_endgame else self.failure_replay_buffer
+        if not buf:
+            return None, None
+        items = list(buf)
+        weights = []
+        for item in items:
+            if isinstance(item, dict) and "state" in item and isinstance(item["state"], dict):
+                fill = float(item.get("fill", 0.3))
+                fails = int(item.get("fails", 0))
+                weights.append(max(0.05, (fill * fill) / (1.0 + 0.5 * fails)))
+            else:
+                weights.append(0.25)
+        chosen = random.choices(items, weights=weights, k=1)[0]
+        if isinstance(chosen, dict) and "state" in chosen and isinstance(chosen["state"], dict):
+            return chosen["state"], chosen
+        return chosen, None
+
     def _reset_env_slot(self, idx: int) -> None:
         env = self.envs[idx]
         self.episode_rewards[idx] = 0.0
         self.step_logs[idx].clear()
         self.replay_histories[idx].clear()
         self._state_snapshots[idx].clear()
-        if self._is_replay_slot(idx) and len(self.failure_replay_buffer) > 0:
-            saved_state = random.choice(tuple(self.failure_replay_buffer))
-            env.load_state(saved_state)
-            if env.done or int(env.board_size) != self.board_size:
+        self._active_replay_entry[idx] = None
+        has_any_failure = len(self.failure_replay_buffer) > 0 or len(self.endgame_failure_buffer) > 0
+        if self._is_replay_slot(idx) and has_any_failure:
+            saved_state, entry_ref = self._sample_failure_entry(idx)
+            if saved_state is not None:
+                env.load_state(saved_state)
+            else:
+                env.reset(return_obs=False)
+            if saved_state is None or env.done or int(env.board_size) != self.board_size:
                 env.reset(return_obs=False)
                 self.is_replay_env[idx] = False
             else:
                 self.is_replay_env[idx] = True
+                self._active_replay_entry[idx] = entry_ref
         else:
             env.reset(return_obs=False)
             self.is_replay_env[idx] = False
@@ -773,6 +936,7 @@ class ParallelPPORunner:
             state = states[idx]
             pre_step_risks = evaluate_pre_step_risks(env, state, act)
             is_endgame = float(state[ENDGAME_IDX]) > 0.5
+            is_hunger_critical = float(state[HUNGER_CRITICAL_IDX]) > 0.5
             is_pocket_split = float(state[POCKET_SPLIT_START_IDX + act]) > 0.5
             is_pocket_merge = float(state[POCKET_MERGE_START_IDX + act]) > 0.5
             food_reachable = float(state[FOOD_REACHABLE_IDX]) > 0.5
@@ -791,7 +955,11 @@ class ParallelPPORunner:
                 is_pocket_merge=is_pocket_merge,
                 endgame_split_penalty=ENDGAME_SPLIT_PENALTY,
                 endgame_merge_bonus=ENDGAME_MERGE_BONUS,
+                is_hunger_critical=is_hunger_critical,
+                critical_hunger_penalty=PPO_CRITICAL_HUNGER_PENALTY,
             )
+            if reason == "victory":
+                shaped_reward += PPO_VICTORY_EXTRA_BONUS
             if not done and reason == "step" and food_reachable and not is_endgame:
                 new_food_dist = abs(env.snake[0][0] - env.food[0]) + abs(env.snake[0][1] - env.food[1])
                 if new_food_dist < old_food_dist:
@@ -841,11 +1009,46 @@ class ParallelPPORunner:
             if done:
                 if is_replay:
                     self.failure_replays_completed += 1
+                    entry_ref = self._active_replay_entry[idx]
+                    if entry_ref is not None:
+                        if reason == "victory":
+                            entry_ref["fails"] = 0
+                        else:
+                            entry_ref["fails"] = int(entry_ref.get("fails", 0)) + 1
+                            if entry_ref["fails"] >= 6:
+                                try:
+                                    self.failure_replay_buffer.remove(entry_ref)
+                                except ValueError:
+                                    pass
+                                try:
+                                    self.endgame_failure_buffer.remove(entry_ref)
+                                except ValueError:
+                                    pass
                 else:
-                    if reason != "victory" and int(env.score) >= self.failure_min_score:
-                        rewind_state = self._pick_failure_rewind_snapshot(idx, int(env.step_count))
+                    board_cells = max(1, int(env.board_size) * int(env.board_size))
+                    fill_ratio = float(int(env.score) + 3) / float(board_cells)
+                    best_fill = float(getattr(agent, "best_fill_ratio", 0.0))
+                    adaptive_min_fill = max(PPO_FAILURE_MIN_FILL, best_fill * 0.85)
+                    passes_min = (
+                        fill_ratio >= adaptive_min_fill
+                        and (self.board_size != 10 or int(env.score) >= self.failure_min_score)
+                    )
+                    if reason != "victory" and passes_min:
+                        rewind_target = (
+                            PPO_FAILURE_STARVATION_REWIND
+                            if reason == "starvation"
+                            else self.failure_rewind_target
+                        )
+                        rewind_state = self._pick_failure_rewind_snapshot(
+                            idx,
+                            int(env.step_count),
+                            rewind_target=rewind_target,
+                        )
                         if rewind_state is not None:
-                            self.failure_replay_buffer.append(rewind_state)
+                            entry = {"state": rewind_state, "fill": fill_ratio, "fails": 0}
+                            self.failure_replay_buffer.append(entry)
+                            if fill_ratio >= PPO_FAILURE_ENDGAME_FILL:
+                                self.endgame_failure_buffer.append(entry)
 
                     finished_snapshot = {
                         "index": idx,

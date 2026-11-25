@@ -200,7 +200,7 @@ class PPOMapNetwork(nn.Module):
         self.hidden2_size = int(hidden2)
 
         self.map_conv = nn.Sequential(
-            nn.Conv2d(self.map_channels, 16, kernel_size=3, padding=0),
+            nn.Conv2d(self.map_channels, 16, kernel_size=3, padding=1),
             nn.Tanh(),
             nn.Conv2d(16, 24, kernel_size=3, stride=2, padding=0),
             nn.Tanh(),

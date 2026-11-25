@@ -125,6 +125,7 @@ class SnakeEnv:
         self._ego_map_cache_step: int = -1
         self._ego_map_cache_size: int = 0
         self._ego_map_cache_arr: np.ndarray | None = None
+        self._all_empty_reachable_step: int = -1
         self._shortest_path_cache_step: int = -1
         self._shortest_path_cache_val: list[tuple[int, int]] | None = None
         self._ensure_bfs_buffers(board_size)
@@ -152,6 +153,7 @@ class SnakeEnv:
         self._ego_map_cache_step = -1
         self._ego_map_cache_size = 0
         self._ego_map_cache_arr = None
+        self._all_empty_reachable_step = -1
         self._shortest_path_cache_step = -1
         self._shortest_path_cache_val = None
 
@@ -782,6 +784,10 @@ class SnakeEnv:
 
         blk[tail_idx] = saved_tail_cur
         board_split = 1.0 if current_comps > 1 else 0.0
+        if current_comps == 1 and snake_len >= 2 and total_empty_cur > 0 and visited_empty_cur == total_empty_cur:
+            self._all_empty_reachable_step = self.step_count
+        else:
+            self._all_empty_reachable_step = -1
 
         apple_steps = [0.0, 0.0, 0.0]
         dangers = [0.0, 0.0, 0.0]
@@ -845,6 +851,69 @@ class SnakeEnv:
 
             saved_nh = blk[next_idx]
             blk[next_idx] = b_stamp
+
+            # O(1) fast-path: если поле связно (current_comps == 1) и все свободные соседи next_idx
+            # связаны локально внутри окна 3x3 вокруг next_idx (не точка сочленения), то полный BFS не нужен.
+            fast_ok = False
+            if current_comps == 1 and empty_after > 0:
+                tail_connected = (
+                    will_eat
+                    or next_idx == tail_idx
+                    or any(blk[tnb] != b_stamp for tnb in neighbors[tail_idx])
+                )
+                if tail_connected:
+                    e_up = ny > 0 and blk[next_idx - n] != b_stamp
+                    e_dn = ny + 1 < n and blk[next_idx + n] != b_stamp
+                    e_lt = nx > 0 and blk[next_idx - 1] != b_stamp
+                    e_rt = nx + 1 < n and blk[next_idx + 1] != b_stamp
+                    k_free = int(e_up) + int(e_dn) + int(e_lt) + int(e_rt)
+                    if k_free == 1:
+                        fast_ok = True
+                    elif k_free == 2:
+                        if e_up and e_rt:
+                            fast_ok = blk[next_idx - n + 1] != b_stamp
+                        elif e_rt and e_dn:
+                            fast_ok = blk[next_idx + n + 1] != b_stamp
+                        elif e_dn and e_lt:
+                            fast_ok = blk[next_idx + n - 1] != b_stamp
+                        elif e_lt and e_up:
+                            fast_ok = blk[next_idx - n - 1] != b_stamp
+                    elif k_free == 3:
+                        if not e_lt:
+                            fast_ok = (blk[next_idx - n + 1] != b_stamp) and (blk[next_idx + n + 1] != b_stamp)
+                        elif not e_rt:
+                            fast_ok = (blk[next_idx - n - 1] != b_stamp) and (blk[next_idx + n - 1] != b_stamp)
+                        elif not e_up:
+                            fast_ok = (blk[next_idx + n - 1] != b_stamp) and (blk[next_idx + n + 1] != b_stamp)
+                        else:
+                            fast_ok = (blk[next_idx - n - 1] != b_stamp) and (blk[next_idx - n + 1] != b_stamp)
+                    elif k_free == 4:
+                        diags = (
+                            int(blk[next_idx - n - 1] != b_stamp)
+                            + int(blk[next_idx - n + 1] != b_stamp)
+                            + int(blk[next_idx + n - 1] != b_stamp)
+                            + int(blk[next_idx + n + 1] != b_stamp)
+                        )
+                        fast_ok = diags >= 3
+
+            if fast_ok:
+                free_cells_ratio = max(1, board_cells - new_len)
+                area_ratios[act] = min(1.0, float(1 + empty_after) / float(free_cells_ratio))
+                partitions[act] = 0.0
+                if next_idx == tail_target_idx or blk[tail_target_idx] != b_stamp:
+                    has_tail_path = True
+                else:
+                    has_tail_path = any(
+                        t_nb == next_idx or blk[t_nb] != b_stamp
+                        for t_nb in neighbors[tail_target_idx]
+                    )
+                tail_blocked[act] = 0.0 if has_tail_path else 1.0
+                pocket_splits[act] = 0.0
+                pocket_merges[act] = 0.0
+                blk[next_idx] = saved_nh
+                if will_eat:
+                    blk[tail_idx] = saved_tail
+                continue
 
             stamp = self._next_bfs_stamp()
             next_comps = 0
@@ -1019,24 +1088,34 @@ class SnakeEnv:
                 blk[flat_idx] = b_stamp
 
         head_idx = head_y * n + head_x
-        reach_stamp = self._next_bfs_stamp()
-        visited = self._bfs_visited
-        neighbors = self._flat_neighbors
         reach_buf = self._ego_reach_buf
-        reach_buf.fill(0.0)
-        visited[head_idx] = reach_stamp
-        if blk[head_idx] != b_stamp:
-            reach_buf[head_idx] = 1.0
-        queue = [head_idx]
-        qi = 0
-        while qi < len(queue):
-            curr = queue[qi]
-            qi += 1
-            for nxt in neighbors[curr]:
-                if visited[nxt] != reach_stamp and blk[nxt] != b_stamp:
-                    visited[nxt] = reach_stamp
-                    reach_buf[nxt] = 1.0
-                    queue.append(nxt)
+        neighbors = self._flat_neighbors
+        if self.step_count == self._all_empty_reachable_step and snake_len >= 2:
+            reach_buf.fill(1.0)
+            for idx in range(last_idx):
+                bx, by = snake[idx]
+                reach_buf[by * n + bx] = 0.0
+            tail_x, tail_y = snake[-1]
+            tail_idx = tail_y * n + tail_x
+            if not any(t_nb == head_idx or blk[t_nb] != b_stamp for t_nb in neighbors[tail_idx]):
+                reach_buf[tail_idx] = 0.0
+        else:
+            reach_stamp = self._next_bfs_stamp()
+            visited = self._bfs_visited
+            reach_buf.fill(0.0)
+            visited[head_idx] = reach_stamp
+            if blk[head_idx] != b_stamp:
+                reach_buf[head_idx] = 1.0
+            queue = [head_idx]
+            qi = 0
+            while qi < len(queue):
+                curr = queue[qi]
+                qi += 1
+                for nxt in neighbors[curr]:
+                    if visited[nxt] != reach_stamp and blk[nxt] != b_stamp:
+                        visited[nxt] = reach_stamp
+                        reach_buf[nxt] = 1.0
+                        queue.append(nxt)
 
         dx_grid, dy_grid = _ego_offsets(win, self.direction)
         wx = head_x + dx_grid
@@ -1071,12 +1150,22 @@ class SnakeEnv:
         return self._area_ratio_cache_vec
 
     def get_ppo_signals(self, target_size: int = STARTUP_BOARD_SIZE) -> np.ndarray:
-        """Расширенный вектор сигналов для PPO: 34 базовых + 3 признака свободной площади."""
+        """Расширенный вектор сигналов для PPO: 34 базовых + 3 area_ratio + 3 масштабно-инвариантных."""
         if self.step_count == self._ppo_obs_cache_step and self._ppo_obs_cache_vec is not None:
             return self._ppo_obs_cache_vec
         base = self.get_extra_signals(target_size)
         ratios = self.get_ppo_area_ratios()
-        vec = np.concatenate((base, ratios), axis=0).astype(np.float32)
+        n = self.board_size
+        max_dist = max(1.0, float(2 * (n - 1)))
+        hx, hy = self.snake[0]
+        fx, fy = self.food
+        tx, ty = self.snake[-1]
+        scale_feats = np.array([
+            float(len(self.snake)) / float(max(1, n * n)),
+            float(abs(fx - hx) + abs(fy - hy)) / max_dist,
+            float(abs(tx - hx) + abs(ty - hy)) / max_dist,
+        ], dtype=np.float32)
+        vec = np.concatenate((base, ratios, scale_feats), axis=0).astype(np.float32)
         self._ppo_obs_cache_step = self.step_count
         self._ppo_obs_cache_vec = vec
         return vec

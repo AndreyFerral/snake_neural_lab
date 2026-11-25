@@ -19,6 +19,8 @@ class SnakeLabApp {
     this.manualModeButton = document.getElementById("manualMode");
     this.aiModeButton = document.getElementById("aiMode");
     this.trainToggle = document.getElementById("trainToggle");
+    this.evalGreedyButton = document.getElementById("evalGreedy");
+    this.evalResultBar = document.getElementById("evalResultBar");
     this.resetAgentButton = document.getElementById("resetAgent");
     this.restartBackendButton = document.getElementById("restartBackend");
     this.shutdownBackendButton = document.getElementById("shutdownBackend");
@@ -293,6 +295,7 @@ class SnakeLabApp {
     const isPpoTraining = Boolean(this.state.training && this.state.agent_kind === "ppo" && this.state.mode !== "smart");
     const ppoEnvs = Number(this.state.stats?.population ?? 0);
     this.setText(this.gamePanelKicker, isPpoTraining && ppoEnvs > 0 ? `Поле • ${ppoEnvs} сред в фоне` : "Поле");
+    this.renderEvalResultBar();
   }
 
   ingestGameFrame(state) {
@@ -481,6 +484,11 @@ class SnakeLabApp {
     this.trainToggle?.addEventListener("click", () => { 
       if (this.trainToggle.disabled) return; 
       this.sendCommand("toggle_training", !this.state?.training); 
+    });
+
+    this.evalGreedyButton?.addEventListener("click", () => {
+      if (this.evalGreedyButton.disabled) return;
+      this.sendCommand("eval_greedy");
     });
 
     this.resetAgentButton?.addEventListener("click", () => { if (this.resetAgentButton.disabled) return; this.sendCommand("reset_agent"); });
@@ -835,14 +843,50 @@ class SnakeLabApp {
       }
     }
     const isSmartMode = this.smartContextActive;
+    const isEvalRunning = Boolean(this.state.stats?.eval_running);
+    const boardSize = Number(this.state.game?.size ?? 10);
+    const evalEps = boardSize <= 20 ? 20 : 10;
     this.setText(this.runToggle, this.state.running ? "Пауза" : "Старт");
     this.setText(this.trainToggle, this.state.training ? "Обучение: вкл" : "Обучение: выкл");
     if (this.trainToggle) { this.trainToggle.disabled = isSmartMode; this.trainToggle.title = isSmartMode ? "Zmey-smart не обучается в этом режиме" : ""; }
+    if (this.evalGreedyButton) {
+      this.evalGreedyButton.disabled = isEvalRunning;
+      this.setText(this.evalGreedyButton, isEvalRunning ? "Тест идет..." : `Тест (${evalEps} игр)`);
+      this.evalGreedyButton.title = "Честная greedy-оценка текущей сети без влияния на обучение";
+    }
+    this.renderEvalResultBar();
     if (this.resetAgentButton) { this.resetAgentButton.disabled = false; this.resetAgentButton.title = isSmartMode ? "Сброс очистит JSON-статистику Zmey-smart" : ""; }
     this.toggleClass(this.manualModeButton, "is-active", this.state.mode === "manual" && !this.state.training);
     this.toggleClass(this.aiModeButton, "is-active", ["ai", "smart"].includes(this.state.mode) && !this.state.training);
     this.toggleClass(this.trainToggle, "is-active", this.state.training);
     this.updateVisualizationVisibility();
+  }
+
+  renderEvalResultBar() {
+    if (!this.evalResultBar) return;
+    const isRunning = Boolean(this.state?.stats?.eval_running);
+    const res = this.state?.stats?.last_eval_result;
+    if (isRunning) {
+      this.setHidden(this.evalResultBar, false);
+      this.setHtml(this.evalResultBar, "Выполняется честный greedy-тест...");
+      return;
+    }
+    if (!res || typeof res !== "object") {
+      this.setHidden(this.evalResultBar, true);
+      return;
+    }
+    this.setHidden(this.evalResultBar, false);
+    const bs = Number(res.board_size ?? 10);
+    const eps = Number(res.episodes ?? 0);
+    const winPct = Number(res.win_rate_pct ?? 0).toFixed(1);
+    const avgScore = Number(res.avg_score ?? 0).toFixed(1);
+    const maxV = Number(res.victory_score ?? (bs * bs - 3));
+    const fillPct = Number(res.avg_fill_pct ?? 0).toFixed(1);
+    const pureTag = res.pure_policy ? " • pure" : "";
+    this.setHtml(
+      this.evalResultBar,
+      `Тест ${bs}×${bs} (${eps} игр${pureTag}): <strong>${winPct}% побед</strong> • ср. ${avgScore}/${maxV} (${fillPct}%)`
+    );
   }
 
   syncSmartModelSelect() {

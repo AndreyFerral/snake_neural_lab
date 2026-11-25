@@ -194,9 +194,15 @@ class TestSnakeEnv(unittest.TestCase):
         self.assertGreater(float(ratios[2]), 0.8)
 
         ppo_obs = env.get_ppo_signals()
+        self.assertEqual(len(PPO_SIGNAL_LABELS), 40)
         self.assertEqual(ppo_obs.shape, (len(PPO_SIGNAL_LABELS),))
         self.assertTrue(np.array_equal(ppo_obs[: len(GLOBAL_SIGNAL_LABELS)], dqn_obs))
-        self.assertTrue(np.array_equal(ppo_obs[len(GLOBAL_SIGNAL_LABELS) :], ratios))
+        self.assertTrue(np.array_equal(ppo_obs[len(GLOBAL_SIGNAL_LABELS) : len(GLOBAL_SIGNAL_LABELS) + 3], ratios))
+        # Scale-invariant signals: fill_ratio, food_dist_norm, tail_dist_norm
+        fill_ratio, food_dist_norm, tail_dist_norm = ppo_obs[-3:]
+        self.assertAlmostEqual(float(fill_ratio), 3.0 / 100.0, places=5)
+        self.assertAlmostEqual(float(food_dist_norm), (7 + 3) / 18.0, places=5)
+        self.assertAlmostEqual(float(tail_dist_norm), 2.0 / 18.0, places=5)
         self.assertEqual(PPO_MAP_SIZE, 11)
 
 

@@ -302,6 +302,9 @@ const SnakeRenderers = {
     area_ratio_forward: "Доля доступной свободной площади после хода прямо",
     area_ratio_left: "Доля доступной свободной площади после хода влево",
     area_ratio_right: "Доля доступной свободной площади после хода вправо",
+    fill_ratio: "Доля заполнения поля змейкой (длина / площадь)",
+    food_dist_norm: "Нормированное манхэттенское расстояние до яблока",
+    tail_dist_norm: "Нормированное манхэттенское расстояние до хвоста",
   },
 
   createColumnPositions(centerX, centerY, count, spacing) {
@@ -531,7 +534,8 @@ const SnakeRenderers = {
       {
         title: "Состояние",
         rows: [
-          ["endgame", "hunger_high", "hunger_critical", "board_split"]
+          ["endgame", "hunger_high", "hunger_critical", "board_split"],
+          ["fill_ratio", "food_dist_norm", "tail_dist_norm"]
         ]
       },
       {

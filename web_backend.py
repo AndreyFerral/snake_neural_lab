@@ -136,7 +136,7 @@ GLOBAL_SIGNAL_COUNT = len(GLOBAL_SIGNAL_LABELS)
 PPO_SIGNAL_COUNT = len(PPO_SIGNAL_LABELS)
 # Подпись меняется автоматически при изменении количества сигналов или размеров слоёв
 ARCH_SIGNATURE = f"sig_{GLOBAL_SIGNAL_COUNT}_{HIDDEN_LAYER_1}_{HIDDEN_LAYER_2}"
-PPO_ARCH_SIGNATURE = f"ppo_split_map{PPO_MAP_CHANNELS}x{PPO_MAP_SIZE}_c3x3_sig{PPO_SIGNAL_COUNT}_{HIDDEN_LAYER_1}_{HIDDEN_LAYER_2}"
+PPO_ARCH_SIGNATURE = f"ppo_split_p1_map{PPO_MAP_CHANNELS}x{PPO_MAP_SIZE}_c3x3_sig{PPO_SIGNAL_COUNT}_{HIDDEN_LAYER_1}_{HIDDEN_LAYER_2}"
 
 
 def arch_signature_for_agent(agent_kind: str) -> str:
@@ -255,6 +255,8 @@ class SnakeWebBackend:
         self.replays_dir = RUNTIME_DIR / "replays"
         self.replay_manager = ReplayManager(self.replays_dir, perf_logger=log_perf)
         self.record_replays = True
+        self.last_eval_result: dict[str, Any] | None = None
+        self._eval_running = False
 
         self._sync_network_source()
         self._load_active_context()
@@ -612,7 +614,11 @@ class SnakeWebBackend:
                         for item in completed:
                             self._record_training_completion(item, update_death_snapshot=False)
                             if isinstance(agent_ref, PPOAgent):
-                                if agent_ref.record_full_episode(int(item.get("score", 0)), str(item.get("reason", ""))):
+                                if agent_ref.record_full_episode(
+                                    int(item.get("score", 0)),
+                                    str(item.get("reason", "")),
+                                    board_size=int(item.get("board_size", self.game.board_size)),
+                                ):
                                     new_best_policy = True
                             replay_steps = item.get("replay_steps")
                             if record_replays and isinstance(replay_steps, list) and replay_steps:
@@ -870,7 +876,11 @@ class SnakeWebBackend:
             self._record_training_completion(item)
             if isinstance(self.agent, PPOAgent):
                 with self.agent_lock:
-                    if self.agent.record_full_episode(int(item.get("score", 0)), str(item.get("reason", ""))):
+                    if self.agent.record_full_episode(
+                        int(item.get("score", 0)),
+                        str(item.get("reason", "")),
+                        board_size=int(item.get("board_size", self.game.board_size)),
+                    ):
                         new_best_policy = True
             replay_steps = item.get("replay_steps")
             if self.record_replays and isinstance(replay_steps, list) and replay_steps:
@@ -1336,6 +1346,8 @@ class SnakeWebBackend:
                 "last_value": float(getattr(self.agent, "last_value", 0.0)),
                 "last_approx_kl": float(getattr(self.agent, "last_approx_kl", 0.0)),
                 "best_avg_score": float(getattr(self.agent, "best_avg_score", 0.0)),
+                "best_fill_ratio": float(getattr(self.agent, "best_fill_ratio", 0.0)),
+                "effective_tail_bias": float(self.agent.effective_tail_bias()) if isinstance(self.agent, PPOAgent) else 0.0,
             }
         return {
             "epsilon": float(getattr(self.agent, "epsilon", 1.0)),
@@ -1377,6 +1389,10 @@ class SnakeWebBackend:
             self.agent.best_avg_score = max(
                 float(getattr(self.agent, "best_avg_score", 0.0)),
                 float(payload.get("best_avg_score", 0.0) or 0.0),
+            )
+            self.agent.best_fill_ratio = max(
+                float(getattr(self.agent, "best_fill_ratio", 0.0)),
+                float(payload.get("best_fill_ratio", 0.0) or 0.0),
             )
             return
         raw_best_fitness = payload.get("best_fitness")
@@ -1788,6 +1804,7 @@ class SnakeWebBackend:
         self.training = False
         self.running = False
         self.fitness_ema = 0.0
+        self.last_eval_result = None
         self._reset_environment_state()
         self._schedule_save(urgent=True)
         return True, "ok"
@@ -1804,7 +1821,8 @@ class SnakeWebBackend:
         if isinstance(self.agent, PPOAgent):
             with self.agent_lock:
                 self.agent.clear_rollout()
-                self.agent.reset_progress_tracker(keep_best_snapshot=True)
+                self.agent.on_board_size_changed(board_size)
+        self.last_eval_result = None
         self._select_board_best_score(board_size)
         self._reset_environment_state()
         self._schedule_save(urgent=True)
@@ -2018,6 +2036,10 @@ class SnakeWebBackend:
             "rollout_capacity": buffer_capacity,
             "value_estimate": float(getattr(self.agent, "last_value", 0.0)) if is_ppo else 0.0,
             "entropy": float(getattr(self.agent, "last_entropy", 0.0)) if is_ppo else 0.0,
+            "best_fill_ratio": float(getattr(self.agent, "best_fill_ratio", 0.0)) if is_ppo else 0.0,
+            "effective_tail_bias": float(self.agent.effective_tail_bias()) if (is_ppo and isinstance(self.agent, PPOAgent)) else 0.0,
+            "eval_running": bool(self._eval_running),
+            "last_eval_result": dict(self.last_eval_result) if isinstance(self.last_eval_result, dict) else None,
             "loss": float(getattr(self.agent, "last_loss", 0.0)) if (is_dqn or is_ppo) else 0.0,
             "updates": int(getattr(self.agent, "total_updates", 0)) if (is_dqn or is_ppo) else 0,
             "steps": self.game.step_count,
@@ -2274,13 +2296,128 @@ class SnakeWebBackend:
             if acquired:
                 self.lock.release()
 
+    def _run_greedy_eval_sync(self, episodes: int | None = None) -> dict[str, Any]:
+        """Выполняет честную жадную оценку (pure policy, bias=0.0 для PPO) без влияния на обучение."""
+        with self.lock:
+            board_size = int(self.game.board_size)
+            agent_kind = str(self.agent_kind)
+            mode = str(self.mode)
+            target_episodes = int(episodes) if episodes is not None else (20 if board_size <= 20 else 10)
+            target_episodes = max(1, min(50, target_episodes))
+            eval_agent: Any = None
+            if mode == "smart":
+                eval_kind = "smart"
+                eval_agent = self.smart_agent
+            elif agent_kind == "ppo" and isinstance(self.agent, PPOAgent):
+                eval_kind = "ppo"
+                eval_agent = PPOAgent(
+                    global_signal_count=self.agent.global_signal_count,
+                    device=torch.device("cpu"),
+                    map_channels=self.agent.map_channels,
+                    map_size=self.agent.map_size,
+                    tail_blocked_logit_bias=0.0,
+                )
+                with self.agent._inference_lock:
+                    snap_weights = {k: v.detach().cpu().clone() for k, v in self.agent.inference_net.state_dict().items()}
+                eval_agent.online_net.load_state_dict(snap_weights)
+                eval_agent.online_net.eval()
+                eval_agent.sync_inference_net()
+            else:
+                eval_kind = "dqn"
+                eval_agent = DQNAgent(device=torch.device("cpu"))
+                with self.agent_lock:
+                    snap_weights = {k: v.detach().cpu().clone() for k, v in self.agent.online_net.state_dict().items()}
+                eval_agent.online_net.load_state_dict(snap_weights)
+                eval_agent.online_net.eval()
+
+        started_at = time.perf_counter()
+        victory_score = board_size * board_size - 3
+        max_steps_cap = board_size * board_size * 25
+        scores: list[int] = []
+        wins = 0
+        completed_eps = 0
+
+        for _ in range(target_episodes):
+            if self.stop_event.is_set():
+                break
+            env = SnakeEnv(board_size=board_size)
+            env.reset(return_obs=False)
+            while not env.done and env.step_count < max_steps_cap:
+                if self.stop_event.is_set():
+                    break
+                if eval_kind == "ppo":
+                    sig = env.get_ppo_signals()
+                    ego = env.get_egocentric_map(eval_agent.map_size)
+                    act, _, _, _ = eval_agent.select_best_action(sig, ego_map=ego)
+                elif eval_kind == "smart":
+                    act, _, _, _ = eval_agent.select_action(env)
+                else:
+                    sig = env.get_observation_grid()
+                    act, _, _, _ = eval_agent.select_best_action(sig)
+                env.step(relative_to_absolute(env.direction, act), return_obs=False)
+            if self.stop_event.is_set():
+                break
+            completed_eps += 1
+            scores.append(int(env.score))
+            if env.last_reason == "victory":
+                wins += 1
+
+        elapsed_s = max(0.01, time.perf_counter() - started_at)
+        avg_score = float(sum(scores)) / float(len(scores)) if scores else 0.0
+        avg_fill_pct = 100.0 * (avg_score + 3.0) / float(board_size * board_size) if scores else 0.0
+        win_rate_pct = 100.0 * float(wins) / float(completed_eps) if completed_eps else 0.0
+        return {
+            "agent_kind": eval_kind,
+            "board_size": board_size,
+            "episodes": completed_eps,
+            "victories": wins,
+            "victory_score": victory_score,
+            "win_rate_pct": round(win_rate_pct, 1),
+            "avg_score": round(avg_score, 1),
+            "min_score": int(min(scores)) if scores else 0,
+            "max_score": int(max(scores)) if scores else 0,
+            "avg_fill_pct": round(avg_fill_pct, 1),
+            "elapsed_s": round(elapsed_s, 2),
+            "pure_policy": eval_kind == "ppo",
+        }
+
+    def _start_greedy_eval(self, episodes: int | None = None, *, sync: bool = False) -> bool:
+        if self._eval_running:
+            return False
+        self._eval_running = True
+        if sync:
+            try:
+                res = self._run_greedy_eval_sync(episodes=episodes)
+                with self.lock:
+                    self.last_eval_result = res
+                    self._eval_running = False
+                    self._update_frame_cache()
+            except Exception:
+                with self.lock:
+                    self._eval_running = False
+                    self._update_frame_cache()
+            return True
+
+        def _worker() -> None:
+            try:
+                res = self._run_greedy_eval_sync(episodes=episodes)
+                with self.lock:
+                    self.last_eval_result = res
+            finally:
+                with self.lock:
+                    self._eval_running = False
+                    self._update_frame_cache()
+
+        threading.Thread(target=_worker, daemon=True, name="snake-greedy-eval").start()
+        return True
+
     def _command_state_response(self, command: str) -> dict[str, Any] | None:
         if command == "manual_action":
             return None
         light_state_commands = {
             "toggle_running", "toggle_training", "set_agent_kind", "set_mode",
             "set_smart_model", "set_board_size", "cycle_board_size",
-            "set_speed", "set_device", "reset_agent",
+            "set_speed", "set_device", "reset_agent", "eval_greedy",
             "restart_server", "shutdown_server",
         }
         if command in light_state_commands:
@@ -2393,8 +2530,19 @@ class SnakeWebBackend:
                 if not isinstance(value, bool):
                     return {"ok": False, "error": "Value must be a boolean"}
                 self.record_replays = value
+            elif command == "eval_greedy":
+                episodes_val: int | None = None
+                sync_val = False
+                if isinstance(value, int):
+                    episodes_val = value
+                elif isinstance(value, dict):
+                    if isinstance(value.get("episodes"), int):
+                        episodes_val = int(value["episodes"])
+                    sync_val = bool(value.get("sync", False))
+                self._start_greedy_eval(episodes=episodes_val, sync=sync_val)
             elif command == "reset_agent":
                 with self._pause_ppo_worker():
+                    self.last_eval_result = None
                     if self.mode == "smart":
                         store = load_aux_stats_store()
                         models = store.get("models", {})

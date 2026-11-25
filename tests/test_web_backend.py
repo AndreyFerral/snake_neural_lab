@@ -120,7 +120,19 @@ class TestWebBackendAndApi(unittest.TestCase):
                     res_board = backend.handle_command({"type": "set_board_size", "value": 15})
                     self.assertTrue(res_board["ok"])
                     self.assertEqual(len(backend.training_runner.failure_replay_buffer), 0)
+                    self.assertEqual(len(backend.training_runner.endgame_failure_buffer), 0)
                     backend.handle_command({"type": "set_board_size", "value": 10})
+
+                    # Greedy eval runs cleanly without polluting episode stats or history
+                    ep_before = backend.episode_counter
+                    res_eval = backend.handle_command({"type": "eval_greedy", "value": {"episodes": 3, "sync": True}})
+                    self.assertTrue(res_eval["ok"])
+                    eval_data = backend.last_eval_result
+                    self.assertIsNotNone(eval_data)
+                    self.assertEqual(eval_data["episodes"], 3)
+                    self.assertEqual(eval_data["board_size"], 10)
+                    self.assertTrue(eval_data["pure_policy"])
+                    self.assertEqual(backend.episode_counter, ep_before)
 
                     res = backend.handle_command({"type": "set_agent_kind", "value": "dqn"})
                     self.assertTrue(res["ok"])

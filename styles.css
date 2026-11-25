@@ -79,6 +79,9 @@ button.primary { background: linear-gradient(135deg, rgba(92, 214, 173, 0.94), r
 button.accent { background: linear-gradient(135deg, rgba(255, 179, 71, 0.95), rgba(255, 140, 66, 0.88)); color: #271200; }
 button.danger { background: rgba(255, 107, 107, 0.13); border-color: rgba(255, 107, 107, 0.3); }
 .status-callout { padding: 12px 14px; border-radius: 0; background: linear-gradient(145deg, rgba(10, 35, 47, 0.92), rgba(9, 22, 31, 0.8)); border: 1px solid rgba(92, 214, 173, 0.12); }
+.eval-result-bar { padding: 8px 12px; border-radius: 12px; background: rgba(92, 214, 173, 0.08); border: 1px solid rgba(92, 214, 173, 0.24); color: var(--text); font-size: 0.82rem; line-height: 1.35; }
+.eval-result-bar[hidden] { display: none; }
+.eval-result-bar strong { color: var(--good); }
 .status-label { margin: 0 0 8px; color: var(--accent); font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.12em; }
 #decisionText { margin: 0; line-height: 1.5; white-space: pre-line; overflow-wrap: anywhere; }
 .decision-stats { overflow: hidden; border-radius: 0; background: transparent; border: 1px solid rgba(255, 255, 255, 0.08); margin-top: 10px; }

@@ -83,6 +83,9 @@ PPO_EXTRA_SIGNAL_LABELS = (
     "area_ratio_forward",
     "area_ratio_left",
     "area_ratio_right",
+    "fill_ratio",
+    "food_dist_norm",
+    "tail_dist_norm",
 )
 PPO_SIGNAL_LABELS = GLOBAL_SIGNAL_LABELS + PPO_EXTRA_SIGNAL_LABELS
 
@@ -183,6 +186,9 @@ SIGNAL_LABELS = {
     "area_ratio_forward": "📐↑",
     "area_ratio_left": "📐←",
     "area_ratio_right": "📐→",
+    "fill_ratio": "📊",
+    "food_dist_norm": "🍎📏",
+    "tail_dist_norm": "🐍📏",
 }
 
 TERMINAL_REASONS = (
