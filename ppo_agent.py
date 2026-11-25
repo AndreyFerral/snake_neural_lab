@@ -82,7 +82,13 @@ PPO_EMA_POLISH_TAU = 0.978
 PPO_EMA_START_FILL = 0.90
 PPO_EMA_MIN_UPDATES = 5
 PPO_HUNGRY_SAMPLE_MIN_PROB = 0.05
-PPO_CRIT_HUNGER_TEMP = 2.0
+PPO_CRIT_HUNGER_TEMP = 2.2
+# Плавная эскалация температуры логитов в самом конце голода (100% чистая политика π, 0 lookahead)
+PPO_HUNGRY_ESCALATE_TIERS: tuple[tuple[float, float, float], ...] = (
+    (0.93, 3.8, 0.03),
+    (0.85, 2.2, 0.05),
+    (0.75, 1.4, 0.08),
+)
 
 
 def valid_action_mask_from_signals(signals: torch.Tensor) -> torch.Tensor:
@@ -449,14 +455,28 @@ class PPOAgent:
         probs_np: np.ndarray,
         sig_t: torch.Tensor,
         masked_logits: torch.Tensor | None = None,
+        hunger_ratio: float | None = None,
     ) -> tuple[int, bool, int]:
         greedy_action = int(np.argmax(probs_np))
-        # При критическом голоде (hunger_critical=1) мягко повышаем температуру T=2.0 на логитах самой
-        # обученной политики π (p >= 0.05), чтобы выходить из детерминированных циклов без лишних столкновений.
-        if sig_t.shape[1] > HUNGER_CRITICAL_IDX and float(sig_t[0, HUNGER_CRITICAL_IDX].item()) > 0.5:
-            if masked_logits is not None and PPO_CRIT_HUNGER_TEMP > 1.0:
+        # Плавная эскалация температуры (P3a_escalate_pure): 0.75->T=1.4, 0.85->T=2.2, 0.93->T=3.8
+        # на логитах самой обученной политики π (строго 1-step, 0 lookahead).
+        temp = 0.0
+        min_prob = PPO_HUNGRY_SAMPLE_MIN_PROB
+        if hunger_ratio is not None:
+            hr = float(hunger_ratio)
+            for thr, t_val, p_val in PPO_HUNGRY_ESCALATE_TIERS:
+                if hr >= thr:
+                    temp = t_val
+                    min_prob = p_val
+                    break
+        elif sig_t.shape[1] > HUNGER_CRITICAL_IDX and float(sig_t[0, HUNGER_CRITICAL_IDX].item()) > 0.5:
+            temp = PPO_CRIT_HUNGER_TEMP
+            min_prob = PPO_HUNGRY_SAMPLE_MIN_PROB
+
+        if temp > 0.0:
+            if masked_logits is not None and temp > 1.0:
                 scaled_np = (
-                    torch.softmax(masked_logits / float(PPO_CRIT_HUNGER_TEMP), dim=-1)[0]
+                    torch.softmax(masked_logits / float(temp), dim=-1)[0]
                     .detach()
                     .cpu()
                     .numpy()
@@ -464,7 +484,7 @@ class PPOAgent:
                 )
             else:
                 scaled_np = probs_np.astype(np.float64)
-            filtered = np.where(scaled_np >= PPO_HUNGRY_SAMPLE_MIN_PROB, scaled_np, 0.0)
+            filtered = np.where(scaled_np >= min_prob, scaled_np, 0.0)
             total = float(filtered.sum())
             if total > 0.0:
                 p_norm = filtered / total
@@ -479,6 +499,7 @@ class PPOAgent:
         state: np.ndarray,
         *,
         ego_map: np.ndarray | None = None,
+        hunger_ratio: float | None = None,
     ) -> tuple[int, np.ndarray, bool, int]:
         """Неблокирующий выбор хода для плавного показа поля и инференса EMA."""
         sig_t = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -493,7 +514,9 @@ class PPOAgent:
         probs = torch.softmax(masked_logits, dim=-1)
         probs_np = probs[0].detach().cpu().numpy().astype(np.float32)
         self.last_value = float(value[0].item())
-        action, was_random, greedy_action = self._pick_eval_action(probs_np, sig_t, masked_logits)
+        action, was_random, greedy_action = self._pick_eval_action(
+            probs_np, sig_t, masked_logits, hunger_ratio=hunger_ratio
+        )
         return action, probs_np, was_random, greedy_action
 
     def restore_best_policy(self) -> bool:
@@ -598,9 +621,10 @@ class PPOAgent:
         state: np.ndarray,
         *,
         ego_map: np.ndarray | None = None,
+        hunger_ratio: float | None = None,
     ) -> tuple[int, np.ndarray, bool, int]:
         if self.ema_active:
-            return self.select_showcase_action(state, ego_map=ego_map)
+            return self.select_showcase_action(state, ego_map=ego_map, hunger_ratio=hunger_ratio)
         self.online_net.eval()
         sig_t = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
         map_t = (
@@ -613,7 +637,9 @@ class PPOAgent:
         probs = torch.softmax(masked_logits, dim=-1)
         probs_np = probs[0].detach().cpu().numpy().astype(np.float32)
         self.last_value = float(value[0].item())
-        action, was_random, greedy_action = self._pick_eval_action(probs_np, sig_t, masked_logits)
+        action, was_random, greedy_action = self._pick_eval_action(
+            probs_np, sig_t, masked_logits, hunger_ratio=hunger_ratio
+        )
         return action, probs_np, was_random, greedy_action
 
     @torch.inference_mode()

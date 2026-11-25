@@ -558,10 +558,16 @@ class SnakeWebBackend:
         if self.mode == "smart" and not training_mode:
             return self.smart_agent.select_action(self.game)
         ego_map = self.game.get_egocentric_map() if self.agent_kind == "ppo" else None
+        if self.agent_kind == "ppo":
+            h_ratio = float(self.game.steps_without_food) / max(
+                1.0, float(safe_hunger_budget_for(self.game.score, self.game.board_size))
+            )
+        else:
+            h_ratio = None
         with self.agent_lock:
             if self.agent_kind == "ppo":
                 if self.mode == "ai" and not training_mode:
-                    return self.agent.select_best_action(state, ego_map=ego_map)
+                    return self.agent.select_best_action(state, ego_map=ego_map, hunger_ratio=h_ratio)
                 return self.agent.select_action(
                     state,
                     ego_map=ego_map,
@@ -657,7 +663,10 @@ class SnakeWebBackend:
             return
         state = self.game.get_ppo_signals()
         ego_map = self.game.get_egocentric_map()
-        act, probs, _, greedy = self.agent.select_showcase_action(state, ego_map=ego_map)
+        h_ratio = float(self.game.steps_without_food) / max(
+            1.0, float(safe_hunger_budget_for(self.game.score, self.game.board_size))
+        )
+        act, probs, _, greedy = self.agent.select_showcase_action(state, ego_map=ego_map, hunger_ratio=h_ratio)
 
         pre_step_snapshot = self._build_recent_step_snapshot(
             absolute_direction=relative_to_absolute(self.game.direction, act),
@@ -2306,7 +2315,10 @@ class SnakeWebBackend:
                 if eval_kind == "ppo":
                     sig = env.get_ppo_signals()
                     ego = env.get_egocentric_map(eval_agent.map_size)
-                    act, _, _, _ = eval_agent.select_best_action(sig, ego_map=ego)
+                    h_ratio = float(env.steps_without_food) / max(
+                        1.0, float(safe_hunger_budget_for(env.score, env.board_size))
+                    )
+                    act, _, _, _ = eval_agent.select_best_action(sig, ego_map=ego, hunger_ratio=h_ratio)
                 elif eval_kind == "smart":
                     act, _, _, _ = eval_agent.select_action(env)
                 else:

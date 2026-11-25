@@ -32,6 +32,7 @@ from backend_config import (
     PPO_MAP_SIZE,
     PPO_SIGNAL_LABELS,
     TAIL_BLOCKED_START_IDX,
+    hunger_budget_for,
 )
 from ppo_agent import PPOAgent, ParallelPPORunner
 from snake_env import SnakeEnv, relative_to_absolute
@@ -232,7 +233,8 @@ def evaluate_ppo(
             env_ms_total += (time.perf_counter() - t_env0) * 1000.0
 
             t_net0 = time.perf_counter()
-            action, probs, _, greedy = agent.select_best_action(sig, ego_map=ego)
+            h_ratio = float(env.steps_without_food) / max(1.0, float(hunger_budget_for(env.score, env.board_size)))
+            action, probs, _, greedy = agent.select_best_action(sig, ego_map=ego, hunger_ratio=h_ratio)
             net_ms_total += (time.perf_counter() - t_net0) * 1000.0
 
             raw_greedy = greedy
