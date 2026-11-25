@@ -78,12 +78,20 @@ button.is-active { background: rgba(92, 214, 173, 0.2); border-color: rgba(92, 2
 button.primary { background: linear-gradient(135deg, rgba(92, 214, 173, 0.94), rgba(60, 194, 155, 0.88)); color: #05261d; }
 button.accent { background: linear-gradient(135deg, rgba(255, 179, 71, 0.95), rgba(255, 140, 66, 0.88)); color: #271200; }
 button.danger { background: rgba(255, 107, 107, 0.13); border-color: rgba(255, 107, 107, 0.3); }
-.status-callout { padding: 12px 14px; border-radius: 0; background: linear-gradient(145deg, rgba(10, 35, 47, 0.92), rgba(9, 22, 31, 0.8)); border: 1px solid rgba(92, 214, 173, 0.12); }
+.status-callout { padding: 10px 12px; border-radius: 16px; background: linear-gradient(145deg, rgba(10, 35, 47, 0.92), rgba(9, 22, 31, 0.8)); border: 1px solid rgba(92, 214, 173, 0.14); }
+.decision-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.status-label { margin: 0; color: var(--accent); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.14em; font-weight: 600; }
+.decision-meta { font-size: 0.78rem; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.decision-meta strong { color: var(--text); font-weight: 700; }
+.decision-body { margin: 0; line-height: 1.4; font-size: 0.86rem; color: var(--muted); }
+.decision-pills { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.decision-pill { display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 6px 9px; border-radius: 10px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); color: var(--muted); font-size: 0.82rem; font-variant-numeric: tabular-nums; }
+.decision-pill .dir { font-weight: 700; color: var(--text); }
+.decision-pill.is-chosen { background: rgba(92, 214, 173, 0.16); border-color: rgba(92, 214, 173, 0.48); color: var(--text); font-weight: 700; }
+.decision-pill.is-chosen .dir { color: var(--good); }
 .eval-result-bar { padding: 8px 12px; border-radius: 12px; background: rgba(92, 214, 173, 0.08); border: 1px solid rgba(92, 214, 173, 0.24); color: var(--text); font-size: 0.82rem; line-height: 1.35; }
 .eval-result-bar[hidden] { display: none; }
 .eval-result-bar strong { color: var(--good); }
-.status-label { margin: 0 0 8px; color: var(--accent); font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.12em; }
-#decisionText { margin: 0; line-height: 1.5; white-space: pre-line; overflow-wrap: anywhere; }
 .decision-stats { overflow: hidden; border-radius: 0; background: transparent; border: 1px solid rgba(255, 255, 255, 0.08); margin-top: 10px; }
 .decision-stats table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 0.9rem; }
 .decision-stats th:first-child, .decision-stats td:first-child { width: auto; }
@@ -174,12 +182,12 @@ button.danger { background: rgba(255, 107, 107, 0.13); border-color: rgba(255, 1
 .game-stats-grid .stat-card span { font-size: 0.72rem; margin-bottom: 4px; }
 .stat-card strong { font-size: 1.16rem; }
 .game-stats-grid .stat-card strong { display: block; font-size: clamp(0.96rem, 1.08vw, 1.08rem); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hunger-meter { display: grid; gap: 24px; width: 100%; }
-.game-stats-grid .stat-card strong .hunger-meter { row-gap: 24px; }
-.stat-card .hunger-meter__text, .game-stats-grid .stat-card .hunger-meter__text { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: clamp(0.96rem, 1.08vw, 1.08rem); line-height: 1.05; margin-bottom: 0; }
-.stat-card .hunger-meter__label, .game-stats-grid .stat-card .hunger-meter__label { display: inline; color: var(--muted); font-size: 0.72rem; font-weight: 500; margin-bottom: 0; }
-.stat-card .hunger-meter__value, .game-stats-grid .stat-card .hunger-meter__value { display: inline; color: var(--text); font-weight: 800; margin-bottom: 0; }
-.stat-card .hunger-meter__track, .game-stats-grid .stat-card .hunger-meter__track { display: block; height: 6px; overflow: hidden; border-radius: 999px; background: rgba(255, 255, 255, 0.10); margin-top: 12px; margin-bottom: 0; }
+.hunger-meter { display: grid; gap: 0; width: 100%; }
+.game-stats-grid .stat-card strong .hunger-meter { row-gap: 0; }
+.stat-card .hunger-meter__text, .game-stats-grid .stat-card .hunger-meter__text { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; font-size: clamp(0.92rem, 1.05vw, 1.04rem); line-height: 1.1; margin-bottom: 0; }
+.stat-card .hunger-meter__label, .game-stats-grid .stat-card .hunger-meter__label { display: inline; color: var(--muted); font-size: 0.68rem; font-weight: 500; margin-bottom: 0; }
+.stat-card .hunger-meter__value, .game-stats-grid .stat-card .hunger-meter__value { display: inline; color: var(--text); font-weight: 800; margin-bottom: 0; font-variant-numeric: tabular-nums; }
+.stat-card .hunger-meter__track, .game-stats-grid .stat-card .hunger-meter__track { display: block; height: 6px; overflow: hidden; border-radius: 999px; background: rgba(255, 255, 255, 0.10); margin-top: 10px; margin-bottom: 0; }
 .stat-card .hunger-meter__fill, .game-stats-grid .stat-card .hunger-meter__fill { display: block; height: 100%; width: var(--hunger-width, 0%); border-radius: inherit; background: #5cd6ad; }
 .hunger-meter.is-warn .hunger-meter__fill { background: #ffb347; }
 .hunger-meter.is-danger .hunger-meter__fill { background: #ef476f; }

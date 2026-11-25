@@ -40,14 +40,14 @@ class SnakeLabApp {
     this.gamePanelKicker = document.getElementById("gamePanelKicker");
     this.bestScoreStat = document.getElementById("bestScoreStat");
     this.avgScoreStat = document.getElementById("avgScoreStat");
-    this.lossStat = document.getElementById("lossStat");
     this.epsilonStat = document.getElementById("epsilonStat");
-    this.bufferStat = document.getElementById("bufferStat");
+    this.updatesLabel = document.getElementById("updatesLabel");
     this.leaderStat = document.getElementById("leaderStat");
-    this.aliveStat = document.getElementById("aliveStat");
+    this.auxMetricLabel = document.getElementById("auxMetricLabel");
+    this.auxMetricStat = document.getElementById("auxMetricStat");
+    this.decisionMeta = document.getElementById("decisionMeta");
     this.chartMetricLabel = document.getElementById("chartMetricLabel");
     this.chartMetricDescription = document.getElementById("chartMetricDescription");
-    this.stepStat = document.getElementById("stepStat");
     this.rewardRulesBody = document.getElementById("rewardRulesBody");
 
     this.stepReviewLiveButton = document.getElementById("stepReviewLive");
@@ -932,33 +932,46 @@ class SnakeLabApp {
     this.setText(this.networkSourceBadge, `Нейросеть: ${profile.networkSource}`);
   }
 
-  buildDecisionText() {
-    if (this.state?.restart_pending || Date.now() < this.restartPendingUntil) return ["Backend перезапускается.", "Состояние сохранено.", "Связь может пропасть на несколько секунд."].join("\n");
-    const qValues = this.formatOrderedQValues();
-    const penaltyReasons = Array.isArray(this.state.last_penalty_reasons) ? this.state.last_penalty_reasons.map((reason) => this.penaltyShortLabel(reason)).join(", ") : "";
-    const networkChoice = Number.isInteger(this.state.last_greedy_action) ? `${this.arrowForAction(this.state.last_greedy_action)} ${this.outputLabels()[this.state.last_greedy_action] ?? ""}`.trim() : "-";
-    const reward = Number.isFinite(this.state.stats?.reward) ? this.state.stats.reward : 0;
-    const rewardValue = reward.toFixed(3);
-    let rewardReason = "Нет";
-    if (this.state.last_reason === "victory") rewardReason = "Победа";
-    else if (this.state.last_reason === "apple") rewardReason = "Яблоко";
-    else if (this.state.last_reason === "looping") rewardReason = "Цикл";
-    else if (TERMINAL_REASONS.has(this.state.last_reason)) rewardReason = "Смерть";
-    else if (reward > 0.02) rewardReason = "Положительный ход";
-    else if (reward > -0.02 && !penaltyReasons) rewardReason = "Базовый шаг";
-    let actionHeader = "Q-values (↑ / ← / →): ";
-    const mode = this.state.mode;
-    const agentKind = this.state.agent_kind;
-    if (mode === "smart") actionHeader = "Оценки действий (↑ / ← / →): ";
-    else if (agentKind === "ppo") actionHeader = "Политика π (↑ / ← / →): ";
-    else if (agentKind === "dqn") actionHeader = "Q-values (↑ / ← / →): ";
-    const lines = [`${actionHeader}${qValues || "-"}`, `Выбор сети: ${networkChoice}`];
-    if (mode !== "smart" && agentKind === "ppo") {
-      const valueEst = Number(this.state.stats?.value_estimate ?? 0);
-      lines.push(`Оценка V(s): ${valueEst >= 0 ? "+" : ""}${valueEst.toFixed(2)}`);
+  renderDecisionSummary() {
+    if (!this.decisionText) return;
+    if (this.state?.restart_pending || Date.now() < this.restartPendingUntil) {
+      this.setHtml(this.decisionMeta, "");
+      this.setText(this.decisionText, "Backend перезапускается. Состояние сохранено.");
+      return;
     }
-    lines.push(`Награда: ${rewardReason} (${rewardValue})`, `Штрафы: ${penaltyReasons || "-"}`);
-    return lines.join("\n");
+    const mode = this.state?.mode;
+    const agentKind = this.state?.agent_kind;
+    if (mode === "smart") {
+      this.setHtml(this.decisionMeta, this.state?.smart_model?.loaded ? "<strong>Zmey-smart</strong>" : "нет .h5");
+    } else if (agentKind === "ppo") {
+      const valueEst = Number(this.state?.stats?.value_estimate ?? 0);
+      this.setHtml(this.decisionMeta, `V(s) <strong>${valueEst >= 0 ? "+" : ""}${valueEst.toFixed(2)}</strong>`);
+    } else {
+      this.setHtml(this.decisionMeta, "Q-values");
+    }
+
+    const values = Array.isArray(this.state?.q_values) ? this.state.q_values : [];
+    const chosen = Number.isInteger(this.state?.last_greedy_action) ? this.state.last_greedy_action : -1;
+    const order = this.outputDisplayOrder();
+    if (!values.length || !order.length) {
+      this.setText(this.decisionText, "Ожидание первого шага...");
+      return;
+    }
+    const pills = order.map((idx) => {
+      const val = Number(values[idx]);
+      const valText = Number.isFinite(val) ? val.toFixed(2) : "-";
+      const cls = idx === chosen ? "decision-pill is-chosen" : "decision-pill";
+      const label = this.outputLabels()[idx] ?? "";
+      return `<span class="${cls}" title="${escapeText(label)}"><span class="dir">${this.arrowForAction(idx)}</span><span>${valText}</span></span>`;
+    }).join("");
+    this.setHtml(this.decisionText, `<div class="decision-pills">${pills}</div>`);
+  }
+
+  buildDecisionText() {
+    if (this.state?.restart_pending || Date.now() < this.restartPendingUntil) {
+      return "Backend перезапускается. Состояние сохранено.";
+    }
+    return this.formatOrderedQValues() || "-";
   }
 
   penaltyCatalogById() {
@@ -1216,31 +1229,27 @@ class SnakeLabApp {
     this.setText(this.bestScoreStat, String(this.state.stats.best_score));
     this.setText(this.avgScoreStat, Number(this.state.stats.average_score_100 ?? 0).toFixed(1));
     if (this.avgScoreStat) { const averageWindow = Number(this.state.stats.average_score_window ?? 0); this.avgScoreStat.title = averageWindow ? `Средний счет по ${averageWindow} эпизодам` : ""; }
-    this.setText(this.lossStat?.previousElementSibling, isSmart ? "Модель" : isPpo ? "V(s)" : "Epsilon");
     this.setText(this.epsilonStat?.previousElementSibling, "");
-    this.setText(this.bufferStat?.previousElementSibling, isSmart ? "Эпизоды" : isPpo ? "Rollout" : "Replay");
-    this.setText(this.leaderStat?.previousElementSibling, isSmart ? "Режим" : "Updates");
-    this.setText(this.aliveStat?.previousElementSibling, isSmart ? "Статус" : isPpo ? "Среды" : "Статус");
+    this.renderHungerStat();
     if (isSmart) {
-      this.setText(this.lossStat, this.state.smart_model?.loaded ? "loaded" : "нет");
-      this.renderHungerStat();
-      this.setText(this.bufferStat, String(this.state.stats.episode));
+      this.setText(this.updatesLabel, "Статус");
       this.setText(this.leaderStat, this.state.running ? "run" : "idle");
-      this.setText(this.aliveStat, this.state.smart_model?.loaded ? "ok" : "нет");
+      this.setText(this.auxMetricLabel, "Модель");
+      this.setText(this.auxMetricStat, this.state.smart_model?.loaded ? "ok" : "нет");
+      if (this.auxMetricStat) this.auxMetricStat.title = this.state.smart_model?.name ?? "";
     } else if (isPpo) {
-      const valueEst = Number(this.state.stats.value_estimate ?? 0);
-      this.setText(this.lossStat, `${valueEst >= 0 ? "+" : ""}${valueEst.toFixed(2)}`);
-      this.renderHungerStat();
-      const cap = Number(this.state.stats.rollout_capacity ?? 0);
-      this.setText(this.bufferStat, cap > 0 ? `${this.state.stats.buffer ?? 0}/${cap}` : String(this.state.stats.buffer ?? 0));
+      this.setText(this.updatesLabel, "Updates");
       this.setText(this.leaderStat, String(this.state.stats.updates ?? 0));
-      this.setText(this.aliveStat, this.state.training ? `${this.state.stats.alive ?? 0}/${this.state.stats.population ?? 0}` : "idle");
+      this.setText(this.auxMetricLabel, "Tail bias");
+      const effBias = Number(this.state.stats.effective_tail_bias ?? 0);
+      this.setText(this.auxMetricStat, effBias <= 0.001 ? "0.00" : effBias.toFixed(2));
+      if (this.auxMetricStat) this.auxMetricStat.title = "Мягкий бутстрап tail_blocked: плавно зануляется 0.50 → 0.00 при росте заполнения поля";
     } else {
-      this.setText(this.lossStat, Number(this.state.stats.epsilon ?? 0).toFixed(3));
-      this.renderHungerStat();
-      this.setText(this.bufferStat, String(this.state.stats.buffer ?? 0));
+      this.setText(this.updatesLabel, "Updates");
       this.setText(this.leaderStat, String(this.state.stats.updates ?? 0));
-      this.setText(this.aliveStat, this.state.training ? "train" : "idle");
+      this.setText(this.auxMetricLabel, "Epsilon");
+      this.setText(this.auxMetricStat, Number(this.state.stats.epsilon ?? 0).toFixed(3));
+      if (this.auxMetricStat) this.auxMetricStat.title = "Доля случайных ходов (exploration) DQN";
     }
     const ppoMapSize = Number(this.state?.ppo_map_size ?? this.state?.network?.ego_map?.[0]?.length ?? 11);
     this.setText(this.chartMetricLabel, isSmart ? "Счет" : "Loss");
@@ -1252,8 +1261,7 @@ class SnakeLabApp {
           ? `Суммарный Loss (policy + value - entropy) при обновлении PPO с эгоцентричной картой ${ppoMapSize}×${ppoMapSize}.`
           : "Ошибка DQN при обновлении Q-сети: чем ниже значение, тем стабильнее прогнозы."
     );
-    this.setText(this.stepStat, String(this.state.stats.steps));
-    this.setDecisionText(this.buildDecisionText());
+    this.renderDecisionSummary();
     this.renderDecisionStats();
     this.renderRewardRules();
     this.renderStepReview({ force: false });

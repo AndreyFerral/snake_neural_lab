@@ -113,15 +113,14 @@
           <div id="evalResultBar" class="eval-result-bar" hidden></div>
 
           <div class="status-callout">
-            <p class="status-label">Текущее решение агента</p>
-            <p id="decisionText">Подключение к Python backend...</p>
+            <div class="decision-head">
+              <p class="status-label">Решение сети</p>
+              <span id="decisionMeta" class="decision-meta"></span>
+            </div>
+            <div id="decisionText" class="decision-body">Подключение к Python backend...</div>
           </div>
 
           <div class="stats-grid game-stats-grid">
-            <article class="stat-card"><span>Режим</span><strong id="modeStat">Игрок</strong></article>
-            <article class="stat-card"><span>Эпизод</span><strong id="epochStat">0</strong></article>
-            <article class="stat-card"><span>Шагов</span><strong id="stepStat">0</strong></article>
-            <article class="stat-card"><span>Epsilon</span><strong id="lossStat">0.000</strong></article>
             <article class="stat-card stat-wide">
               <div class="stat-combo">
                 <div><small>Счет</small><b id="scoreStat">0</b></div>
@@ -129,12 +128,13 @@
                 <div><small>Средний</small><b id="avgScoreStat">0.0</b></div>
               </div>
             </article>
+            <article class="stat-card"><span>Режим</span><strong id="modeStat">Игрок</strong></article>
             <article class="stat-card"><span>Голод</span><strong id="epsilonStat">0/0</strong></article>
             <article class="stat-card stat-wide">
               <div class="stat-combo">
-                <div><small>Replay</small><b id="bufferStat">0</b></div>
-                <div><small>Updates</small><b id="leaderStat">0</b></div>
-                <div><small>Статус</small><b id="aliveStat">idle</b></div>
+                <div><small>Эпизод</small><b id="epochStat">0</b></div>
+                <div><small id="updatesLabel">Updates</small><b id="leaderStat">0</b></div>
+                <div><small id="auxMetricLabel">Epsilon</small><b id="auxMetricStat">0.000</b></div>
               </div>
             </article>
           </div>
