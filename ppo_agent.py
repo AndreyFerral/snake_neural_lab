@@ -82,6 +82,7 @@ PPO_EMA_POLISH_TAU = 0.978
 PPO_EMA_START_FILL = 0.90
 PPO_EMA_MIN_UPDATES = 5
 PPO_HUNGRY_SAMPLE_MIN_PROB = 0.05
+PPO_CRIT_HUNGER_TEMP = 2.0
 
 
 def valid_action_mask_from_signals(signals: torch.Tensor) -> torch.Tensor:
@@ -351,7 +352,13 @@ class PPOAgent:
         self._last_recent_avg_fill = avg_fill
         prev_board_best = float(self.best_fill_by_board.get(bs, 0.0))
 
-        if avg_fill > prev_board_best or (bs == 10 and avg_score > self.best_avg_score):
+        improved = avg_fill > prev_board_best or (bs == 10 and avg_score > self.best_avg_score)
+        at_ceiling_refresh = (
+            prev_board_best >= 0.995
+            and avg_fill >= prev_board_best - 0.002
+            and (int(self.total_updates) - int(self.best_policy_updates)) >= 50
+        )
+        if improved or at_ceiling_refresh:
             self.best_avg_score = max(self.best_avg_score, avg_score) if bs == 10 else avg_score
             self.best_fill_ratio = max(prev_board_best, avg_fill)
             self.best_fill_by_board[bs] = self.best_fill_ratio
@@ -372,14 +379,19 @@ class PPOAgent:
             and self._episodes_since_best_check >= 15
         ):
             self._episodes_since_best_check = 0
-            # В эндшпиле (best_fill >= 0.92) ловим дрейф на -6.5% (напр. 95 -> 88), не ждём обвала до 67!
-            if self.best_fill_ratio >= 0.92:
+            # В эндшпиле (best_fill >= 0.92) ловим дрейф рано, но на потолке (>=0.98) даём 3 окна от шума стохастики
+            if self.best_fill_ratio >= 0.98:
+                is_degraded = (self.best_fill_ratio - avg_fill) >= 0.075
+                need_streak = 3
+            elif self.best_fill_ratio >= 0.92:
                 is_degraded = (self.best_fill_ratio - avg_fill) >= 0.065
+                need_streak = 2
             else:
                 is_degraded = avg_fill < self.best_fill_ratio * 0.72 and (self.best_fill_ratio - avg_fill) >= 0.06
+                need_streak = 2
             if is_degraded:
                 self._degradation_streak += 1
-                if self._degradation_streak >= 2:
+                if self._degradation_streak >= need_streak:
                     self.restore_best_policy()
             else:
                 self._degradation_streak = 0
@@ -432,12 +444,27 @@ class PPOAgent:
             self.inference_net.load_state_dict(state)
             self.inference_net.eval()
 
-    def _pick_eval_action(self, probs_np: np.ndarray, sig_t: torch.Tensor) -> tuple[int, bool, int]:
+    def _pick_eval_action(
+        self,
+        probs_np: np.ndarray,
+        sig_t: torch.Tensor,
+        masked_logits: torch.Tensor | None = None,
+    ) -> tuple[int, bool, int]:
         greedy_action = int(np.argmax(probs_np))
-        # При высоком голоде (hunger_high=1) используем стохастику самой обученной политики π (p >= 0.05),
-        # чтобы память-независимая 1-step политика могла выходить из детерминированных циклов без lookahead.
-        if sig_t.shape[1] > HUNGER_HIGH_IDX and float(sig_t[0, HUNGER_HIGH_IDX].item()) > 0.5:
-            filtered = np.where(probs_np >= PPO_HUNGRY_SAMPLE_MIN_PROB, probs_np.astype(np.float64), 0.0)
+        # При критическом голоде (hunger_critical=1) мягко повышаем температуру T=2.0 на логитах самой
+        # обученной политики π (p >= 0.05), чтобы выходить из детерминированных циклов без лишних столкновений.
+        if sig_t.shape[1] > HUNGER_CRITICAL_IDX and float(sig_t[0, HUNGER_CRITICAL_IDX].item()) > 0.5:
+            if masked_logits is not None and PPO_CRIT_HUNGER_TEMP > 1.0:
+                scaled_np = (
+                    torch.softmax(masked_logits / float(PPO_CRIT_HUNGER_TEMP), dim=-1)[0]
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float64)
+                )
+            else:
+                scaled_np = probs_np.astype(np.float64)
+            filtered = np.where(scaled_np >= PPO_HUNGRY_SAMPLE_MIN_PROB, scaled_np, 0.0)
             total = float(filtered.sum())
             if total > 0.0:
                 p_norm = filtered / total
@@ -466,7 +493,7 @@ class PPOAgent:
         probs = torch.softmax(masked_logits, dim=-1)
         probs_np = probs[0].detach().cpu().numpy().astype(np.float32)
         self.last_value = float(value[0].item())
-        action, was_random, greedy_action = self._pick_eval_action(probs_np, sig_t)
+        action, was_random, greedy_action = self._pick_eval_action(probs_np, sig_t, masked_logits)
         return action, probs_np, was_random, greedy_action
 
     def restore_best_policy(self) -> bool:
@@ -586,7 +613,7 @@ class PPOAgent:
         probs = torch.softmax(masked_logits, dim=-1)
         probs_np = probs[0].detach().cpu().numpy().astype(np.float32)
         self.last_value = float(value[0].item())
-        action, was_random, greedy_action = self._pick_eval_action(probs_np, sig_t)
+        action, was_random, greedy_action = self._pick_eval_action(probs_np, sig_t, masked_logits)
         return action, probs_np, was_random, greedy_action
 
     @torch.inference_mode()

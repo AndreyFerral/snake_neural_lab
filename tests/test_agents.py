@@ -327,11 +327,23 @@ class TestAgents(unittest.TestCase):
         # EMA must stay frozen while degraded
         drift_agent._update_ema_policy()
         self.assertAlmostEqual(float(drift_agent.ema_policy_state["output.weight"][0, 0].detach()), ema_before, places=4)
-        # Sustained endgame drift triggers rollback without waiting for score 67
-        for _ in range(32):
+        # Sustained endgame drift (3 windows at fill >= 0.98) triggers rollback without waiting for score 67
+        for _ in range(48):
             drift_agent.record_full_episode(85, "body_collision", board_size=10)
         self.assertGreaterEqual(drift_agent.restores_from_best, 1)
         self.assertGreater(drift_agent._post_restore_cooldown, 0)
+
+        # Ceiling refresh: once best_fill_ratio == 1.0, best_policy_updates still refreshes after >= 50 updates
+        ceil_agent = PPOAgent(device=torch.device("cpu"))
+        ceil_agent.total_updates = 100
+        for _ in range(ceil_agent.best_min_episodes):
+            ceil_agent.record_full_episode(97, "victory", board_size=10)
+        self.assertEqual(ceil_agent.best_fill_ratio, 1.0)
+        self.assertEqual(ceil_agent.best_policy_updates, 100)
+        ceil_agent.total_updates = 160
+        refreshed = ceil_agent.record_full_episode(97, "victory", board_size=10)
+        self.assertTrue(refreshed)
+        self.assertEqual(ceil_agent.best_policy_updates, 160)
 
         # Two-tier endgame failure replay + stale pruning after 6 failures
         runner = ParallelPPORunner(4, 10, env_factory=SnakeEnv, replay_env_count=1, failure_min_score=25)
