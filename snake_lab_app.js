@@ -67,6 +67,16 @@ class SnakeLabApp {
     this.speedDebounce = null;
     this.pollHandle = null;
     this.framePollHandle = null;
+    this.frameEventSource = null;
+    this.sseConnected = false;
+    this.sseReconnectTimer = null;
+    this.gameLoopHandle = null;
+    this.prevGameSnapshot = null;
+    this.currGameSnapshot = null;
+    this.gameTransitionStart = 0;
+    this.gameStepDurationMs = 125;
+    this.lastGameFrameArrivalAt = 0;
+    this.lastSettledGameSignature = "";
     this.currentPollMs = API_POLL_MS;
     this.restartPendingUntil = 0;
     this.selectedDeathStepIndex = -1;
@@ -120,7 +130,8 @@ class SnakeLabApp {
     this.bindEvents();
     this.refreshState();
     this.resetPolling(this.currentPollMs);
-    this.resetFramePolling();
+    this.connectFrameStream();
+    this.startGameRenderLoop();
   }
 
   getCanvasContext(canvas) {
@@ -181,22 +192,180 @@ class SnakeLabApp {
 
   nextFramePollDelay() {
     if (document.hidden) return FRAME_HIDDEN_POLL_MS;
-    if (!this.state || this.state.running) return FRAME_POLL_MS;
+    if (!this.state || this.state.running) return 32;
     return FRAME_IDLE_POLL_MS;
   }
 
+  stopFramePolling() {
+    if (this.framePollHandle) {
+      window.clearTimeout(this.framePollHandle);
+      this.framePollHandle = null;
+    }
+  }
+
   resetFramePolling() {
-    if (this.framePollHandle) return;
+    if (this.sseConnected || this.framePollHandle) return;
     const pollFrame = async () => {
       this.framePollHandle = null;
-      if (document.hidden) {
-        if (this.liveFrameRenderHandle) { window.cancelAnimationFrame(this.liveFrameRenderHandle); this.liveFrameRenderHandle = null; }
-      } else {
+      if (this.sseConnected) return;
+      if (!document.hidden) {
         await this.refreshFrame();
       }
-      if (!this.framePollHandle) this.framePollHandle = window.setTimeout(pollFrame, this.nextFramePollDelay());
+      if (!this.sseConnected && !this.framePollHandle) {
+        this.framePollHandle = window.setTimeout(pollFrame, this.nextFramePollDelay());
+      }
     };
     this.framePollHandle = window.setTimeout(pollFrame, 0);
+  }
+
+  disconnectFrameStream() {
+    if (this.sseReconnectTimer) {
+      window.clearTimeout(this.sseReconnectTimer);
+      this.sseReconnectTimer = null;
+    }
+    if (this.frameEventSource) {
+      try { this.frameEventSource.close(); } catch (_) {}
+      this.frameEventSource = null;
+    }
+    this.sseConnected = false;
+  }
+
+  connectFrameStream() {
+    if (typeof window.EventSource !== "function") {
+      this.resetFramePolling();
+      return;
+    }
+    if (this.frameEventSource) return;
+    try {
+      const source = new EventSource("/api/frame_stream");
+      this.frameEventSource = source;
+      source.onopen = () => {
+        this.sseConnected = true;
+        this.stopFramePolling();
+      };
+      source.onmessage = (event) => {
+        if (!event.data || document.hidden) return;
+        try {
+          const frameState = JSON.parse(event.data);
+          this.applyIncomingFrameState(frameState);
+        } catch (err) {
+          console.warn("Snake SSE parse error:", err);
+        }
+      };
+      source.onerror = () => {
+        this.sseConnected = false;
+        this.resetFramePolling();
+        if (source.readyState === EventSource.CLOSED) {
+          this.disconnectFrameStream();
+          if (!this.sseReconnectTimer) {
+            this.sseReconnectTimer = window.setTimeout(() => {
+              this.sseReconnectTimer = null;
+              this.connectFrameStream();
+            }, 1200);
+          }
+        }
+      };
+    } catch (_) {
+      this.sseConnected = false;
+      this.resetFramePolling();
+    }
+  }
+
+  applyIncomingFrameState(frameState) {
+    if (!frameState || typeof frameState !== "object") return;
+    const previousFrameId = Number(this.state?.frame_id ?? -1);
+    const nextFrameId = Number(frameState?.frame_id ?? previousFrameId);
+    if (Number.isFinite(previousFrameId) && Number.isFinite(nextFrameId) && nextFrameId <= previousFrameId && this.state) {
+      return;
+    }
+    this.state = this.state ? this.mergeFrameState(frameState, this.state) : frameState;
+    applyRuntimeReasonConfig(this.state);
+    this.stateDetailsFresh = false;
+    this.ingestGameFrame(this.state);
+  }
+
+  ingestGameFrame(state) {
+    const nextGame = state?.game;
+    if (!nextGame || !Array.isArray(nextGame.snake)) return;
+    const now = performance.now();
+    const visualSpeed = Math.max(1, Number(state?.visual_speed ?? state?.speed ?? 8));
+    const nominalMs = clamp(1000 / visualSpeed, 16, 1000);
+    const prev = this.currGameSnapshot;
+
+    const headChanged = !prev
+      || prev.size !== nextGame.size
+      || prev.step_count !== nextGame.step_count
+      || prev.score !== nextGame.score
+      || prev.snake?.length !== nextGame.snake.length
+      || prev.snake?.[0]?.x !== nextGame.snake?.[0]?.x
+      || prev.snake?.[0]?.y !== nextGame.snake?.[0]?.y;
+
+    if (headChanged) {
+      this.prevGameSnapshot = prev;
+      this.currGameSnapshot = nextGame;
+      if (this.lastGameFrameArrivalAt > 0 && state?.running) {
+        const dt = now - this.lastGameFrameArrivalAt;
+        if (dt >= nominalMs * 0.5 && dt <= nominalMs * 2.2) {
+          this.gameStepDurationMs = clamp(this.gameStepDurationMs * 0.6 + dt * 0.4, 18, 1000);
+        } else {
+          this.gameStepDurationMs = nominalMs;
+        }
+      } else {
+        this.gameStepDurationMs = nominalMs;
+      }
+      this.gameTransitionStart = now;
+      this.lastGameFrameArrivalAt = now;
+      this.lastSettledGameSignature = "";
+    }
+  }
+
+  canInterpolateSnake(prevGame, currGame) {
+    if (!prevGame || !currGame) return false;
+    if (prevGame.size !== currGame.size) return false;
+    if (Number(currGame.step_count) !== Number(prevGame.step_count) + 1) return false;
+    const pSnake = prevGame.snake;
+    const cSnake = currGame.snake;
+    if (!Array.isArray(pSnake) || !Array.isArray(cSnake) || pSnake.length < 2 || cSnake.length < 2) return false;
+    if (cSnake.length !== pSnake.length && cSnake.length !== pSnake.length + 1) return false;
+    if (cSnake[1].x !== pSnake[0].x || cSnake[1].y !== pSnake[0].y) return false;
+    const manhattan = Math.abs(cSnake[0].x - pSnake[0].x) + Math.abs(cSnake[0].y - pSnake[0].y);
+    return manhattan === 1;
+  }
+
+  buildInterpolatedSnake(prevGame, currGame, t) {
+    const cSnake = currGame.snake;
+    if (t >= 0.999 || !this.canInterpolateSnake(prevGame, currGame)) {
+      return { snake: cSnake, interpolated: false };
+    }
+    const pSnake = prevGame.snake;
+    const head = {
+      x: pSnake[0].x + (cSnake[0].x - pSnake[0].x) * t,
+      y: pSnake[0].y + (cSnake[0].y - pSnake[0].y) * t,
+    };
+    const grew = cSnake.length > pSnake.length;
+    const result = [head];
+    for (let i = 1; i < cSnake.length; i += 1) {
+      result.push(cSnake[i]);
+    }
+    if (!grew) {
+      const pTail = pSnake[pSnake.length - 1];
+      const cTail = cSnake[cSnake.length - 1];
+      result.push({
+        x: pTail.x + (cTail.x - pTail.x) * t,
+        y: pTail.y + (cTail.y - pTail.y) * t,
+      });
+    }
+    return { snake: result, interpolated: true };
+  }
+
+  startGameRenderLoop() {
+    if (this.gameLoopHandle) return;
+    const tick = (now) => {
+      this.gameLoopHandle = window.requestAnimationFrame(tick);
+      if (document.hidden || !this.state) return;
+      this.renderGame(now);
+    };
+    this.gameLoopHandle = window.requestAnimationFrame(tick);
   }
 
   setHidden(element, hidden) {
@@ -265,9 +434,11 @@ class SnakeLabApp {
 
   bindEvents() {
     window.addEventListener("keydown", (event) => this.handleKeydown(event));
+    window.addEventListener("beforeunload", () => this.disconnectFrameStream());
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) return;
       this.forceNextVisualRefresh();
+      if (!this.sseConnected) this.connectFrameStream();
       this.refreshState({ forceDetails: true, forceNetwork: this.shouldUseNetworkVisuals() });
       this.safeRenderAll();
     });
@@ -392,6 +563,7 @@ class SnakeLabApp {
       if (response.state) {
         this.state = this.isFrameOnlyState(response.state) && this.state ? this.mergeFrameState(response.state, this.state) : this.mergeDeferredState(response.state, this.state);
         applyRuntimeReasonConfig(this.state);
+        this.ingestGameFrame(this.state);
         this.pendingControlSync = true;
         this.stateDetailsFresh = false;
         if (forcePanelRefresh) this.forceNextVisualRefresh();
@@ -415,7 +587,7 @@ class SnakeLabApp {
   forceNextVisualRefresh() {
     this.lastPanelRenderAt = -Infinity; this.lastSnapshotRenderAt = -Infinity; this.lastChartRenderAt = -Infinity; this.lastNetworkRenderAt = -Infinity;
     this.lastNetworkPayloadAt = 0; this.lastDetailPayloadAt = 0; this.lastRenderedSnapshotKey = ""; this.lastDeathTimelineMarkup = ""; this.lastStepReviewSignature = "";
-    this.lastGameRenderSignature = ""; this.lastNetworkRenderSignature = ""; this.lastChartRenderSignature = ""; this.lastSnapshotRenderSignature = "";
+    this.lastGameRenderSignature = ""; this.lastSettledGameSignature = ""; this.lastNetworkRenderSignature = ""; this.lastChartRenderSignature = ""; this.lastSnapshotRenderSignature = "";
     this.lastGameRenderTime = 0; this.lastRewardRulesMarkup = ""; this.lastDecisionStatsMarkup = ""; this.lastSmartModelMarkup = "";
     this.pendingHeavyTasks = []; this.pendingHeavyTaskNames.clear();
     this.bgDrawn = false;
@@ -471,7 +643,9 @@ class SnakeLabApp {
     this.setDecisionText("Выключаю backend и закрываю консоль. Страница больше не будет обновляться.");
     try { await apiJson("/api/command", { method: "POST", body: JSON.stringify({ type: "shutdown_server", close_console: true }), timeoutMs: 1800 }); } catch (error) { console.warn("Backend shutdown command interrupted:", error); }
     if (this.pollHandle) { window.clearInterval(this.pollHandle); this.pollHandle = null; }
-    if (this.framePollHandle) { window.clearTimeout(this.framePollHandle); this.framePollHandle = null; }
+    this.stopFramePolling();
+    this.disconnectFrameStream();
+    if (this.gameLoopHandle) { window.cancelAnimationFrame(this.gameLoopHandle); this.gameLoopHandle = null; }
     if (this.renderFrameHandle) { window.cancelAnimationFrame(this.renderFrameHandle); this.renderFrameHandle = null; }
     if (this.liveFrameRenderHandle) { window.cancelAnimationFrame(this.liveFrameRenderHandle); this.liveFrameRenderHandle = null; }
     if (this.heavyFrameHandle) { window.cancelAnimationFrame(this.heavyFrameHandle); this.heavyFrameHandle = null; }
@@ -498,6 +672,7 @@ class SnakeLabApp {
       if (shouldFetchDetails) this.lastDetailPayloadAt = now;
       this.state = this.mergeDeferredState(nextState, previousState);
       applyRuntimeReasonConfig(this.state);
+      this.ingestGameFrame(this.state);
       this.pendingControlSync = true;
       this.stateDetailsFresh = Boolean(shouldFetchDetails && nextState.global_signals);
       if (this.stateDetailsFresh) this.captureStableHeroProfile();
@@ -512,18 +687,16 @@ class SnakeLabApp {
   }
 
   async refreshFrame() {
-    if (this.isFetchingFrame || !this.state || document.hidden) return;
+    if (this.isFetchingFrame || this.sseConnected || !this.state || document.hidden) return;
     this.isFetchingFrame = true;
     try {
-      const frameState = await apiJson("/api/frame", { timeoutMs: 700 });
-      const previousFrameId = Number(this.state?.frame_id ?? -1);
-      const nextFrameId = Number(frameState?.frame_id ?? previousFrameId);
-      if (Number.isFinite(previousFrameId) && Number.isFinite(nextFrameId) && nextFrameId === previousFrameId) return;
-      this.state = this.mergeFrameState(frameState, this.state);
-      applyRuntimeReasonConfig(this.state);
-      this.stateDetailsFresh = false;
-      this.renderGame();
-    } catch (error) { if (Date.now() >= this.restartPendingUntil) console.warn("Snake frame error:", error); } finally { this.isFetchingFrame = false; }
+      const frameState = await apiJson("/api/frame", { timeoutMs: 1200 });
+      this.applyIncomingFrameState(frameState);
+    } catch (error) {
+      if (Date.now() >= this.restartPendingUntil) console.warn("Snake frame error:", error);
+    } finally {
+      this.isFetchingFrame = false;
+    }
   }
 
   handleKeydown(event) {
@@ -582,8 +755,6 @@ class SnakeLabApp {
       this.pendingControlSync = false; 
     }
     
-    this.renderGame();
-    
     const snapshot = this.state?.last_death_snapshot;
     const snapshotKey = snapshot ? `${snapshot.step_count ?? "-"}:${snapshot.score ?? "-"}:${snapshot.reason ?? "-"}` : "";
     if (snapshotKey !== this.lastRenderedSnapshotKey || now - this.lastSnapshotRenderAt >= SNAPSHOT_RENDER_MS) { 
@@ -618,11 +789,8 @@ class SnakeLabApp {
     const preferredPollMs = this.state?.training ? TRAINING_API_POLL_MS : API_POLL_MS;
     this.resetPolling(preferredPollMs);
     if (document.hidden) return;
-    if (performance.now() - this.lastGameRenderTime > 500) {
-      this.lastGameRenderSignature = "";
-    }
-    this.resetFramePolling();
-    this.renderGame();
+    if (!this.sseConnected) this.resetFramePolling();
+    this.startGameRenderLoop();
     this.updateVisualizationVisibility();
     this.scheduleRender();
   }
@@ -1108,28 +1276,32 @@ class SnakeLabApp {
     this.forceStepLogScroll = false;
   }
 
-  // Оптимизированный рендеринг игры с поддержкой офскрин-слоя фона
-  renderGame() {
-    if (!this.gameCtx || !this.gameCanvas || !this.state) return;
+  // Оптимизированный 60 FPS рендеринг игры с субклеточной интерполяцией и кэшем фона
+  renderGame(now = performance.now()) {
+    if (!this.gameCtx || !this.gameCanvas || !this.state?.game) return;
     const ctx = this.gameCtx;
-    const size = this.state.game.size;
+    const game = this.currGameSnapshot ?? this.state.game;
+    const size = game.size;
 
     const dim = this.canvasDimensions.get(this.gameCanvas) || { width: this.gameCanvas.width, height: this.gameCanvas.height };
-    const frameId = this.state.frame_id ?? `${this.state.game.score}:${this.state.game.step_count}:${this.state.game.direction}`;
-    const gameSignature = [dim.width, dim.height, size, frameId, this.state.training ? 1 : 0].join("|");
+    const canInterp = Boolean(this.state.running && this.canInterpolateSnake(this.prevGameSnapshot, game));
+    const stepMs = Math.max(16, this.gameStepDurationMs || 125);
+    const t = canInterp ? clamp((now - this.gameTransitionStart) / stepMs, 0, 1) : 1;
 
-    if (!dim.dirty && gameSignature === this.lastGameRenderSignature) return;
-    this.lastGameRenderSignature = gameSignature;
+    const frameId = this.state.frame_id ?? `${game.score}:${game.step_count}:${game.direction}`;
+    const settledSignature = [dim.width, dim.height, size, frameId, game.step_count, game.score, this.state.training ? 1 : 0].join("|");
+    if (!dim.dirty && t >= 0.999 && settledSignature === this.lastSettledGameSignature) return;
 
     const { width, height, resized } = this.resizeCanvas(this.gameCanvas, ctx);
 
-    if (resized || !this.bgDrawn) {
+    if (resized || !this.bgDrawn || this.lastGameBoardSize !== size) {
       this.gameBgCanvas.width = this.gameCanvas.width;
       this.gameBgCanvas.height = this.gameCanvas.height;
       const dpr = Math.max(1, window.devicePixelRatio || 1);
       this.gameBgCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
       this.boardLayout = SnakeRenderers.drawStaticBackground(this.gameBgCtx, width, height, size);
+      this.lastGameBoardSize = size;
       this.bgDrawn = true;
     }
 
@@ -1140,10 +1312,13 @@ class SnakeLabApp {
     ctx.drawImage(this.gameBgCanvas, 0, 0);
     ctx.restore();
 
-    const snake = this.state.game.snake ?? [];
-    const food = this.state.game.food;
-    const eatenFoodTrail = this.state.game.eaten_food_trail ?? [];
-    const occupiedBody = new Set(snake.slice(1).map((segment) => `${segment.x}:${segment.y}`));
+    const rawSnake = game.snake ?? [];
+    const { snake, interpolated } = canInterp
+      ? this.buildInterpolatedSnake(this.prevGameSnapshot, game, t)
+      : { snake: rawSnake, interpolated: false };
+    const food = game.food;
+    const eatenFoodTrail = game.eaten_food_trail ?? [];
+    const occupiedBody = new Set(rawSnake.slice(1).map((segment) => `${segment.x}:${segment.y}`));
 
     SnakeRenderers.drawSnakeScene(
       ctx,
@@ -1153,13 +1328,14 @@ class SnakeLabApp {
       {
         boardPadding: 18,
         skipFrame: true,
+        interpolated,
         showTrail: !this.state.training,
         trailOptions: { guard: (marker) => occupiedBody.has(`${marker.x}:${marker.y}`) },
-        headOptions: { direction: this.state.game.direction }
+        headOptions: { direction: game.direction }
       }
     );
 
-    const scoreText = `Счет: ${this.state.game.score}`;
+    const scoreText = `Счет: ${game.score}`;
     const boardText = `Поле: ${size}x${size}`;
 
     ctx.font = "600 22px Aptos, Trebuchet MS, sans-serif";
@@ -1182,7 +1358,10 @@ class SnakeLabApp {
     ctx.font = "500 14px Aptos, Trebuchet MS, sans-serif";
     ctx.fillStyle = "#b4c7cf";
     ctx.fillText(boardText, 28, 68);
-    this.lastGameRenderTime = performance.now();
+    this.lastGameRenderTime = now;
+    if (t >= 0.999) {
+      this.lastSettledGameSignature = settledSignature;
+    }
   }
 
   renderNetworkGraph() {

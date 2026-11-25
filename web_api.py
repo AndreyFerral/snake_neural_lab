@@ -88,10 +88,68 @@ class SnakeRequestHandler(SimpleHTTPRequestHandler):
         if elapsed_ms >= SLOW_API_MS:
             log_perf("slow_send_json", elapsed_ms, status=int(status), bytes=len(encoded))
 
+    def _send_json_bytes(self, encoded: bytes, status: HTTPStatus = HTTPStatus.OK) -> None:
+        self.send_response_only(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        self.end_headers()
+        try:
+            self.wfile.write(encoded)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            return
+
+    def _handle_frame_stream(self) -> None:
+        """Server-Sent Events стрим кадров игрового поля без HTTP-поллинга и таймаут-фризов."""
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        self.send_response_only(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        self.close_connection = True
+
+        last_seq = -1
+        last_sent_at = time.monotonic()
+        try:
+            initial_bytes = self.backend.frame_json_bytes()
+            last_seq = int(getattr(self.backend, "_frame_seq", 0))
+            self.wfile.write(b"data: " + initial_bytes + b"\n\n")
+            self.wfile.flush()
+
+            while not self.backend.stop_event.is_set():
+                next_seq, frame_bytes = self.backend.wait_next_frame_bytes(last_seq, timeout=0.25)
+                if self.backend.stop_event.is_set():
+                    break
+                if frame_bytes is not None and next_seq > last_seq:
+                    last_seq = next_seq
+                    last_sent_at = time.monotonic()
+                    self.wfile.write(b"data: " + frame_bytes + b"\n\n")
+                    self.wfile.flush()
+                elif (time.monotonic() - last_sent_at) >= 4.0:
+                    last_sent_at = time.monotonic()
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+            return
+
     def do_GET(self) -> None:
-        # Прямой роутинг для частого запроса кадров без парсинга URL
+        # Прямой роутинг для частого запроса кадров без парсинга URL и повторной сериализации JSON
         if self.path == "/api/frame":
-            self._send_json(self.backend.frame_snapshot())
+            if hasattr(self.backend, "frame_json_bytes"):
+                self._send_json_bytes(self.backend.frame_json_bytes())
+            else:
+                self._send_json(self.backend.frame_snapshot())
+            return
+
+        if self.path == "/api/frame_stream":
+            self._handle_frame_stream()
             return
         
         if self.path == "/api/health":

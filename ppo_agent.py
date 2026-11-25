@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import deque
 import random
+import threading
+import time
 from typing import Any, Callable, Deque
 import numpy as np
 import torch
@@ -34,8 +36,8 @@ from dqn_agent import (
 from networks import PPOMapNetwork
 from snake_env import relative_to_absolute
 
-PPO_NUM_ENVS = 8
-PPO_ROLLOUT_STEPS = 128
+PPO_NUM_ENVS = 12
+PPO_ROLLOUT_STEPS = 88
 PPO_GAMMA = 0.992
 PPO_GAE_LAMBDA = 0.95
 PPO_CLIP_COEF = 0.2
@@ -114,6 +116,16 @@ class PPOAgent:
             hidden1=hidden1,
             hidden2=hidden2,
         ).to(self.device)
+        # Лёгкая копия весов для неблокирующего показа живой игры во время optimize()
+        self.inference_net = PPOMapNetwork(
+            input_size=self.global_signal_count,
+            map_channels=self.map_channels,
+            map_size=self.map_size,
+            hidden1=hidden1,
+            hidden2=hidden2,
+        ).to(self.device)
+        self._inference_lock = threading.Lock()
+        self.sync_inference_net()
         self.optimizer = torch.optim.AdamW(self.online_net.parameters(), lr=self.base_lr, eps=1e-5)
 
         self.total_updates = 0
@@ -205,11 +217,40 @@ class PPOAgent:
                 self._degradation_streak = 0
         return False
 
+    def sync_inference_net(self) -> None:
+        state = {k: v.detach().clone() for k, v in self.online_net.state_dict().items()}
+        with self._inference_lock:
+            self.inference_net.load_state_dict(state)
+            self.inference_net.eval()
+
+    @torch.inference_mode()
+    def select_showcase_action(
+        self,
+        state: np.ndarray,
+        *,
+        ego_map: np.ndarray | None = None,
+    ) -> tuple[int, np.ndarray, bool, int]:
+        """Неблокирующий выбор жадного хода для плавного показа поля во время обучения."""
+        sig_t = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+        map_t = (
+            torch.as_tensor(ego_map, dtype=torch.float32, device=self.device).unsqueeze(0)
+            if ego_map is not None
+            else None
+        )
+        with self._inference_lock:
+            logits, value = self.inference_net(sig_t, map_t)
+        masked_logits = self._masked_policy_logits(logits, sig_t)
+        probs = torch.softmax(masked_logits, dim=-1)
+        greedy_action = int(torch.argmax(probs[0]).item())
+        self.last_value = float(value[0].item())
+        return greedy_action, probs[0].detach().cpu().numpy().astype(np.float32), False, greedy_action
+
     def restore_best_policy(self) -> bool:
         if self.best_policy_state is None:
             return False
         load_matching_state(self.online_net, self.best_policy_state)
         self.online_net.to(self.device)
+        self.sync_inference_net()
         self.optimizer = torch.optim.AdamW(self.online_net.parameters(), lr=self._current_lr(), eps=1e-5)
         self.clear_rollout()
         self._recent_episode_scores.clear()
@@ -240,6 +281,8 @@ class PPOAgent:
             return
         self.device = device
         self.online_net = self.online_net.to(self.device)
+        with self._inference_lock:
+            self.inference_net = self.inference_net.to(self.device)
         move_optimizer_state(self.optimizer, self.device)
 
     @torch.inference_mode()
@@ -265,7 +308,7 @@ class PPOAgent:
         self.last_value = float(value[0].item())
 
         if training:
-            dist = Categorical(probs=probs)
+            dist = Categorical(probs=probs, validate_args=False)
             action = int(dist.sample().item())
             was_random = action != greedy_action
         else:
@@ -299,12 +342,12 @@ class PPOAgent:
         greedy = torch.argmax(probs, dim=-1)
 
         if training:
-            dist = Categorical(probs=probs)
+            dist = Categorical(probs=probs, validate_args=False)
             actions = dist.sample()
             log_probs = dist.log_prob(actions)
         else:
             actions = greedy
-            dist = Categorical(probs=probs)
+            dist = Categorical(probs=probs, validate_args=False)
             log_probs = dist.log_prob(actions)
 
         return (
@@ -404,7 +447,7 @@ class PPOAgent:
                 logits, new_values = self.online_net(sig_mb, map_mb)
                 masked_logits = self._masked_policy_logits(logits, sig_mb)
                 probs = torch.softmax(masked_logits, dim=-1)
-                dist = Categorical(probs=probs)
+                dist = Categorical(probs=probs, validate_args=False)
                 new_logprob = dist.log_prob(b_actions[idx])
                 entropy = dist.entropy().mean()
 
@@ -471,6 +514,7 @@ class PPOAgent:
         self.last_value_loss = vf_loss_acc / batch_updates
         self.last_entropy = ent_acc / batch_updates
         self.last_approx_kl = kl_acc / batch_updates
+        self.sync_inference_net()
         return self.last_loss
 
     @torch.inference_mode()
@@ -554,6 +598,7 @@ class PPOAgent:
         self._episodes_since_best_check = 0
         self._degradation_streak = 0
         self.clear_rollout()
+        self.sync_inference_net()
 
 
 class ParallelPPORunner:
@@ -601,6 +646,9 @@ class ParallelPPORunner:
         self.failure_replay_buffer: Deque[dict[str, object]] = deque(maxlen=self.failure_buffer_maxlen)
         self.failure_replays_completed = 0
         self.display_index = 0
+        self._last_leader_switch_at = time.monotonic()
+        self.last_probs: np.ndarray | None = None
+        self.last_greedy_actions: np.ndarray | None = None
         self.last_profile_ms: dict[str, float] = {}
         self.last_completed_env_payload: dict[str, Any] | None = None
 
@@ -630,6 +678,10 @@ class ParallelPPORunner:
         return self.envs[self.display_index]
 
     def update_leader(self) -> int:
+        now = time.monotonic()
+        cur = self.display_index
+        cur_valid = 0 <= cur < self.num_envs and not self.is_replay_env[cur] and self.envs[cur].step_count > 0
+
         best_idx = 0
         best_key = (-1, -1, -1)
         for idx, env in enumerate(self.envs):
@@ -638,6 +690,15 @@ class ParallelPPORunner:
             if key > best_key:
                 best_key = key
                 best_idx = idx
+
+        if cur_valid and best_idx != cur:
+            cur_score = int(self.envs[cur].score)
+            best_score = int(self.envs[best_idx].score)
+            if (now - self._last_leader_switch_at) < 2.0 or (best_score - cur_score) < 10:
+                return cur
+
+        if best_idx != cur:
+            self._last_leader_switch_at = now
         self.display_index = best_idx
         return best_idx
 
@@ -671,12 +732,12 @@ class ParallelPPORunner:
             saved_state = random.choice(tuple(self.failure_replay_buffer))
             env.load_state(saved_state)
             if env.done or int(env.board_size) != self.board_size:
-                env.reset()
+                env.reset(return_obs=False)
                 self.is_replay_env[idx] = False
             else:
                 self.is_replay_env[idx] = True
         else:
-            env.reset()
+            env.reset(return_obs=False)
             self.is_replay_env[idx] = False
 
     def _extract_signals(self, env: Any, agent: PPOAgent) -> np.ndarray:
@@ -695,6 +756,8 @@ class ParallelPPORunner:
             ego_maps,
             training=True,
         )
+        self.last_probs = probs_np
+        self.last_greedy_actions = greedy_actions
 
         step_rewards = np.zeros(self.num_envs, dtype=np.float32)
         step_dones = np.zeros(self.num_envs, dtype=np.float32)
@@ -716,7 +779,7 @@ class ParallelPPORunner:
             old_food_dist = abs(env.snake[0][0] - env.food[0]) + abs(env.snake[0][1] - env.food[1])
 
             abs_dir = relative_to_absolute(env.direction, act)
-            _, reward, done, info = env.step(abs_dir)
+            _, reward, done, info = env.step(abs_dir, return_obs=False)
             reason = str(info["reason"])
             shaped_reward, extra_penalties = apply_step_risk_shaping(
                 reward,

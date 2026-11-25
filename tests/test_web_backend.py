@@ -175,6 +175,15 @@ class TestWebBackendAndApi(unittest.TestCase):
                     self.assertEqual(state["model_input_size"], len(GLOBAL_SIGNAL_LABELS))
                     self.assertIsNotNone(state["network"])
 
+                with urlopen(f"http://127.0.0.1:{port}/api/frame_stream", timeout=2) as resp:
+                    self.assertEqual(resp.status, 200)
+                    self.assertIn("text/event-stream", resp.headers.get("Content-Type", ""))
+                    first_line = resp.readline().decode("utf-8")
+                    self.assertTrue(first_line.startswith("data: "))
+                    streamed = json.loads(first_line[6:])
+                    self.assertIn("game", streamed)
+                    self.assertIn("visual_speed", streamed)
+
                 with urlopen(f"http://127.0.0.1:{port}/api/debug_log", timeout=2) as resp:
                     body = resp.read()
                     self.assertEqual(int(resp.headers["Content-Length"]), len(log_text.encode("utf-8")))

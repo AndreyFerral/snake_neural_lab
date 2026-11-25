@@ -230,8 +230,8 @@ const SnakeRenderers = {
     if (sceneOptions.clearOccupiedCells) {
       const clearOptions = sceneOptions.clearCellOptions ?? { fill: "rgba(13, 30, 41, 0.96)", insetRatio: 0.05, rounded: false };
       if (food) this.fillBoardCell(ctx, boardX, boardY, cell, food.x, food.y, clearOptions);
-      snake.forEach((segment) => this.fillBoardCell(ctx, boardX, boardY, cell, segment.x, segment.y, clearOptions));
-    } else {
+      snake.forEach((segment) => this.fillBoardCell(ctx, boardX, boardY, cell, Math.round(segment.x), Math.round(segment.y), clearOptions));
+    } else if (!sceneOptions.interpolated) {
       snake.forEach((segment, index) => {
         const insetRatio = index === 0 ? 0.04 : 0.05;
         const radiusRatio = index === 0 ? 0.26 : 0.24;

@@ -11,16 +11,45 @@ os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+import ctypes
 import json
 from pathlib import Path
 import re
 import threading
 import time
-from typing import Any, Deque
+from typing import Any, Deque, Iterator
 import numpy as np
 import torch
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
+
+try:
+    import orjson
+    def _encode_frame_json(payload: dict[str, Any]) -> bytes:
+        return orjson.dumps(payload)
+except ImportError:
+    def _encode_frame_json(payload: dict[str, Any]) -> bytes:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _win_timer_begin() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        return ctypes.windll.winmm.timeBeginPeriod(1) == 0
+    except Exception:
+        return False
+
+
+def _win_timer_end(enabled: bool) -> None:
+    if not enabled or os.name != "nt":
+        return
+    try:
+        ctypes.windll.winmm.timeEndPeriod(1)
+    except Exception:
+        pass
 
 # Импорты только тех констант, которые реально используются
 from backend_config import (
@@ -166,6 +195,15 @@ class SnakeWebBackend:
         self.lock = threading.RLock()
         self.agent_lock = threading.RLock()
         self.agent_slot_lock = threading.RLock()
+        self.ppo_worker_lock = threading.Lock()
+        self._ppo_paused = False
+        self._ppo_wake_event = threading.Event()
+        self._frame_cond = threading.Condition()
+        self._frame_seq = 0
+        self._frame_json_bytes: bytes = b"{}"
+        self._save_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="snake-save")
+        self._save_in_flight = False
+        self._win_timer_enabled = _win_timer_begin()
         self.agent_slots: dict[str, AgentSlot] = {}
         self.stop_event = threading.Event()
         
@@ -233,11 +271,31 @@ class SnakeWebBackend:
 
         self._preload_native_agent_slots(blocking=True)
         self.thread = threading.Thread(target=self._simulation_loop, daemon=True)
+        self.ppo_thread = threading.Thread(target=self._ppo_training_loop, daemon=True)
         self.thread.start()
+        self.ppo_thread.start()
+
+    @contextmanager
+    def _pause_ppo_worker(self) -> Iterator[None]:
+        self._ppo_paused = True
+        self.ppo_worker_lock.acquire()
+        try:
+            yield
+        finally:
+            self._ppo_paused = False
+            self.ppo_worker_lock.release()
+            if self.running and self.training and self.agent_kind == "ppo":
+                self._ppo_wake_event.set()
 
     def shutdown(self, *, fast: bool = False) -> None:
         self.stop_event.set()
+        self._ppo_paused = True
+        self._ppo_wake_event.set()
+        with self._frame_cond:
+            self._frame_cond.notify_all()
+        self.ppo_thread.join(timeout=0.5 if fast else 2.0)
         self.thread.join(timeout=0.4 if fast else 2.0)
+        self._save_executor.shutdown(wait=not fast)
         payloads = None
         acquired = self.lock.acquire(timeout=0.5 if fast else -1)
         if acquired:
@@ -249,6 +307,8 @@ class SnakeWebBackend:
         if payloads is not None:
             self._write_save_payloads(*payloads)
         self.replay_manager.shutdown(wait=not fast)
+        _win_timer_end(self._win_timer_enabled)
+        self._win_timer_enabled = False
 
     def _current_observation(self) -> np.ndarray:
         if self.agent_kind == "ppo":
@@ -504,55 +564,203 @@ class SnakeWebBackend:
                 snake_length=len(self.game.snake),
             )
 
+    def _visual_speed(self) -> int:
+        speed = max(1, int(self.speed))
+        if self.training and self.agent_kind == "ppo":
+            return min(20, speed)
+        return speed
+
     def _training_burst(self) -> int:
         speed = max(1, int(self.speed))
         return max(1, min(16, speed))
 
+    def _ppo_training_loop(self) -> None:
+        while not self.stop_event.is_set():
+            if not (self.running and self.training and self.agent_kind == "ppo" and not self._ppo_paused):
+                self._ppo_wake_event.wait(timeout=0.05)
+                self._ppo_wake_event.clear()
+                continue
+
+            step_started = time.perf_counter()
+            completed: list[dict[str, Any]] = []
+            agent_ref: DQNAgent | PPOAgent | None = None
+            runner_ref: ParallelPPORunner | None = None
+            prev_updates = 0
+            record_replays = False
+
+            with self.ppo_worker_lock:
+                if (
+                    self.stop_event.is_set()
+                    or self._ppo_paused
+                    or not (self.running and self.training and self.agent_kind == "ppo")
+                ):
+                    continue
+                if self.training_runner is None:
+                    with self.lock:
+                        if self.training_runner is None and self.agent_kind == "ppo":
+                            self._reset_training_runner()
+                runner_ref = self.training_runner
+                agent_ref = self.agent
+                record_replays = bool(self.record_replays)
+                if runner_ref is None or not isinstance(agent_ref, PPOAgent):
+                    continue
+                prev_updates = int(agent_ref.total_updates)
+                completed = runner_ref.step_alive(agent_ref, record_replays=record_replays)
+
+            did_update = isinstance(agent_ref, PPOAgent) and int(agent_ref.total_updates) > prev_updates
+            if completed or did_update:
+                with self.lock:
+                    if self.agent is agent_ref and self.training_runner is runner_ref:
+                        new_best_policy = False
+                        for item in completed:
+                            self._record_training_completion(item)
+                            if isinstance(agent_ref, PPOAgent):
+                                if agent_ref.record_full_episode(int(item.get("score", 0)), str(item.get("reason", ""))):
+                                    new_best_policy = True
+                            replay_steps = item.get("replay_steps")
+                            if record_replays and isinstance(replay_steps, list) and replay_steps:
+                                self._save_replay(
+                                    replay_steps,
+                                    int(item.get("score", 0)),
+                                    str(item.get("reason", "unknown")),
+                                    prefix=f"ppo_u{int(agent_ref.total_updates)}",
+                                )
+                        has_victory = any(item.get("reason") == "victory" for item in completed)
+                        if new_best_policy or did_update or has_victory:
+                            self._schedule_save(urgent=has_victory)
+
+            speed = int(self.speed)
+            if speed < 32:
+                target_dt = 1.0 / max(4.0, float(speed) * 2.5)
+                remaining = target_dt - (time.perf_counter() - step_started)
+                if remaining > 0.001:
+                    time.sleep(min(0.05, remaining))
+            else:
+                time.sleep(0)
+
+    def _perform_ppo_showcase_step(self) -> None:
+        """Плавный неблокирующий шаг показательной змейки на поле во время PPO-обучения."""
+        if not isinstance(self.agent, PPOAgent):
+            return
+        state = self.game.get_ppo_signals()
+        ego_map = self.game.get_egocentric_map()
+        act, probs, _, greedy = self.agent.select_showcase_action(state, ego_map=ego_map)
+
+        pre_step_risks = evaluate_pre_step_risks(self.game, state, act)
+        is_endgame = float(state[ENDGAME_IDX]) > 0.5
+        is_pocket_split = float(state[POCKET_SPLIT_START_IDX + act]) > 0.5
+        is_pocket_merge = float(state[POCKET_MERGE_START_IDX + act]) > 0.5
+
+        abs_dir = relative_to_absolute(self.game.direction, act)
+        _, reward, done, info = self.game.step(abs_dir, return_obs=False)
+        reason = str(info["reason"])
+        shaped_reward, extra_penalties = apply_step_risk_shaping(
+            reward,
+            reason,
+            len(self.game.snake),
+            pre_step_risks,
+            is_endgame=is_endgame,
+            is_pocket_split=is_pocket_split,
+            is_pocket_merge=is_pocket_merge,
+            endgame_split_penalty=ENDGAME_SPLIT_PENALTY,
+            endgame_merge_bonus=ENDGAME_MERGE_BONUS,
+        )
+        all_penalties = [str(item) for item in info.get("penalty_reasons", [])] + extra_penalties
+        step_num = int(info.get("steps", self.game.step_count))
+        if step_num == 1:
+            self.step_review_entries.clear()
+        self.step_review_entries.append({
+            "step": step_num,
+            "reward": float(shaped_reward),
+            "train_reward": float(shaped_reward),
+            "action": int(act),
+            "action_label": MODEL_ACTION_LABELS[act] if 0 <= act < len(MODEL_ACTION_LABELS) else "-",
+            "reason": reason,
+            "penalties": list(all_penalties),
+            "random": False,
+            "steps_without_food": int(self.game.steps_without_food),
+            "max_steps_without_food": int(self.game.max_steps_without_food),
+        })
+
+        self.last_q_values = probs
+        self.last_action = act
+        self.last_action_random = False
+        self.last_greedy_action = greedy
+        self.last_reason = reason
+        self.live_reward = float(shaped_reward)
+        self.last_penalty_reasons = all_penalties
+        self._record_decision_stat("steps", reason)
+        self._record_decision_stat("choices", MODEL_ACTION_LABELS[act])
+
+        if done:
+            self.game.reset(return_obs=False)
+            self.step_review_entries.clear()
+        self.last_state = self._current_observation()
+
     def _simulation_loop(self) -> None:
         last_tick = time.perf_counter()
         accumulator = 0.0
+        last_idle_publish = last_tick
 
         while not self.stop_event.is_set():
             now = time.perf_counter()
             delta = min(now - last_tick, 0.25)
             last_tick = now
             did_work = False
-            training_steps = 0
+            dqn_training_steps = 0
+            sleep_hint = 0.008
 
             with self.lock:
                 if self.running:
-                    if self.training:
+                    if self.training and self.agent_kind == "ppo":
+                        self._ppo_wake_event.set()
+                        step_interval = 1.0 / max(1, self._visual_speed())
+                        accumulator = min(accumulator + delta, step_interval * 2.0)
+                        if accumulator >= step_interval:
+                            accumulator -= step_interval
+                            self._perform_ppo_showcase_step()
+                            self._update_frame_cache()
+                            did_work = True
+                        sleep_hint = max(0.001, min(0.004, (step_interval - accumulator) * 0.5))
+                    elif self.training:
                         accumulator = min(accumulator + delta, 0.12)
                         if accumulator >= (1.0 / 60.0):
                             accumulator -= 1.0 / 60.0
-                            training_steps = self._training_burst()
+                            dqn_training_steps = self._training_burst()
                             did_work = True
+                        sleep_hint = 0.001
                     else:
                         step_interval = 1.0 / max(1, self.speed)
                         accumulator = min(accumulator + delta, step_interval * 2.0)
                         if accumulator >= step_interval:
                             accumulator -= step_interval
                             self._perform_step(training_mode=False)
+                            self._update_frame_cache()
                             did_work = True
+                        sleep_hint = max(0.001, min(0.004, (step_interval - accumulator) * 0.5))
                 else:
                     accumulator = 0.0
+                    sleep_hint = 0.01
 
-            for _ in range(training_steps):
-                with self.lock:
-                    if not self.running or not self.training:
-                        break
-                    if self.agent_kind == "dqn":
+            if dqn_training_steps > 0:
+                for _ in range(dqn_training_steps):
+                    with self.lock:
+                        if not self.running or not self.training or self.agent_kind != "dqn":
+                            break
                         self._perform_step(training_mode=True)
-                    else:
-                        self._perform_parallel_training_step()
+                with self.lock:
+                    self._update_frame_cache()
+            elif not did_work and (now - last_idle_publish) >= 0.5:
+                with self.lock:
+                    if not self.running:
+                        last_idle_publish = now
+                    elif self.training and self.agent_kind != "ppo":
+                        self._update_frame_cache()
+                        last_idle_publish = now
+                last_idle_publish = now
 
-            with self.lock:
-                self._update_frame_cache()
-            if self._flush_pending_save():
-                did_work = True
-
-            # Уменьшаем задержку для более плавной отрисовки
-            time.sleep(0.001 if did_work else 0.005)
+            self._flush_pending_save()
+            time.sleep(0.001 if did_work and dqn_training_steps > 0 else sleep_hint)
 
     def _record_training_completion(self, payload: dict[str, Any]) -> None:
         score = int(payload.get("score", 0))
@@ -652,12 +860,20 @@ class SnakeWebBackend:
                 maxlen=120,
             )
         self.last_state = self._current_observation()
-        ego_map = self.game.get_egocentric_map()
-        with self.agent_lock:
-            _, self.last_q_values, _, self.last_greedy_action = self.agent.select_best_action(
-                self.last_state,
-                ego_map=ego_map,
-            )
+        if (
+            self.training_runner.last_probs is not None
+            and self.training_runner.last_greedy_actions is not None
+            and 0 <= self.training_display_index < len(self.training_runner.last_probs)
+        ):
+            self.last_q_values = self.training_runner.last_probs[self.training_display_index]
+            self.last_greedy_action = int(self.training_runner.last_greedy_actions[self.training_display_index])
+        else:
+            ego_map = self.game.get_egocentric_map()
+            with self.agent_lock:
+                _, self.last_q_values, _, self.last_greedy_action = self.agent.select_best_action(
+                    self.last_state,
+                    ego_map=ego_map,
+                )
         self.last_action = self.last_greedy_action
         self.last_action_random = False
         self.last_reason = self.game.last_reason
@@ -1375,7 +1591,7 @@ class SnakeWebBackend:
 
     def _flush_pending_save(self) -> bool:
         with self.lock:
-            if not self._pending_save:
+            if not self._pending_save or self._save_in_flight:
                 return False
             now = time.perf_counter()
             if self._next_save_at > 0 and now < self._next_save_at:
@@ -1383,9 +1599,21 @@ class SnakeWebBackend:
             self._pending_save = False
             self._next_save_at = 0.0
             payloads = self._capture_save_payloads()
-        if payloads is None:
-            return False
-        self._write_save_payloads(*payloads)
+            if payloads is None:
+                return False
+            self._save_in_flight = True
+
+        def _bg_save() -> None:
+            try:
+                self._write_save_payloads(*payloads)
+            finally:
+                self._save_in_flight = False
+
+        try:
+            self._save_executor.submit(_bg_save)
+        except RuntimeError:
+            self._save_in_flight = False
+            self._write_save_payloads(*payloads)
         return True
 
     def _load_state(self, *, force_cpu: bool) -> bool:
@@ -1783,9 +2011,10 @@ class SnakeWebBackend:
             "network_source": self.network_source,
             "frame_id": self.frame_id,
             "running": self.running,
-                "training": self.training,
-                "mode": self.mode,
+            "training": self.training,
+            "mode": self.mode,
             "speed": self.speed,
+            "visual_speed": self._visual_speed(),
             "last_action": self.last_action,
             "last_action_random": self.last_action_random,
             "last_greedy_action": self.last_greedy_action,
@@ -1812,8 +2041,28 @@ class SnakeWebBackend:
     def _update_frame_cache(self) -> None:
         self.frame_id += 1
         self._snapshot_cache.clear()
-        self._frame_cache = self._frame_payload_unlocked()
-        self._last_frame_payload = dict(self._frame_cache)
+        payload = self._frame_payload_unlocked()
+        encoded = _encode_frame_json(payload)
+        self._frame_cache = payload
+        self._last_frame_payload = dict(payload)
+        self._frame_json_bytes = encoded
+        with self._frame_cond:
+            self._frame_seq += 1
+            self._frame_cond.notify_all()
+
+    def frame_json_bytes(self) -> bytes:
+        data = self._frame_json_bytes
+        if data and data != b"{}":
+            return data
+        return _encode_frame_json(self.frame_snapshot())
+
+    def wait_next_frame_bytes(self, last_seq: int, timeout: float = 0.25) -> tuple[int, bytes | None]:
+        with self._frame_cond:
+            if self._frame_seq <= last_seq and not self.stop_event.is_set():
+                self._frame_cond.wait(timeout=timeout)
+            if self._frame_seq > last_seq:
+                return self._frame_seq, self._frame_json_bytes
+            return self._frame_seq, None
 
     def frame_snapshot(self) -> dict[str, Any]:
         if self._frame_cache is not None:
@@ -1829,6 +2078,7 @@ class SnakeWebBackend:
                 "training": self.training,
                 "mode": self.mode,
                 "speed": self.speed,
+                "visual_speed": self._visual_speed(),
                 "game": {
                     "size": self.game.board_size,
                     "score": self.game.score,
@@ -1926,6 +2176,7 @@ class SnakeWebBackend:
                 "training": self.training,
                 "mode": self.mode,
                 "speed": self.speed,
+                "visual_speed": self._visual_speed(),
                 "last_action": self.last_action,
                 "last_action_random": self.last_action_random,
                 "last_greedy_action": self.last_greedy_action,
@@ -2014,7 +2265,13 @@ class SnakeWebBackend:
         try:
             if command == "toggle_running":
                 self.running = not self.running
+                if self.running and self.training and self.agent_kind == "ppo":
+                    self._ppo_wake_event.set()
             elif command == "set_mode":
+                if self.training and self.agent_kind == "ppo":
+                    self.training = False
+                    with self._pause_ppo_worker():
+                        pass
                 # Перезагружаем модель если путь есть, но модель не загружена
                 if value == "smart" and not self.smart_agent.loaded and self.smart_agent.model_path:
                     self.smart_agent.set_model_path(self.smart_agent.model_path)
@@ -2048,29 +2305,41 @@ class SnakeWebBackend:
             elif command == "set_agent_kind":
                 if not isinstance(value, str):
                     return {"ok": False, "error": "Invalid agent kind"}
-                ok, message = self._set_agent_kind(value)
+                with self._pause_ppo_worker():
+                    ok, message = self._set_agent_kind(value)
                 if not ok:
                     return {"ok": False, "error": message}
             elif command == "set_smart_model":
                 if not isinstance(value, str):
                     return {"ok": False, "error": "Invalid smart model"}
-                ok, message = self._set_smart_model(value)
+                with self._pause_ppo_worker():
+                    ok, message = self._set_smart_model(value)
                 if not ok:
                     return {"ok": False, "error": message}
             elif command == "toggle_training":
                 if self.mode == "smart":
                     return {"ok": False, "error": "Zmey-smart training is unavailable"}
-                self.training = bool(value) if isinstance(value, bool) else not self.training
+                next_training = bool(value) if isinstance(value, bool) else not self.training
+                if not next_training and self.training and self.agent_kind == "ppo":
+                    self.training = False
+                    with self._pause_ppo_worker():
+                        pass
+                else:
+                    self.training = next_training
                 self.mode = "ai"
                 if self.training:
                     self.running = True
+                    if self.agent_kind == "ppo":
+                        self._ppo_wake_event.set()
             elif command == "set_board_size":
                 if isinstance(value, int) and value in BOARD_SIZES:
-                    ok, message = self._set_board_size(value)
+                    with self._pause_ppo_worker():
+                        ok, message = self._set_board_size(value)
                     if not ok:
                         return {"ok": False, "error": message}
             elif command == "cycle_board_size":
-                self._cycle_board_size()
+                with self._pause_ppo_worker():
+                    self._cycle_board_size()
             elif command == "set_speed":
                 if isinstance(value, int):
                     self.speed = max(1, min(64, value))
@@ -2089,52 +2358,54 @@ class SnakeWebBackend:
                     return {"ok": False, "error": "Value must be a boolean"}
                 self.record_replays = value
             elif command == "reset_agent":
-                if self.mode == "smart":
-                    store = load_aux_stats_store()
-                    models = store.get("models", {})
-                    if isinstance(models, dict):
-                        models.pop(self._active_aux_stats_key(), None)
-                        if self.smart_agent.model_path:
-                            models.pop(self.smart_agent.model_path.stem, None)
-                    save_aux_stats_store(store)
-                    self._clear_runtime_review_state()
-                    self.game = SnakeEnv(board_size=self.game.board_size)
-                    self.fitness_ema = 0.0
-                    self.best_score = 0
-                    self.board_best_scores = {int(self.game.board_size): 0}
-                    self.episode_counter = 0
-                    self.history.clear()
-                    self.training = False
-                    self.running = False
-                    self._reset_environment_state()
-                else:
-                    self._clear_replays_directory()
-                    board_size = self.game.board_size
-                    self._delete_active_model_storage()
-                    self.game = SnakeEnv(board_size=board_size)
-                    self.agent = self._create_native_agent(self.agent_kind)
-                    self._store_active_agent_slot()
-                    self._reset_training_runner(board_size)
-                    self._reset_decision_stats()
-                    self._clear_runtime_review_state()
-                    self.fitness_ema = 0.0
-                    self.best_score = 0
-                    self.board_best_scores = {board_size: 0}
-                    self.episode_counter = 0
-                    self.history.clear()
-                    self.training = False
-                    self.mode = "manual"
-                    self.running = False
-                    self._reset_environment_state()
-                    self._save_state()
+                with self._pause_ppo_worker():
+                    if self.mode == "smart":
+                        store = load_aux_stats_store()
+                        models = store.get("models", {})
+                        if isinstance(models, dict):
+                            models.pop(self._active_aux_stats_key(), None)
+                            if self.smart_agent.model_path:
+                                models.pop(self.smart_agent.model_path.stem, None)
+                        save_aux_stats_store(store)
+                        self._clear_runtime_review_state()
+                        self.game = SnakeEnv(board_size=self.game.board_size)
+                        self.fitness_ema = 0.0
+                        self.best_score = 0
+                        self.board_best_scores = {int(self.game.board_size): 0}
+                        self.episode_counter = 0
+                        self.history.clear()
+                        self.training = False
+                        self.running = False
+                        self._reset_environment_state()
+                    else:
+                        self._clear_replays_directory()
+                        board_size = self.game.board_size
+                        self._delete_active_model_storage()
+                        self.game = SnakeEnv(board_size=board_size)
+                        self.agent = self._create_native_agent(self.agent_kind)
+                        self._store_active_agent_slot()
+                        self._reset_training_runner(board_size)
+                        self._reset_decision_stats()
+                        self._clear_runtime_review_state()
+                        self.fitness_ema = 0.0
+                        self.best_score = 0
+                        self.board_best_scores = {board_size: 0}
+                        self.episode_counter = 0
+                        self.history.clear()
+                        self.training = False
+                        self.mode = "manual"
+                        self.running = False
+                        self._reset_environment_state()
+                        self._save_state()
             elif command in {"restart_server", "shutdown_server"}:
                 self.running = False
                 self.training = False
-                self.restart_pending = command == "restart_server"
-                self.last_reason = "restart_pending" if command == "restart_server" else "shutdown_pending"
-                self.last_penalty_reasons = []
-                self._save_active_context()
-                self._save_state()
+                with self._pause_ppo_worker():
+                    self.restart_pending = command == "restart_server"
+                    self.last_reason = "restart_pending" if command == "restart_server" else "shutdown_pending"
+                    self.last_penalty_reasons = []
+                    self._save_active_context()
+                    self._save_state()
             else:
                 return {"ok": False, "error": f"Unknown command: {command}"}
 
