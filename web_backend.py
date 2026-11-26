@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import warnings
+warnings.filterwarnings("ignore", message=".*A NumPy version.*SciPy.*", category=UserWarning)
 # Настройки окружения и потоков CPU (баланс скорости PPO-батчей и отзывчивости UI/SSE)
 _CPU_TORCH_THREADS = max(1, min(6, (os.cpu_count() or 4) // 2))
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'

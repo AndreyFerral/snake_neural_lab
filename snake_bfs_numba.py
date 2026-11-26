@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import warnings
 import numpy as np
 
 try:
-    from numba import njit
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*A NumPy version.*SciPy.*", category=UserWarning)
+        from numba import njit
     NUMBA_AVAILABLE = True
 except Exception:  # pragma: no cover - fallback when numba is unavailable
     NUMBA_AVAILABLE = False
