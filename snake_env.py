@@ -14,6 +14,11 @@ from backend_config import (
     PPO_MAP_CHANNELS,
     hunger_budget_for,
 )
+from snake_bfs_numba import (
+    NUMBA_AVAILABLE,
+    _EMPTY_TAIL_TRACK,
+    compute_signals_and_ego_numba,
+)
 
 # Типы для причин завершения игры
 GameEndReason = Literal[
@@ -142,6 +147,54 @@ class SnakeEnv:
             self._flat_neighbors = flat_board_neighbors(board_size)
             self._ego_ttl_buf = np.zeros(total_cells, dtype=np.float32)
             self._ego_reach_buf = np.zeros(total_cells, dtype=np.float32)
+            self._nb_blk = np.zeros(total_cells, dtype=np.int32)
+            self._nb_visited = np.zeros(total_cells, dtype=np.int32)
+            self._nb_queue = np.zeros(total_cells, dtype=np.int32)
+            self._nb_parent = np.zeros(total_cells, dtype=np.int32)
+            self._nb_sig = np.zeros(34, dtype=np.float32)
+            self._nb_area = np.zeros(3, dtype=np.float32)
+            self._nb_ego = np.zeros((PPO_MAP_CHANNELS, PPO_MAP_SIZE, PPO_MAP_SIZE), dtype=np.float32)
+            self._nb_ego_win = PPO_MAP_SIZE
+
+    def _compute_numba_fused(self, *, want_ego: bool, win: int = PPO_MAP_SIZE) -> None:
+        n = self.board_size
+        self._ensure_bfs_buffers(n)
+        if want_ego and self._nb_ego_win != win:
+            self._nb_ego = np.zeros((PPO_MAP_CHANNELS, win, win), dtype=np.float32)
+            self._nb_ego_win = win
+        snake_xy = np.asarray(self.snake, dtype=np.int32)
+        tt_xy = np.asarray(self.tail_track, dtype=np.int32) if self.tail_track else _EMPTY_TAIL_TRACK
+        h_lim = max(1.0, float(hunger_budget_for(self.score, n)))
+        all_reach = compute_signals_and_ego_numba(
+            n,
+            snake_xy,
+            int(self.direction),
+            int(self.food[0]),
+            int(self.food[1]),
+            int(self.steps_without_food),
+            h_lim,
+            tt_xy,
+            int(win),
+            bool(want_ego),
+            self._nb_blk,
+            self._nb_visited,
+            self._nb_queue,
+            self._nb_parent,
+            self._ego_ttl_buf,
+            self._ego_reach_buf,
+            self._nb_sig,
+            self._nb_area,
+            self._nb_ego,
+        )
+        self._obs_cache_step = self.step_count
+        self._obs_cache_vec = self._nb_sig.copy()
+        self._area_ratio_cache_step = self.step_count
+        self._area_ratio_cache_vec = self._nb_area.copy()
+        self._all_empty_reachable_step = self.step_count if all_reach else -1
+        if want_ego:
+            self._ego_map_cache_step = self.step_count
+            self._ego_map_cache_size = win
+            self._ego_map_cache_arr = self._nb_ego.copy()
 
     def _clear_observation_cache(self) -> None:
         self._obs_cache_step = -1
@@ -665,6 +718,11 @@ class SnakeEnv:
         if self.step_count == self._obs_cache_step and self._obs_cache_vec is not None:
             return self._obs_cache_vec
 
+        if NUMBA_AVAILABLE and not getattr(self, "_force_python_bfs", False):
+            self._compute_numba_fused(want_ego=False)
+            assert self._obs_cache_vec is not None
+            return self._obs_cache_vec
+
         n = self.board_size
         board_cells = n * n
         snake = self.snake
@@ -1153,6 +1211,13 @@ class SnakeEnv:
         """Расширенный вектор сигналов для PPO: 34 базовых + 3 area_ratio + 3 масштабно-инвариантных."""
         if self.step_count == self._ppo_obs_cache_step and self._ppo_obs_cache_vec is not None:
             return self._ppo_obs_cache_vec
+        if (
+            NUMBA_AVAILABLE
+            and not getattr(self, "_force_python_bfs", False)
+            and self.step_count != self._obs_cache_step
+        ):
+            # Один объединённый Numba-проход сразу строит 34 сигнала, 3 area_ratio и 11x11 эго-карту
+            self._compute_numba_fused(want_ego=True, win=PPO_MAP_SIZE)
         base = self.get_extra_signals(target_size)
         ratios = self.get_ppo_area_ratios()
         n = self.board_size

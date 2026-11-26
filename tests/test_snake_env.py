@@ -205,6 +205,50 @@ class TestSnakeEnv(unittest.TestCase):
         self.assertAlmostEqual(float(tail_dist_norm), 2.0 / 18.0, places=5)
         self.assertEqual(PPO_MAP_SIZE, 11)
 
+    def test_numba_bfs_exact_parity_with_python(self) -> None:
+        import random as _rnd
+        from snake_bfs_numba import NUMBA_AVAILABLE
+
+        if not NUMBA_AVAILABLE:
+            self.skipTest("numba not installed")
+
+        _rnd.seed(12345)
+        for board_size in (10, 15, 20):
+            env = SnakeEnv(board_size=board_size)
+            env.reset(return_obs=False)
+            # Build a coiled mid/endgame snake to exercise splits, tail_close, and non-fast-path BFS
+            for step_i in range(180):
+                env._force_python_bfs = False
+                env._clear_observation_cache()
+                nb_ppo = env.get_ppo_signals().copy()
+                nb_ego = env.get_egocentric_map().copy()
+
+                env._force_python_bfs = True
+                env._clear_observation_cache()
+                py_ppo = env.get_ppo_signals().copy()
+                py_ego = env.get_egocentric_map().copy()
+                env._force_python_bfs = False
+
+                self.assertTrue(
+                    np.allclose(nb_ppo, py_ppo, atol=1e-5),
+                    f"PPO signal mismatch on {board_size}x{board_size} step {step_i}: max={float(np.max(np.abs(nb_ppo - py_ppo)))}",
+                )
+                self.assertTrue(
+                    np.allclose(nb_ego, py_ego, atol=1e-5),
+                    f"Ego map mismatch on {board_size}x{board_size} step {step_i}: max={float(np.max(np.abs(nb_ego - py_ego)))}",
+                )
+
+                # Prefer safe actions so snake grows and enters complex shapes
+                safe_dirs = []
+                for rel in (0, 1, 2):
+                    if nb_ppo[8 + rel] < 0.5:
+                        d = env.direction if rel == 0 else ((env.direction - 1) % 4 if rel == 1 else (env.direction + 1) % 4)
+                        safe_dirs.append(d)
+                chosen = _rnd.choice(safe_dirs) if safe_dirs else env.direction
+                _, _, done, _ = env.step(chosen, return_obs=False)
+                if done:
+                    env.reset(return_obs=False)
+
 
 if __name__ == "__main__":
     unittest.main()

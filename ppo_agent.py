@@ -204,13 +204,16 @@ class PPOAgent:
         self._critic_warmup_updates: int = 0
         self._post_restore_cooldown: int = 0
 
-        self._rollout_signals: list[np.ndarray] = []
-        self._rollout_maps: list[np.ndarray] = []
-        self._rollout_actions: list[np.ndarray] = []
-        self._rollout_logprobs: list[np.ndarray] = []
-        self._rollout_rewards: list[np.ndarray] = []
-        self._rollout_dones: list[np.ndarray] = []
-        self._rollout_values: list[np.ndarray] = []
+        self._rb_cap: int = 0
+        self._rb_num_envs: int = 0
+        self._rb_ptr: int = 0
+        self._rb_signals: torch.Tensor | None = None
+        self._rb_maps: torch.Tensor | None = None
+        self._rb_actions: torch.Tensor | None = None
+        self._rb_logprobs: torch.Tensor | None = None
+        self._rb_rewards: torch.Tensor | None = None
+        self._rb_dones: torch.Tensor | None = None
+        self._rb_values: torch.Tensor | None = None
 
     def _global_best_fill(self) -> float:
         """Максимальная достигнутая заполненность по всем размерам карт (монотонный индикатор зрелости политики)."""
@@ -558,20 +561,51 @@ class PPOAgent:
 
     @property
     def rollout_buffer_len(self) -> int:
-        return len(self._rollout_actions) * self.num_envs
+        return self._rb_ptr * (self._rb_num_envs if self._rb_num_envs > 0 else self.num_envs)
 
     @property
     def rollout_capacity(self) -> int:
         return self.effective_rollout_steps() * self.num_envs
 
+    def _ensure_rollout_capacity(self, min_cap: int, num_envs: int, sig_dim: int, map_shape: tuple[int, ...]) -> None:
+        if (
+            self._rb_signals is not None
+            and self._rb_cap >= min_cap
+            and self._rb_num_envs == num_envs
+            and int(self._rb_signals.shape[2]) == sig_dim
+            and tuple(self._rb_maps.shape[2:]) == map_shape  # type: ignore[union-attr]
+        ):
+            return
+        new_cap = max(min_cap, self.effective_rollout_steps(), PPO_POLISH_ROLLOUT_STEPS if self.rollout_steps == PPO_ROLLOUT_STEPS else self.rollout_steps)
+        old_ptr = self._rb_ptr if (self._rb_signals is not None and self._rb_num_envs == num_envs) else 0
+        new_signals = torch.empty((new_cap, num_envs, sig_dim), dtype=torch.float32)
+        new_maps = torch.empty((new_cap, num_envs, *map_shape), dtype=torch.float32)
+        new_actions = torch.empty((new_cap, num_envs), dtype=torch.int64)
+        new_logprobs = torch.empty((new_cap, num_envs), dtype=torch.float32)
+        new_rewards = torch.empty((new_cap, num_envs), dtype=torch.float32)
+        new_dones = torch.empty((new_cap, num_envs), dtype=torch.float32)
+        new_values = torch.empty((new_cap, num_envs), dtype=torch.float32)
+        if old_ptr > 0 and self._rb_signals is not None:
+            new_signals[:old_ptr].copy_(self._rb_signals[:old_ptr])
+            new_maps[:old_ptr].copy_(self._rb_maps[:old_ptr])  # type: ignore[index]
+            new_actions[:old_ptr].copy_(self._rb_actions[:old_ptr])  # type: ignore[index]
+            new_logprobs[:old_ptr].copy_(self._rb_logprobs[:old_ptr])  # type: ignore[index]
+            new_rewards[:old_ptr].copy_(self._rb_rewards[:old_ptr])  # type: ignore[index]
+            new_dones[:old_ptr].copy_(self._rb_dones[:old_ptr])  # type: ignore[index]
+            new_values[:old_ptr].copy_(self._rb_values[:old_ptr])  # type: ignore[index]
+        self._rb_signals = new_signals
+        self._rb_maps = new_maps
+        self._rb_actions = new_actions
+        self._rb_logprobs = new_logprobs
+        self._rb_rewards = new_rewards
+        self._rb_dones = new_dones
+        self._rb_values = new_values
+        self._rb_cap = new_cap
+        self._rb_num_envs = num_envs
+        self._rb_ptr = old_ptr
+
     def clear_rollout(self) -> None:
-        self._rollout_signals.clear()
-        self._rollout_maps.clear()
-        self._rollout_actions.clear()
-        self._rollout_logprobs.clear()
-        self._rollout_rewards.clear()
-        self._rollout_dones.clear()
-        self._rollout_values.clear()
+        self._rb_ptr = 0
 
     def move_to_device(self, device: torch.device) -> None:
         if device == self.device:
@@ -693,26 +727,32 @@ class PPOAgent:
         dones: np.ndarray,
         values: np.ndarray,
     ) -> None:
-        self._rollout_signals.append(np.asarray(states, dtype=np.float32).copy())
-        self._rollout_maps.append(np.asarray(ego_maps, dtype=np.float32).copy())
-        self._rollout_actions.append(np.asarray(actions, dtype=np.int64).copy())
-        self._rollout_logprobs.append(np.asarray(log_probs, dtype=np.float32).copy())
-        self._rollout_rewards.append(np.asarray(rewards, dtype=np.float32).copy() * PPO_REWARD_SCALE)
-        self._rollout_dones.append(np.asarray(dones, dtype=np.float32).copy())
-        self._rollout_values.append(np.asarray(values, dtype=np.float32).copy())
+        st_arr = np.asarray(states, dtype=np.float32)
+        mp_arr = np.asarray(ego_maps, dtype=np.float32)
+        num_envs = int(st_arr.shape[0])
+        self._ensure_rollout_capacity(self._rb_ptr + 1, num_envs, int(st_arr.shape[1]), tuple(mp_arr.shape[1:]))
+        idx = self._rb_ptr
+        self._rb_signals[idx].copy_(torch.from_numpy(st_arr))  # type: ignore[index]
+        self._rb_maps[idx].copy_(torch.from_numpy(mp_arr))  # type: ignore[index]
+        self._rb_actions[idx].copy_(torch.from_numpy(np.asarray(actions, dtype=np.int64)))  # type: ignore[index]
+        self._rb_logprobs[idx].copy_(torch.from_numpy(np.asarray(log_probs, dtype=np.float32)))  # type: ignore[index]
+        self._rb_rewards[idx].copy_(torch.from_numpy(np.asarray(rewards, dtype=np.float32))).mul_(PPO_REWARD_SCALE)  # type: ignore[index]
+        self._rb_dones[idx].copy_(torch.from_numpy(np.asarray(dones, dtype=np.float32)))  # type: ignore[index]
+        self._rb_values[idx].copy_(torch.from_numpy(np.asarray(values, dtype=np.float32)))  # type: ignore[index]
+        self._rb_ptr = idx + 1
 
     def ready_to_optimize(self) -> bool:
-        return len(self._rollout_actions) >= self.effective_rollout_steps()
+        return self._rb_ptr >= self.effective_rollout_steps()
 
     def optimize(self, next_values: np.ndarray) -> float | None:
-        if not self._rollout_actions:
+        if self._rb_ptr <= 0 or self._rb_signals is None:
             return None
 
-        T = len(self._rollout_actions)
+        T = self._rb_ptr
         N = len(next_values)
-        rewards = np.stack(self._rollout_rewards, axis=0)      # (T, N)
-        dones = np.stack(self._rollout_dones, axis=0)          # (T, N)
-        values = np.stack(self._rollout_values, axis=0)        # (T, N)
+        rewards = self._rb_rewards[:T].numpy()                 # (T, N) zero-copy view
+        dones = self._rb_dones[:T].numpy()                     # (T, N)
+        values = self._rb_values[:T].numpy()                   # (T, N)
         advantages = np.zeros((T, N), dtype=np.float32)
         last_gae = np.zeros(N, dtype=np.float32)
 
@@ -725,15 +765,14 @@ class PPOAgent:
 
         returns = advantages + values
 
-        b_signals = torch.as_tensor(np.concatenate(self._rollout_signals, axis=0), dtype=torch.float32, device=self.device)
-        b_maps = torch.as_tensor(np.concatenate(self._rollout_maps, axis=0), dtype=torch.float32, device=self.device)
-        b_actions = torch.as_tensor(np.concatenate(self._rollout_actions, axis=0), dtype=torch.int64, device=self.device)
-        b_logprobs = torch.as_tensor(np.concatenate(self._rollout_logprobs, axis=0), dtype=torch.float32, device=self.device)
-        b_values = torch.as_tensor(values.reshape(-1), dtype=torch.float32, device=self.device)
-        b_advantages = torch.as_tensor(advantages.reshape(-1), dtype=torch.float32, device=self.device)
-        b_returns = torch.as_tensor(returns.reshape(-1), dtype=torch.float32, device=self.device)
-
-        total_samples = int(b_actions.shape[0])
+        total_samples = T * N
+        b_signals = self._rb_signals[:T].reshape(total_samples, -1).to(self.device)
+        b_maps = self._rb_maps[:T].reshape(total_samples, *self._rb_maps.shape[2:]).to(self.device)  # type: ignore[union-attr]
+        b_actions = self._rb_actions[:T].reshape(total_samples).to(self.device)  # type: ignore[union-attr]
+        b_logprobs = self._rb_logprobs[:T].reshape(total_samples).to(self.device)  # type: ignore[union-attr]
+        b_values = self._rb_values[:T].reshape(total_samples).to(self.device)  # type: ignore[union-attr]
+        b_advantages = torch.from_numpy(advantages.reshape(-1)).to(self.device)
+        b_returns = torch.from_numpy(returns.reshape(-1)).to(self.device)
         base_mb = PPO_POLISH_MINIBATCH_SIZE if (self.minibatch_size == PPO_MINIBATCH_SIZE and total_samples >= 2000) else self.minibatch_size
         minibatch = max(32, min(base_mb, total_samples))
         if b_advantages.numel() > 1:
@@ -1144,6 +1183,10 @@ class ParallelPPORunner:
         self.last_profile_ms: dict[str, float] = {}
         self.last_completed_env_payload: dict[str, Any] | None = None
 
+        self._batch_states: np.ndarray | None = None
+        self._batch_maps: np.ndarray | None = None
+        self._step_rewards = np.zeros(self.num_envs, dtype=np.float32)
+        self._step_dones = np.zeros(self.num_envs, dtype=np.float32)
         self._configure_slots(self.board_size, board_sizes=board_sizes)
 
     def _configure_slots(
@@ -1348,12 +1391,23 @@ class ParallelPPORunner:
             return env.get_ppo_signals()
         return env.get_extra_signals()
 
+    def _fill_batch_obs(self, agent: PPOAgent) -> tuple[np.ndarray, np.ndarray]:
+        sig_dim = int(agent.global_signal_count)
+        map_sz = int(agent.map_size)
+        map_ch = int(agent.map_channels)
+        if self._batch_states is None or self._batch_states.shape != (self.num_envs, sig_dim):
+            self._batch_states = np.empty((self.num_envs, sig_dim), dtype=np.float32)
+        if self._batch_maps is None or self._batch_maps.shape != (self.num_envs, map_ch, map_sz, map_sz):
+            self._batch_maps = np.empty((self.num_envs, map_ch, map_sz, map_sz), dtype=np.float32)
+        states = self._batch_states
+        ego_maps = self._batch_maps
+        for idx, env in enumerate(self.envs):
+            states[idx] = self._extract_signals(env, agent)
+            ego_maps[idx] = env.get_egocentric_map(map_sz)
+        return states, ego_maps
+
     def step_alive(self, agent: PPOAgent, *, record_replays: bool = False) -> list[dict[str, Any]]:
-        states = np.stack([self._extract_signals(env, agent) for env in self.envs], axis=0).astype(np.float32)
-        ego_maps = np.stack(
-            [env.get_egocentric_map(agent.map_size) for env in self.envs],
-            axis=0,
-        ).astype(np.float32)
+        states, ego_maps = self._fill_batch_obs(agent)
         actions, log_probs, values, probs_np, greedy_actions = agent.select_batch_actions(
             states,
             ego_maps,
@@ -1362,8 +1416,10 @@ class ParallelPPORunner:
         self.last_probs = probs_np
         self.last_greedy_actions = greedy_actions
 
-        step_rewards = np.zeros(self.num_envs, dtype=np.float32)
-        step_dones = np.zeros(self.num_envs, dtype=np.float32)
+        step_rewards = self._step_rewards
+        step_dones = self._step_dones
+        step_rewards.fill(0.0)
+        step_dones.fill(0.0)
         completed: list[dict[str, Any]] = []
 
         for idx, env in enumerate(self.envs):
@@ -1520,11 +1576,7 @@ class ParallelPPORunner:
             values,
         )
         if agent.ready_to_optimize():
-            next_states = np.stack([self._extract_signals(env, agent) for env in self.envs], axis=0).astype(np.float32)
-            next_maps = np.stack(
-                [env.get_egocentric_map(agent.map_size) for env in self.envs],
-                axis=0,
-            ).astype(np.float32)
+            next_states, next_maps = self._fill_batch_obs(agent)
             next_values = agent.estimate_values(next_states, next_maps)
             agent.optimize(next_values)
 
