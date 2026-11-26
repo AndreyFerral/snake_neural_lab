@@ -24,6 +24,8 @@ class SnakeLabApp {
     this.restartBackendButton = document.getElementById("restartBackend");
     this.shutdownBackendButton = document.getElementById("shutdownBackend");
     this.recordReplaysCheckbox = document.getElementById("recordReplays");
+    this.ppoMultiboardControl = document.getElementById("ppoMultiboardControl");
+    this.ppoMultiboardCheckbox = document.getElementById("ppoMultiboard");
 
     this.networkPanel = document.getElementById("networkPanel");
     this.networkGraphCard = document.getElementById("networkGraphCard");
@@ -287,7 +289,11 @@ class SnakeLabApp {
     this.setText(this.scoreStat, String(score));
     const isPpoTraining = Boolean(this.state.training && this.state.agent_kind === "ppo" && this.state.mode !== "smart");
     const ppoEnvs = Number(this.state.stats?.population ?? 0);
-    this.setText(this.gamePanelKicker, isPpoTraining && ppoEnvs > 0 ? `Поле • ${ppoEnvs} сред в фоне` : "Поле");
+    const mbSummary = String(this.state.ppo_multiboard_summary ?? "");
+    const kickerText = isPpoTraining && ppoEnvs > 0
+      ? (this.state.ppo_multiboard && mbSummary ? `Поле • Мульти: ${mbSummary}` : `Поле • ${ppoEnvs} сред в фоне`)
+      : "Поле";
+    this.setText(this.gamePanelKicker, kickerText);
     this.renderEvalResultBar();
   }
 
@@ -503,6 +509,9 @@ class SnakeLabApp {
     this.shutdownBackendButton?.addEventListener("click", () => this.shutdownBackend());
     this.recordReplaysCheckbox?.addEventListener("change", () => {
       this.sendCommand("set_record_replays", this.recordReplaysCheckbox.checked);
+    });
+    this.ppoMultiboardCheckbox?.addEventListener("change", () => {
+      this.sendCommand("set_ppo_multiboard", this.ppoMultiboardCheckbox.checked);
     });
     this.deathStepTimeline?.addEventListener("click", (event) => {
       const button = event.target instanceof Element ? event.target.closest("button[data-death-step]") : null;
@@ -847,6 +856,19 @@ class SnakeLabApp {
       }
     }
     const isSmartMode = this.smartContextActive;
+    const isPpoMode = !isSmartMode && this.state.agent_kind === "ppo";
+    this.setHidden(this.ppoMultiboardControl, !isPpoMode);
+    if (this.ppoMultiboardCheckbox && typeof this.state.ppo_multiboard === "boolean") {
+      if (this.ppoMultiboardCheckbox.checked !== this.state.ppo_multiboard) {
+        this.ppoMultiboardCheckbox.checked = this.state.ppo_multiboard;
+      }
+    }
+    if (this.ppoMultiboardControl) {
+      const mbSummary = String(this.state.ppo_multiboard_summary ?? "");
+      this.ppoMultiboardControl.title = this.state.ppo_multiboard && mbSummary
+        ? `Мульти-поле PPO (${mbSummary}): упор на выбранную карту + якоря против забывания`
+        : "Обучать PPO сразу на нескольких размерах карт (улучшает и главную 10×10, и большие поля)";
+    }
     const isEvalRunning = Boolean(this.state.stats?.eval_running);
     const boardSize = Number(this.state.game?.size ?? 10);
     const evalEps = boardSize <= 20 ? 20 : 10;

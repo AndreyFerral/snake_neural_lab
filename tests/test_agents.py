@@ -26,7 +26,7 @@ from dqn_agent import (
     evaluate_pre_step_risks,
     filter_dqn_random_action,
 )
-from ppo_agent import PPOAgent, ParallelPPORunner
+from ppo_agent import PPOAgent, ParallelPPORunner, build_multiboard_layout, format_multiboard_summary
 from snake_env import SnakeEnv
 
 
@@ -374,6 +374,42 @@ class TestAgents(unittest.TestCase):
         env3._clear_observation_cache()
         runner.step_alive(agent, record_replays=False)
         self.assertEqual(len(runner.endgame_failure_buffer), 0)
+
+    def test_ppo_multiboard_layout_and_runner(self) -> None:
+        torch.manual_seed(17)
+        np.random.seed(17)
+        lay10 = build_multiboard_layout(10, 16)
+        self.assertEqual(len(lay10), 16)
+        self.assertEqual(lay10[0], 10)
+        self.assertEqual(lay10[-1], 10)
+        self.assertEqual(format_multiboard_summary(lay10, primary_board=10), "8×10 + 4×15 + 4×20")
+
+        lay15 = build_multiboard_layout(15, 16)
+        self.assertEqual(lay15[0], 15)
+        self.assertEqual(lay15[-1], 15)
+        self.assertEqual(format_multiboard_summary(lay15, primary_board=15), "8×15 + 5×10 + 3×20")
+
+        lay20 = build_multiboard_layout(20, 16)
+        self.assertEqual(lay20[0], 20)
+        self.assertEqual(lay20[-1], 20)
+        self.assertEqual(format_multiboard_summary(lay20, primary_board=20), "7×20 + 6×10 + 3×15")
+
+        lay25 = build_multiboard_layout(25, 16)
+        self.assertEqual(lay25[0], 25)
+        self.assertEqual(lay25[-1], 25)
+        self.assertEqual(format_multiboard_summary(lay25, primary_board=25), "6×25 + 6×10 + 2×15 + 2×20")
+
+        # ParallelPPORunner runs mixed board sizes & optimizes cleanly with per-board failure buffers
+        mb_slots = build_multiboard_layout(10, 8)
+        agent = PPOAgent(device=torch.device("cpu"), num_envs=8, rollout_steps=6, minibatch_size=16, epochs=2)
+        runner = ParallelPPORunner(8, 10, board_sizes=mb_slots, env_factory=SnakeEnv)
+        self.assertTrue(runner.is_multiboard)
+        self.assertEqual([int(env.board_size) for env in runner.envs], list(mb_slots))
+        self.assertEqual(set(runner.failure_buffers_by_board.keys()), set(mb_slots))
+        for _ in range(7):
+            runner.step_alive(agent, record_replays=False)
+        self.assertGreaterEqual(agent.total_updates, 1)
+        self.assertTrue(np.isfinite(agent.last_loss))
 
     def test_shared_dqn_step_helpers(self) -> None:
         env = SnakeEnv(board_size=10)

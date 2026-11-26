@@ -116,11 +116,39 @@ class TestWebBackendAndApi(unittest.TestCase):
                         self.assertEqual(backend.last_death_snapshot["score"], 12)
                         self.assertEqual(backend.episode_counter, 1)
 
-                    # Changing board size clears PPO failure replay buffer
+                    # Changing board size clears PPO failure replay buffer and updates multi-board layout
+                    self.assertTrue(backend.ppo_multiboard)
+                    self.assertEqual(backend._ppo_multiboard_summary(), "8×10 + 4×15 + 4×20")
+                    # Secondary-board completion must NOT leak into active board best_score or history
+                    with backend.lock:
+                        ep_before_mb = backend.episode_counter
+                        best_before_mb = backend.best_score
+                        backend._record_training_completion(
+                            {"score": 350, "step_count": 1200, "reason": "wall_collision", "board_size": 20},
+                            update_death_snapshot=False,
+                        )
+                        self.assertEqual(backend.episode_counter, ep_before_mb)
+                        self.assertEqual(backend.best_score, best_before_mb)
+                        self.assertEqual(backend.board_best_scores.get(20), 350)
+
                     res_board = backend.handle_command({"type": "set_board_size", "value": 15})
                     self.assertTrue(res_board["ok"])
                     self.assertEqual(len(backend.training_runner.failure_replay_buffer), 0)
                     self.assertEqual(len(backend.training_runner.endgame_failure_buffer), 0)
+                    self.assertEqual(backend._ppo_multiboard_summary(), "8×15 + 5×10 + 3×20")
+
+                    # Toggling Multi-Board off/on rebuilds runner and persists in active_context.json
+                    res_mb_off = backend.handle_command({"type": "set_ppo_multiboard", "value": False})
+                    self.assertTrue(res_mb_off["ok"])
+                    self.assertFalse(backend.ppo_multiboard)
+                    self.assertFalse(backend.training_runner.is_multiboard)
+                    self.assertEqual(backend._ppo_multiboard_summary(), "")
+                    ctx_saved = json.loads((tmp / "active_context.json").read_text(encoding="utf-8"))
+                    self.assertFalse(ctx_saved["ppo_multiboard"])
+                    res_mb_on = backend.handle_command({"type": "set_ppo_multiboard", "value": True})
+                    self.assertTrue(res_mb_on["ok"])
+                    self.assertTrue(backend.ppo_multiboard)
+                    self.assertTrue(backend.training_runner.is_multiboard)
                     backend.handle_command({"type": "set_board_size", "value": 10})
 
                     # Greedy eval runs cleanly without polluting episode stats or history

@@ -96,7 +96,7 @@ from dqn_agent import (
     evaluate_pre_step_risks,
     filter_dqn_random_action,
 )
-from ppo_agent import PPOAgent, ParallelPPORunner
+from ppo_agent import PPOAgent, ParallelPPORunner, build_multiboard_layout, format_multiboard_summary
 from runtime_storage import (
     ReplayManager,
     checkpoint_path_for_agent as _checkpoint_path_for_agent,
@@ -260,6 +260,7 @@ class SnakeWebBackend:
         self.replays_dir = RUNTIME_DIR / "replays"
         self.replay_manager = ReplayManager(self.replays_dir, perf_logger=log_perf)
         self.record_replays = True
+        self.ppo_multiboard = True
         self.last_eval_result: dict[str, Any] | None = None
         self._eval_running = False
         self._eval_generation = 0
@@ -462,13 +463,26 @@ class SnakeWebBackend:
             return True
         return False
 
+    def _ppo_multiboard_summary(self) -> str:
+        if self.agent_kind != "ppo" or not self.ppo_multiboard:
+            return ""
+        if self.training_runner is not None and self.training_runner.is_multiboard:
+            return self.training_runner.multiboard_summary()
+        num_envs = int(getattr(self.agent, "num_envs", 16))
+        return format_multiboard_summary(
+            build_multiboard_layout(int(self.game.board_size), num_envs),
+            primary_board=int(self.game.board_size),
+        )
+
     def _reset_training_runner(self, board_size: int | None = None) -> None:
         target_size = int(board_size if board_size is not None else self.game.board_size)
         if self.agent_kind == "ppo":
             num_envs = int(getattr(self.agent, "num_envs", 8))
+            slot_boards = build_multiboard_layout(target_size, num_envs) if self.ppo_multiboard else None
             self.training_runner = ParallelPPORunner(
                 num_envs,
                 target_size,
+                board_sizes=slot_boards,
                 env_factory=SnakeEnv,
                 action_labels=MODEL_ACTION_LABELS,
             )
@@ -627,21 +641,31 @@ class SnakeWebBackend:
                 with self.lock:
                     if self.agent is agent_ref and self.training_runner is runner_ref:
                         new_best_policy = False
+                        active_board = int(self.game.board_size)
                         for item in completed:
+                            ep_board = int(item.get("board_size", active_board))
+                            ep_score = int(item.get("score", 0))
+                            ep_reason = str(item.get("reason", ""))
                             self._record_training_completion(item, update_death_snapshot=False)
                             if isinstance(agent_ref, PPOAgent):
-                                if agent_ref.record_full_episode(
-                                    int(item.get("score", 0)),
-                                    str(item.get("reason", "")),
-                                    board_size=int(item.get("board_size", self.game.board_size)),
-                                ):
-                                    new_best_policy = True
+                                if ep_board == active_board:
+                                    if agent_ref.record_full_episode(
+                                        ep_score,
+                                        ep_reason,
+                                        board_size=ep_board,
+                                    ):
+                                        new_best_policy = True
+                                else:
+                                    fill_r = min(1.0, float(ep_score + 3) / float(max(9, ep_board * ep_board)))
+                                    prev_b = float(agent_ref.best_fill_by_board.get(ep_board, 0.0))
+                                    if fill_r > prev_b:
+                                        agent_ref.best_fill_by_board[ep_board] = fill_r
                             replay_steps = item.get("replay_steps")
-                            if record_replays and isinstance(replay_steps, list) and replay_steps:
+                            if record_replays and ep_board == active_board and isinstance(replay_steps, list) and replay_steps:
                                 self._save_replay(
                                     replay_steps,
-                                    int(item.get("score", 0)),
-                                    str(item.get("reason", "unknown")),
+                                    ep_score,
+                                    ep_reason or "unknown",
                                     prefix=f"ppo_u{int(agent_ref.total_updates)}",
                                 )
                         has_victory = any(item.get("reason") == "victory" for item in completed)
@@ -801,6 +825,12 @@ class SnakeWebBackend:
         score = int(payload.get("score", 0))
         step_count = int(payload.get("step_count", 0))
         reason = str(payload.get("reason", "unknown"))
+        ep_board = int(payload.get("board_size", self.game.board_size))
+        active_board = int(self.game.board_size)
+
+        self.board_best_scores[ep_board] = max(int(self.board_best_scores.get(ep_board, 0)), score)
+        if ep_board != active_board:
+            return
 
         self.episode_counter += 1
         self.best_score = max(self.best_score, score)
@@ -855,22 +885,32 @@ class SnakeWebBackend:
         with self.agent_lock:
             completed = self.training_runner.step_alive(self.agent, record_replays=self.record_replays)
         new_best_policy = False
+        active_board = int(self.game.board_size)
         for item in completed:
+            ep_board = int(item.get("board_size", active_board))
+            ep_score = int(item.get("score", 0))
+            ep_reason = str(item.get("reason", ""))
             self._record_training_completion(item)
             if isinstance(self.agent, PPOAgent):
                 with self.agent_lock:
-                    if self.agent.record_full_episode(
-                        int(item.get("score", 0)),
-                        str(item.get("reason", "")),
-                        board_size=int(item.get("board_size", self.game.board_size)),
-                    ):
-                        new_best_policy = True
+                    if ep_board == active_board:
+                        if self.agent.record_full_episode(
+                            ep_score,
+                            ep_reason,
+                            board_size=ep_board,
+                        ):
+                            new_best_policy = True
+                    else:
+                        fill_r = min(1.0, float(ep_score + 3) / float(max(9, ep_board * ep_board)))
+                        prev_b = float(self.agent.best_fill_by_board.get(ep_board, 0.0))
+                        if fill_r > prev_b:
+                            self.agent.best_fill_by_board[ep_board] = fill_r
             replay_steps = item.get("replay_steps")
-            if self.record_replays and isinstance(replay_steps, list) and replay_steps:
+            if self.record_replays and ep_board == active_board and isinstance(replay_steps, list) and replay_steps:
                 self._save_replay(
                     replay_steps,
-                    int(item.get("score", 0)),
-                    str(item.get("reason", "unknown")),
+                    ep_score,
+                    ep_reason or "unknown",
                     prefix=f"ppo_u{int(getattr(self.agent, 'total_updates', 0))}",
                 )
 
@@ -1208,6 +1248,7 @@ class SnakeWebBackend:
             "smart_model": self.smart_agent.model_path.name if self.smart_agent.model_path else "",
             "speed": self.speed,
             "record_replays": self.record_replays,
+            "ppo_multiboard": self.ppo_multiboard,
         }
 
     def _save_active_context(self) -> None:
@@ -1262,6 +1303,7 @@ class SnakeWebBackend:
             pass
 
         self.record_replays = bool(payload.get("record_replays", True))
+        self.ppo_multiboard = bool(payload.get("ppo_multiboard", True))
 
         self.agent = self._create_native_agent(self.agent_kind)
         self._reset_training_runner(self.game.board_size)
@@ -2031,6 +2073,8 @@ class SnakeWebBackend:
             "mode": self.mode,
             "speed": self.speed,
             "visual_speed": self._visual_speed(),
+            "ppo_multiboard": self.ppo_multiboard,
+            "ppo_multiboard_summary": self._ppo_multiboard_summary(),
             "last_action": self.last_action,
             "last_action_random": self.last_action_random,
             "last_greedy_action": self.last_greedy_action,
@@ -2201,6 +2245,8 @@ class SnakeWebBackend:
                 "last_penalty_reasons": list(self.last_penalty_reasons),
                 "persistence_enabled": self.persistence_enabled,
                 "record_replays": self.record_replays,
+                "ppo_multiboard": self.ppo_multiboard,
+                "ppo_multiboard_summary": self._ppo_multiboard_summary(),
                 "game": {
                     "size": self.game.board_size,
                     "score": self.game.score,
@@ -2396,7 +2442,7 @@ class SnakeWebBackend:
         light_state_commands = {
             "toggle_running", "toggle_training", "set_agent_kind", "set_mode",
             "set_smart_model", "set_board_size", "cycle_board_size",
-            "set_speed", "set_device", "reset_agent", "eval_greedy",
+            "set_speed", "set_device", "set_ppo_multiboard", "reset_agent", "eval_greedy",
             "restart_server", "shutdown_server",
         }
         if command in light_state_commands:
@@ -2508,6 +2554,17 @@ class SnakeWebBackend:
                 if not isinstance(value, bool):
                     return {"ok": False, "error": "Value must be a boolean"}
                 self.record_replays = value
+            elif command == "set_ppo_multiboard":
+                if not isinstance(value, bool):
+                    return {"ok": False, "error": "Value must be a boolean"}
+                if self.ppo_multiboard != value:
+                    with self._pause_ppo_worker():
+                        self.ppo_multiboard = value
+                        if self.agent_kind == "ppo":
+                            self._reset_training_runner(self.game.board_size)
+                            if isinstance(self.agent, PPOAgent):
+                                with self.agent_lock:
+                                    self.agent.clear_rollout()
             elif command == "eval_greedy":
                 episodes_val: int | None = None
                 sync_val = False
@@ -2574,7 +2631,7 @@ class SnakeWebBackend:
             if command in {
                 "set_agent_kind", "set_mode", "set_smart_model", "set_board_size",
                 "cycle_board_size", "set_speed", "reset_agent",
-                "restart_server", "shutdown_server", "set_record_replays",
+                "restart_server", "shutdown_server", "set_record_replays", "set_ppo_multiboard",
             }:
                 self._save_active_context()
             self._update_frame_cache()

@@ -1006,14 +1006,96 @@ class PPOAgent:
         self.sync_inference_net()
 
 
+def build_multiboard_layout(primary_board: int, num_envs: int = PPO_NUM_ENVS) -> tuple[int, ...]:
+    """Строит мягко-взвешенную раскладку карт с упором на выбранную карту и якорем на 10x10.
+
+    Первый и последний слоты всегда принадлежат `primary_board`, чтобы `envs[0]` и
+    последний replay-слот соответствовали активной карте пользователя.
+    """
+    n = max(1, int(num_envs))
+    primary = max(6, int(primary_board))
+    if n < 3:
+        return tuple([primary] * n)
+
+    if primary == 10:
+        weights: list[tuple[int, float]] = [(10, 8.0), (15, 4.0), (20, 4.0)]
+    elif primary == 15:
+        weights = [(15, 8.0), (10, 5.0), (20, 3.0)]
+    elif primary == 20:
+        weights = [(20, 7.0), (10, 6.0), (15, 3.0)]
+    elif primary >= 25:
+        weights = [(primary, 6.0), (10, 6.0), (15, 2.0), (20, 2.0)]
+    else:
+        weights = [(primary, 8.0), (10, 4.0), (15, 2.0), (20, 2.0)]
+
+    total_w = sum(w for _, w in weights)
+    counts: dict[int, int] = {}
+    remainders: list[tuple[float, int]] = []
+    assigned = 0
+    for bs, w in weights:
+        exact = (w / total_w) * n
+        c = int(exact)
+        counts[bs] = c
+        assigned += c
+        remainders.append((exact - c, bs))
+
+    remainders.sort(key=lambda item: item[0], reverse=True)
+    for _, bs in remainders:
+        if assigned >= n:
+            break
+        counts[bs] += 1
+        assigned += 1
+
+    # Гарантируем >= 2 слота для primary_board при n >= 4 (для слота 0 и последнего replay-слота)
+    if counts.get(primary, 0) < 2 and n >= 4:
+        for _, bs in reversed(remainders):
+            if bs != primary and counts.get(bs, 0) > 1:
+                counts[bs] -= 1
+                counts[primary] = counts.get(primary, 0) + 1
+                if counts[primary] >= 2:
+                    break
+
+    primary_cnt = counts.get(primary, 0)
+    if primary_cnt >= 2:
+        layout: list[int] = [primary] * (primary_cnt - 1)
+        for bs, _ in weights:
+            if bs != primary and counts.get(bs, 0) > 0:
+                layout.extend([bs] * counts[bs])
+        layout.append(primary)
+    else:
+        layout = [primary] * primary_cnt
+        for bs, _ in weights:
+            if bs != primary and counts.get(bs, 0) > 0:
+                layout.extend([bs] * counts[bs])
+    return tuple(layout[:n])
+
+
+def format_multiboard_summary(slot_boards: list[int] | tuple[int, ...], primary_board: int | None = None) -> str:
+    """Форматирует раскладку слотов в компактную строку вида `8×10 + 4×15 + 4×20`."""
+    if not slot_boards:
+        return ""
+    counts: dict[int, int] = {}
+    for bs in slot_boards:
+        b = int(bs)
+        counts[b] = counts.get(b, 0) + 1
+    ordered: list[int] = []
+    if primary_board is not None and int(primary_board) in counts:
+        ordered.append(int(primary_board))
+    for bs in sorted(counts.keys()):
+        if bs not in ordered:
+            ordered.append(bs)
+    return " + ".join(f"{counts[bs]}×{bs}" for bs in ordered)
+
+
 class ParallelPPORunner:
-    """Параллельный сборщик rollout-батчей по N средам SnakeEnv с встроенным Failure-Replay."""
+    """Параллельный сборщик rollout-батчей по N средам SnakeEnv с встроенным Failure-Replay (single и multi-board)."""
 
     def __init__(
         self,
         num_envs: int,
         board_size: int,
         *,
+        board_sizes: list[int] | tuple[int, ...] | None = None,
         env_factory: Callable[[int], Any],
         action_labels: tuple[str, ...] = MODEL_ACTION_LABELS,
         replay_env_count: int | None = None,
@@ -1040,15 +1122,18 @@ class ParallelPPORunner:
         self.failure_snapshot_interval = max(1, int(failure_snapshot_interval))
         self.failure_rewind_target = max(1, int(failure_rewind_target))
 
-        self.envs: list[Any] = [env_factory(self.board_size) for _ in range(self.num_envs)]
-        self.episode_rewards: list[float] = [0.0 for _ in range(self.num_envs)]
-        self.recent_random_flags: list[Deque[bool]] = [deque(maxlen=12) for _ in range(self.num_envs)]
-        self.replay_histories: list[list[dict[str, Any]]] = [[] for _ in range(self.num_envs)]
-        self._state_snapshots: list[Deque[tuple[int, dict[str, object]]]] = [
-            deque(maxlen=8) for _ in range(self.num_envs)
-        ]
-        self.is_replay_env: list[bool] = [False for _ in range(self.num_envs)]
-        self._active_replay_entry: list[dict[str, Any] | None] = [None for _ in range(self.num_envs)]
+        self.slot_boards: list[int] = []
+        self.is_multiboard: bool = False
+        self._multiboard_replay_slots: set[int] = set()
+        self.envs: list[Any] = []
+        self.episode_rewards: list[float] = []
+        self.recent_random_flags: list[Deque[bool]] = []
+        self.replay_histories: list[list[dict[str, Any]]] = []
+        self._state_snapshots: list[Deque[tuple[int, dict[str, object]]]] = []
+        self.is_replay_env: list[bool] = []
+        self._active_replay_entry: list[dict[str, Any] | None] = []
+        self.failure_buffers_by_board: dict[int, Deque[dict[str, Any]]] = {}
+        self.endgame_buffers_by_board: dict[int, Deque[dict[str, Any]]] = {}
         self.failure_replay_buffer: Deque[dict[str, Any]] = deque(maxlen=self.failure_buffer_maxlen)
         self.endgame_failure_buffer: Deque[dict[str, Any]] = deque(maxlen=PPO_FAILURE_ENDGAME_MAXLEN)
         self.failure_replays_completed = 0
@@ -1059,32 +1144,89 @@ class ParallelPPORunner:
         self.last_profile_ms: dict[str, float] = {}
         self.last_completed_env_payload: dict[str, Any] | None = None
 
-    def _is_replay_slot(self, idx: int, *, active_count: int | None = None) -> bool:
-        cnt = self.replay_env_count if active_count is None else max(0, min(self.replay_env_count, int(active_count)))
-        return cnt > 0 and idx >= (self.num_envs - cnt)
+        self._configure_slots(self.board_size, board_sizes=board_sizes)
 
-    def clear_failure_buffer(self) -> None:
-        self.failure_replay_buffer.clear()
-        self.endgame_failure_buffer.clear()
-        self._active_replay_entry = [None for _ in range(self.num_envs)]
-        for snap_q in self._state_snapshots:
-            snap_q.clear()
+    def _configure_slots(
+        self,
+        board_size: int,
+        *,
+        board_sizes: list[int] | tuple[int, ...] | None = None,
+    ) -> None:
+        self.board_size = int(board_size)
+        if board_sizes is not None and len(board_sizes) == self.num_envs:
+            self.slot_boards = [int(b) for b in board_sizes]
+        else:
+            self.slot_boards = [self.board_size for _ in range(self.num_envs)]
 
-    def reset_all(self, board_size: int | None = None) -> None:
-        if board_size is not None:
-            self.board_size = int(board_size)
-        self.envs = [self.env_factory(self.board_size) for _ in range(self.num_envs)]
+        unique_boards = sorted(set(self.slot_boards))
+        self.is_multiboard = len(unique_boards) > 1
+        self._multiboard_replay_slots = set()
+        if self.is_multiboard and self.replay_env_count > 0:
+            # 1 выделенный Failure-Replay слот на каждый размер поля (последний слот каждой группы, если слотов >= 2)
+            counts_by_bs: dict[int, int] = {}
+            last_idx_by_bs: dict[int, int] = {}
+            for idx, bs in enumerate(self.slot_boards):
+                counts_by_bs[bs] = counts_by_bs.get(bs, 0) + 1
+                last_idx_by_bs[bs] = idx
+            for bs, cnt in counts_by_bs.items():
+                if cnt >= 2:
+                    self._multiboard_replay_slots.add(last_idx_by_bs[bs])
+
+        self.envs = [self.env_factory(bs) for bs in self.slot_boards]
         self.episode_rewards = [0.0 for _ in range(self.num_envs)]
         self.recent_random_flags = [deque(maxlen=12) for _ in range(self.num_envs)]
         self.replay_histories = [[] for _ in range(self.num_envs)]
         self._state_snapshots = [deque(maxlen=8) for _ in range(self.num_envs)]
         self.is_replay_env = [False for _ in range(self.num_envs)]
         self._active_replay_entry = [None for _ in range(self.num_envs)]
-        self.failure_replay_buffer.clear()
-        self.endgame_failure_buffer.clear()
+
+        self.failure_buffers_by_board = {
+            bs: deque(maxlen=self.failure_buffer_maxlen) for bs in unique_boards
+        }
+        self.endgame_buffers_by_board = {
+            bs: deque(maxlen=PPO_FAILURE_ENDGAME_MAXLEN) for bs in unique_boards
+        }
+        if self.board_size not in self.failure_buffers_by_board:
+            self.failure_buffers_by_board[self.board_size] = deque(maxlen=self.failure_buffer_maxlen)
+            self.endgame_buffers_by_board[self.board_size] = deque(maxlen=PPO_FAILURE_ENDGAME_MAXLEN)
+        self.failure_replay_buffer = self.failure_buffers_by_board[self.board_size]
+        self.endgame_failure_buffer = self.endgame_buffers_by_board[self.board_size]
         self.failure_replays_completed = 0
         self.display_index = 0
         self.last_completed_env_payload = None
+
+    def multiboard_summary(self) -> str:
+        if not self.is_multiboard:
+            return ""
+        return format_multiboard_summary(self.slot_boards, primary_board=self.board_size)
+
+    def _is_replay_slot(self, idx: int, *, active_count: int | None = None) -> bool:
+        if self.is_multiboard:
+            if active_count is not None and int(active_count) <= 0:
+                return False
+            return idx in self._multiboard_replay_slots
+        cnt = self.replay_env_count if active_count is None else max(0, min(self.replay_env_count, int(active_count)))
+        return cnt > 0 and idx >= (self.num_envs - cnt)
+
+    def clear_failure_buffer(self) -> None:
+        for buf in self.failure_buffers_by_board.values():
+            buf.clear()
+        for buf in self.endgame_buffers_by_board.values():
+            buf.clear()
+        self._active_replay_entry = [None for _ in range(self.num_envs)]
+        for snap_q in self._state_snapshots:
+            snap_q.clear()
+
+    def reset_all(
+        self,
+        board_size: int | None = None,
+        *,
+        board_sizes: list[int] | tuple[int, ...] | None = None,
+    ) -> None:
+        target_bs = self.board_size if board_size is None else int(board_size)
+        if board_sizes is None and board_size is None and self.is_multiboard:
+            board_sizes = list(self.slot_boards)
+        self._configure_slots(target_bs, board_sizes=board_sizes)
 
     def leader_env(self) -> Any:
         return self.envs[self.display_index]
@@ -1092,13 +1234,19 @@ class ParallelPPORunner:
     def update_leader(self) -> int:
         now = time.monotonic()
         cur = self.display_index
-        cur_valid = 0 <= cur < self.num_envs and not self.is_replay_env[cur] and self.envs[cur].step_count > 0
+        cur_valid = (
+            0 <= cur < self.num_envs
+            and not self.is_replay_env[cur]
+            and self.slot_boards[cur] == self.board_size
+            and self.envs[cur].step_count > 0
+        )
 
         best_idx = 0
-        best_key = (-1, -1, -1)
+        best_key = (-1, -1, -1, -1)
         for idx, env in enumerate(self.envs):
+            primary_priority = 1 if self.slot_boards[idx] == self.board_size else 0
             honest_priority = 0 if self.is_replay_env[idx] else 1
-            key = (honest_priority, int(env.score), int(env.step_count))
+            key = (primary_priority, honest_priority, int(env.score), int(env.step_count))
             if key > best_key:
                 best_key = key
                 best_idx = idx
@@ -1124,6 +1272,7 @@ class ParallelPPORunner:
         snaps = self._state_snapshots[idx]
         if not snaps:
             return None
+        slot_bs = self.slot_boards[idx]
         rewind = self.failure_rewind_target if rewind_target is None else max(2, int(rewind_target))
         target_step = max(0, death_step - rewind)
         best_state: dict[str, object] | None = None
@@ -1133,7 +1282,7 @@ class ParallelPPORunner:
                 continue
             if bool(state.get("done", False)):
                 continue
-            if int(state.get("board_size", self.board_size)) != self.board_size:
+            if int(state.get("board_size", slot_bs)) != slot_bs:
                 continue
             dist = abs(snap_step - target_step)
             if dist < best_dist:
@@ -1142,12 +1291,15 @@ class ParallelPPORunner:
         return best_state
 
     def _sample_failure_entry(self, idx: int) -> tuple[dict[str, object] | None, dict[str, Any] | None]:
-        # Последний слот приоритетно берёт из эндгейм-буфера (fill >= 0.80), если он не пуст
-        use_endgame = (
-            len(self.endgame_failure_buffer) > 0
-            and (idx == self.num_envs - 1 or len(self.failure_replay_buffer) == 0)
-        )
-        buf = self.endgame_failure_buffer if use_endgame else self.failure_replay_buffer
+        slot_bs = self.slot_boards[idx]
+        fail_buf = self.failure_buffers_by_board.get(slot_bs, self.failure_replay_buffer)
+        end_buf = self.endgame_buffers_by_board.get(slot_bs, self.endgame_failure_buffer)
+        if self.is_multiboard:
+            use_endgame = len(end_buf) > 0 and (len(fail_buf) == 0 or random.random() < 0.5)
+        else:
+            # Последний слот приоритетно берёт из эндгейм-буфера (fill >= 0.80), если он не пуст
+            use_endgame = len(end_buf) > 0 and (idx == self.num_envs - 1 or len(fail_buf) == 0)
+        buf = end_buf if use_endgame else fail_buf
         if not buf:
             return None, None
         items = list(buf)
@@ -1166,19 +1318,22 @@ class ParallelPPORunner:
 
     def _reset_env_slot(self, idx: int, *, active_replay_count: int | None = None) -> None:
         env = self.envs[idx]
+        slot_bs = self.slot_boards[idx]
         self.episode_rewards[idx] = 0.0
         self.recent_random_flags[idx].clear()
         self.replay_histories[idx].clear()
         self._state_snapshots[idx].clear()
         self._active_replay_entry[idx] = None
-        has_any_failure = len(self.failure_replay_buffer) > 0 or len(self.endgame_failure_buffer) > 0
+        fail_buf = self.failure_buffers_by_board.get(slot_bs, self.failure_replay_buffer)
+        end_buf = self.endgame_buffers_by_board.get(slot_bs, self.endgame_failure_buffer)
+        has_any_failure = len(fail_buf) > 0 or len(end_buf) > 0
         if self._is_replay_slot(idx, active_count=active_replay_count) and has_any_failure:
             saved_state, entry_ref = self._sample_failure_entry(idx)
             if saved_state is not None:
                 env.load_state(saved_state)
             else:
                 env.reset(return_obs=False)
-            if saved_state is None or env.done or int(env.board_size) != self.board_size:
+            if saved_state is None or env.done or int(env.board_size) != slot_bs:
                 env.reset(return_obs=False)
                 self.is_replay_env[idx] = False
             else:
@@ -1281,6 +1436,9 @@ class ParallelPPORunner:
                         self.replay_histories[idx].pop(0)
 
             if done:
+                slot_bs = self.slot_boards[idx]
+                fail_buf = self.failure_buffers_by_board.get(slot_bs, self.failure_replay_buffer)
+                end_buf = self.endgame_buffers_by_board.get(slot_bs, self.endgame_failure_buffer)
                 if is_replay:
                     self.failure_replays_completed += 1
                     entry_ref = self._active_replay_entry[idx]
@@ -1291,24 +1449,28 @@ class ParallelPPORunner:
                             entry_ref["fails"] = int(entry_ref.get("fails", 0)) + 1
                             if entry_ref["fails"] >= 6:
                                 try:
-                                    self.failure_replay_buffer.remove(entry_ref)
+                                    fail_buf.remove(entry_ref)
                                 except ValueError:
                                     pass
                                 try:
-                                    self.endgame_failure_buffer.remove(entry_ref)
+                                    end_buf.remove(entry_ref)
                                 except ValueError:
                                     pass
                 else:
                     board_cells = max(1, int(env.board_size) * int(env.board_size))
                     fill_ratio = float(int(env.score) + 3) / float(board_cells)
-                    best_fill = float(getattr(agent, "best_fill_ratio", 0.0))
+                    best_by_board = getattr(agent, "best_fill_by_board", None)
+                    if isinstance(best_by_board, dict) and slot_bs in best_by_board:
+                        best_fill = float(best_by_board[slot_bs])
+                    else:
+                        best_fill = float(getattr(agent, "best_fill_ratio", 0.0)) if slot_bs == self.board_size else 0.0
                     adaptive_min_fill = max(PPO_FAILURE_MIN_FILL, best_fill * 0.85)
                     passes_min = (
                         fill_ratio >= adaptive_min_fill
-                        and (self.board_size != 10 or int(env.score) >= self.failure_min_score)
+                        and (slot_bs != 10 or int(env.score) >= self.failure_min_score)
                     )
                     had_recent_random = any(self.recent_random_flags[idx])
-                    allow_failure_record = (not had_recent_random) or len(self.failure_replay_buffer) < 12
+                    allow_failure_record = (not had_recent_random) or len(fail_buf) < 12
                     if reason != "victory" and passes_min and allow_failure_record:
                         rewind_target = (
                             PPO_FAILURE_STARVATION_REWIND
@@ -1322,9 +1484,9 @@ class ParallelPPORunner:
                         )
                         if rewind_state is not None:
                             entry = {"state": rewind_state, "fill": fill_ratio, "fails": 0}
-                            self.failure_replay_buffer.append(entry)
+                            fail_buf.append(entry)
                             if fill_ratio >= PPO_FAILURE_ENDGAME_FILL:
-                                self.endgame_failure_buffer.append(entry)
+                                end_buf.append(entry)
 
                     finished_snapshot = {
                         "index": idx,
@@ -1344,8 +1506,8 @@ class ParallelPPORunner:
                     }
                     completed.append(finished_snapshot)
                     self.last_completed_env_payload = finished_snapshot
-                # На пике (best_fill >= 0.95) оставляем 1 слот Failure-Replay вместо 2, чтобы не забывать мидгейм
-                active_replay_cnt = 1 if (self.replay_env_count >= 2 and float(getattr(agent, "best_fill_ratio", 0.0)) >= 0.95) else self.replay_env_count
+                # На пике (best_fill >= 0.95) в single-board оставляем 1 слот Failure-Replay вместо 2, чтобы не забывать мидгейм
+                active_replay_cnt = 1 if (not self.is_multiboard and self.replay_env_count >= 2 and float(getattr(agent, "best_fill_ratio", 0.0)) >= 0.95) else self.replay_env_count
                 self._reset_env_slot(idx, active_replay_count=active_replay_cnt)
 
         agent.store_rollout_step(
