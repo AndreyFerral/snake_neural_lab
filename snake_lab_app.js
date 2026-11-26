@@ -34,7 +34,6 @@ class SnakeLabApp {
     this.inputGridBadge = document.getElementById("inputGridBadge");
     this.networkSourceBadge = document.getElementById("networkSourceBadge");
 
-    this.agentPillBadge = document.getElementById("agentPillBadge");
     this.modeStat = document.getElementById("modeStat");
     this.epochStat = document.getElementById("epochStat");
     this.scoreStat = document.getElementById("scoreStat");
@@ -863,8 +862,6 @@ class SnakeLabApp {
     const isEvalRunning = Boolean(this.state.stats?.eval_running);
     const boardSize = Number(this.state.game?.size ?? 10);
     const evalEps = boardSize <= 20 ? 20 : 10;
-    const agentBadgeLabel = isSmartMode ? "Zmey-smart" : this.state.agent_kind === "ppo" ? "PPO (Map)" : "DQN";
-    this.setText(this.agentPillBadge, agentBadgeLabel);
     this.setText(this.runToggle, this.state.running ? "⏸ Пауза" : "▶ Старт");
     this.toggleClass(this.runToggle, "primary", Boolean(this.state.running));
     this.toggleClass(this.runToggle, "is-paused", !this.state.running);

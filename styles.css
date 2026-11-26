@@ -44,7 +44,6 @@ h3 { font-size: 1.06rem; }
 .game-panel .panel-kicker { margin-bottom: 2px; }
 .control-panel { display: flex; flex-direction: column; gap: 10px; font-variant-numeric: tabular-nums; }
 .control-panel-head { margin-bottom: 2px; align-items: flex-start; }
-.ctrl-agent-badge { display: inline-flex; align-items: center; padding: 4px 9px; border-radius: 8px; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.10); color: var(--muted); font-size: 0.74rem; font-weight: 600; white-space: nowrap; }
 
 .ctrl-mode-switch { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px; padding: 3px; border-radius: 11px; background: rgba(3, 12, 18, 0.56); border: 1px solid rgba(255, 255, 255, 0.09); }
 .ctrl-mode-switch button { padding: 8px 6px; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--muted); font-size: 0.82rem; font-weight: 600; transform: none; }
