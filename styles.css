@@ -227,6 +227,7 @@ button.danger { background: rgba(255, 107, 107, 0.13); border-color: rgba(255, 1
 .viz-note { max-width: 760px; }
 
 /* Premium custom toggle switch */
+.switch-container[hidden] { display: none; }
 .switch-container {
   display: inline-flex;
   flex-direction: row;
