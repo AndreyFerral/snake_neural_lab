@@ -11,12 +11,21 @@
   <body>
     <div class="app-shell">
       <header class="hero">
-        <div>
-          <p class="eyebrow">Snake + Reinforcement Learning</p>
+        <div class="hero-top">
           <h1>Змейка с обучением нейросети</h1>
-          <div class="hero-actions">
+          <div class="hero-badges">
+            <span id="deviceBadge">CPU</span>
+            <span id="boardSizeBadge">Карта 10x10</span>
+            <span id="inputGridBadge">Вход: 40 сигн. + 11×11</span>
+            <span id="networkSourceBadge">Нейросеть: Python backend</span>
+          </div>
+        </div>
+        <div class="hero-actions">
+          <div class="hero-actions-left">
             <button id="restartBackend">Перезапуск backend</button>
             <button id="shutdownBackend" class="danger">Выход</button>
+          </div>
+          <div class="hero-actions-right">
             <label class="switch-container" id="ppoMultiboardControl" hidden>
               <span class="switch-label">Мульти-поле</span>
               <input type="checkbox" id="ppoMultiboard" checked />
@@ -29,13 +38,6 @@
               </select>
             </label>
           </div>
-        </div>
-        <div class="hero-badges">
-          <span id="deviceBadge">CPU</span>
-          <span id="boardSizeBadge">Карта 10x10</span>
-          <span id="inputGridBadge">Вход: 27 сигналов</span>
-          <span>Live-графики</span>
-          <span id="networkSourceBadge">Нейросеть: Python backend</span>
         </div>
       </header>
 
