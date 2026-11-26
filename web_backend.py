@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 # Настройки окружения и потоков CPU (баланс скорости PPO-батчей и отзывчивости UI/SSE)
-_CPU_TORCH_THREADS = max(1, min(8, (os.cpu_count() or 4) // 2 + 2))
+_CPU_TORCH_THREADS = max(1, min(6, (os.cpu_count() or 4) // 2))
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['OMP_NUM_THREADS'] = str(_CPU_TORCH_THREADS)

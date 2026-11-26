@@ -685,28 +685,26 @@ class PPOAgent:
         training: bool = True,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         self.online_net.eval()
-        sig_t = torch.as_tensor(states, dtype=torch.float32, device=self.device)
-        map_t = torch.as_tensor(ego_maps, dtype=torch.float32, device=self.device)
+        sig_t = torch.from_numpy(states) if (isinstance(states, np.ndarray) and states.dtype == np.float32 and self.device.type == "cpu") else torch.as_tensor(states, dtype=torch.float32, device=self.device)
+        map_t = torch.from_numpy(ego_maps) if (isinstance(ego_maps, np.ndarray) and ego_maps.dtype == np.float32 and self.device.type == "cpu") else torch.as_tensor(ego_maps, dtype=torch.float32, device=self.device)
         logits, values = self.online_net(sig_t, map_t)
         masked_logits = self._masked_policy_logits(logits, sig_t)
-        probs = torch.softmax(masked_logits, dim=-1)
+        log_probs_all = F.log_softmax(masked_logits, dim=-1)
+        probs = log_probs_all.exp()
         greedy = torch.argmax(probs, dim=-1)
 
         if training:
-            dist = Categorical(probs=probs, validate_args=False)
-            actions = dist.sample()
-            log_probs = dist.log_prob(actions)
+            actions = torch.multinomial(probs, 1).squeeze(-1)
         else:
             actions = greedy
-            dist = Categorical(probs=probs, validate_args=False)
-            log_probs = dist.log_prob(actions)
+        log_probs = log_probs_all.gather(1, actions.unsqueeze(-1)).squeeze(-1)
 
         return (
-            actions.detach().cpu().numpy().astype(np.int64),
-            log_probs.detach().cpu().numpy().astype(np.float32),
-            values.detach().cpu().numpy().astype(np.float32),
-            probs.detach().cpu().numpy().astype(np.float32),
-            greedy.detach().cpu().numpy().astype(np.int64),
+            actions.detach().cpu().numpy().astype(np.int64, copy=False),
+            log_probs.detach().cpu().numpy().astype(np.float32, copy=False),
+            values.detach().cpu().numpy().astype(np.float32, copy=False),
+            probs.detach().cpu().numpy().astype(np.float32, copy=False),
+            greedy.detach().cpu().numpy().astype(np.int64, copy=False),
         )
 
     @torch.inference_mode()
@@ -810,10 +808,10 @@ class PPOAgent:
                 map_mb = b_maps[idx]
                 logits, new_values = self.online_net(sig_mb, map_mb)
                 masked_logits = self._masked_policy_logits(logits, sig_mb)
-                probs = torch.softmax(masked_logits, dim=-1)
-                dist = Categorical(probs=probs, validate_args=False)
-                new_logprob = dist.log_prob(b_actions[idx])
-                entropy = dist.entropy().mean()
+                log_probs_all = F.log_softmax(masked_logits, dim=-1)
+                probs = log_probs_all.exp()
+                new_logprob = log_probs_all.gather(1, b_actions[idx].unsqueeze(-1)).squeeze(-1)
+                entropy = -torch.where(probs > 0.0, probs * log_probs_all, torch.zeros_like(probs)).sum(dim=-1).mean()
 
                 log_ratio = new_logprob - b_logprobs[idx]
                 ratio = log_ratio.exp()

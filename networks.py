@@ -210,9 +210,9 @@ class PPOMapNetwork(nn.Module):
 
         self.map_conv = nn.Sequential(
             nn.Conv2d(self.map_channels, self.conv1_channels, kernel_size=3, padding=1),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Conv2d(self.conv1_channels, self.conv2_channels, kernel_size=3, stride=2, padding=0),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Flatten(),
         )
         with torch.no_grad():
@@ -242,6 +242,7 @@ class PPOMapNetwork(nn.Module):
         _ortho_init(self.critic_hidden1_layer, gain=1.41421356237)
         _ortho_init(self.critic_hidden2_layer, gain=1.41421356237)
         _ortho_init(self.value_head, gain=1.0)
+        self.map_conv.to(memory_format=torch.channels_last)
 
     def _prepare_pair(
         self,
@@ -265,7 +266,7 @@ class PPOMapNetwork(nn.Module):
         else:
             if ego_map.dim() == 3:
                 ego_map = ego_map.unsqueeze(0)
-            ego_map = ego_map.to(device=target_device, dtype=target_dtype)
+            ego_map = ego_map.to(device=target_device, dtype=target_dtype, memory_format=torch.channels_last)
         return signals, ego_map
 
     def forward_features(
