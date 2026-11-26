@@ -116,6 +116,8 @@ from smart_agent import SmartH5Agent, smart_model_candidates
 from telemetry import (
     CHOICE_TO_SYMBOL,
     DEATH_TO_SYMBOL,
+    SMART_SIGNAL_LABELS,
+    SMART_SIGNAL_SHORT_LABELS,
     STEP_TO_SYMBOL,
     SYMBOL_TO_CHOICE,
     SYMBOL_TO_DEATH,
@@ -125,6 +127,7 @@ from telemetry import (
     average_score_window,
     build_connection_payload,
     build_reward_rules_payload,
+    build_smart_network_payload,
     compact_death_snapshot,
     export_decision_stats,
     make_decision_stat_bucket,
@@ -1748,6 +1751,10 @@ class SnakeWebBackend:
         return self._set_board_size(next_board_size)
 
     def _network_payload(self) -> dict[str, Any]:
+        if self.mode == "smart":
+            payload = build_smart_network_payload(self.smart_agent, self.game)
+            self._network_payload_cache = payload
+            return payload
         
         started_at = time.perf_counter()
         cache_used = False
@@ -2029,7 +2036,7 @@ class SnakeWebBackend:
             "action_scores": q_values_list,
             "q_values": q_values_list,
             "reason_labels": dict(REASON_LABELS),
-            "signal_labels": dict(SIGNAL_LABELS),
+            "signal_labels": {**SIGNAL_LABELS, **SMART_SIGNAL_SHORT_LABELS},
             "terminal_reasons": list(TERMINAL_REASONS),
         }
 
@@ -2144,13 +2151,15 @@ class SnakeWebBackend:
                 
             self._ensure_runtime_consistency()
             self._sync_network_source()
+            network_payload = self._network_payload() if include_network else None
+            is_smart_mode = self.mode == "smart"
             payload = {
                 "device_kind": self.device_kind,
                 "device_label": self.device_label,
                 "device_details": self.device_details,
                 "device_mode": self.device_mode,
                 "available_devices": self.available_devices,
-                "model_input_size": int(self.last_state.size),
+                "model_input_size": len(SMART_SIGNAL_LABELS) if is_smart_mode else int(self.last_state.size),
                 "ppo_map_size": PPO_MAP_SIZE,
                 "network_input_adapter_mode": NETWORK_INPUT_ADAPTER_MODE,
                 "agent_kind": self.agent_kind,
@@ -2193,19 +2202,28 @@ class SnakeWebBackend:
                 "stats": self._stats_payload(),
                 "action_scores": self.last_q_values.tolist(),
                 "q_values": self.last_q_values.tolist(),
-                "network": self._network_payload() if include_network else None,
+                "network": network_payload,
                 "reason_labels": dict(REASON_LABELS),
-                "signal_labels": dict(SIGNAL_LABELS),
+                "signal_labels": {**SIGNAL_LABELS, **SMART_SIGNAL_SHORT_LABELS},
                 "terminal_reasons": list(TERMINAL_REASONS),
             }
             if include_details:
+                smart_gs = (
+                    network_payload["global_signals"]
+                    if (is_smart_mode and isinstance(network_payload, dict) and "global_signals" in network_payload)
+                    else (
+                        build_smart_network_payload(self.smart_agent, self.game)["global_signals"]
+                        if is_smart_mode
+                        else {
+                            "labels": self._current_signal_labels(),
+                            "values": self.last_state.tolist(),
+                        }
+                    )
+                )
                 payload.update({
                     "reward_rules": self._reward_rules_payload(),
-                    "observation": self.last_state.tolist(),
-                    "global_signals": {
-                        "labels": self._current_signal_labels(),
-                        "values": self.last_state.tolist(),
-                    },
+                    "observation": smart_gs["values"] if is_smart_mode else self.last_state.tolist(),
+                    "global_signals": smart_gs,
                     "last_death_snapshot": self.last_death_snapshot,
                     "decision_stats": export_decision_stats(self.decision_stats),
                     "history": [item.to_dict() for item in self.history],

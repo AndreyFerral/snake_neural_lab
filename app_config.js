@@ -115,7 +115,7 @@ const FRAME_PRESERVED_FIELDS = [
   "network",
   ...DEFERRED_STATE_FIELDS,
 ];
-const NETWORK_CONNECTION_KEYS = ["global_hidden1", "hidden1_hidden2", "hidden2_output", "hidden2_value"];
+const NETWORK_CONNECTION_KEYS = ["global_hidden1", "hidden1_hidden2", "hidden2_output", "hidden1_output", "hidden2_value"];
 const TERMINAL_REASONS = new Set();
 let REASON_LABELS = Object.freeze({});
 let SIGNAL_LABELS = Object.freeze({});

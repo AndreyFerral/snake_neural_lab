@@ -201,6 +201,11 @@ class TestWebBackendAndApi(unittest.TestCase):
                     json.loads(raw_json, parse_constant=_reject_nonfinite_json)
 
                     backend.mode = "smart"
+                    smart_net_snap = backend.state_snapshot(include_network=True, include_details=True)
+                    self.assertEqual(smart_net_snap["model_input_size"], 40)
+                    self.assertEqual(len(smart_net_snap["network"]["global_signals"]["labels"]), 40)
+                    self.assertEqual(smart_net_snap["network"]["global_signals"]["labels"][0], "sm_food_east")
+                    self.assertIn("sm_sim_fwd_area", smart_net_snap["signal_labels"])
                     res_smart = backend.handle_command({"type": "reset_agent"})
                     self.assertTrue(res_smart["ok"])
                     self.assertIn("state", res_smart)

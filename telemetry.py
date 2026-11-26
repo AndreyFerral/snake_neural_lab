@@ -298,3 +298,205 @@ def build_reward_rules_payload(agent_kind: str = "dqn", mode: str = "ai") -> dic
         "penalties": penalties,
         "note": "Только инференс .h5 — модель не обучается." if is_smart else "",
     }
+
+
+# 40 входных признаков внешней Keras-модели Zmey-smart (соответствуют SmartH5Agent.build_state)
+SMART_SIGNAL_LABELS: tuple[str, ...] = (
+    "sm_food_east",
+    "sm_food_west",
+    "sm_food_south",
+    "sm_food_north",
+    "sm_dir_up",
+    "sm_dir_down",
+    "sm_dir_left",
+    "sm_dir_right",
+    "sm_wall_east",
+    "sm_wall_west",
+    "sm_wall_south",
+    "sm_wall_north",
+    "sm_danger_fwd",
+    "sm_danger_left",
+    "sm_danger_right",
+    "sm_free_fwd",
+    "sm_free_left",
+    "sm_free_right",
+    "sm_free_back",
+    "sm_food_dx",
+    "sm_food_dy",
+    "sm_food_fwd_proj",
+    "sm_food_lat_proj",
+    "sm_food_manh",
+    "sm_snake_len",
+    "sm_wall_margin",
+    "sm_sim_fwd_dead",
+    "sm_sim_fwd_food",
+    "sm_sim_fwd_tail",
+    "sm_sim_fwd_area",
+    "sm_sim_left_dead",
+    "sm_sim_left_food",
+    "sm_sim_left_tail",
+    "sm_sim_left_area",
+    "sm_sim_right_dead",
+    "sm_sim_right_food",
+    "sm_sim_right_tail",
+    "sm_sim_right_area",
+    "sm_fill_ratio",
+    "sm_long_snake",
+)
+
+SMART_SIGNAL_SHORT_LABELS: dict[str, str] = {
+    "sm_food_east": "🍎→",
+    "sm_food_west": "🍎←",
+    "sm_food_south": "🍎↓",
+    "sm_food_north": "🍎↑",
+    "sm_dir_up": "🧭↑",
+    "sm_dir_down": "🧭↓",
+    "sm_dir_left": "🧭←",
+    "sm_dir_right": "🧭→",
+    "sm_wall_east": "🧱→",
+    "sm_wall_west": "🧱←",
+    "sm_wall_south": "🧱↓",
+    "sm_wall_north": "🧱↑",
+    "sm_danger_fwd": "⚠↑",
+    "sm_danger_left": "⚠←",
+    "sm_danger_right": "⚠→",
+    "sm_free_fwd": "📏↑",
+    "sm_free_left": "📏←",
+    "sm_free_right": "📏→",
+    "sm_free_back": "📏↓",
+    "sm_food_dx": "🍎dX",
+    "sm_food_dy": "🍎dY",
+    "sm_food_fwd_proj": "🍎F",
+    "sm_food_lat_proj": "🍎L",
+    "sm_food_manh": "🍎📏",
+    "sm_snake_len": "🐍#",
+    "sm_wall_margin": "🧱📏",
+    "sm_sim_fwd_dead": "💀↑",
+    "sm_sim_fwd_food": "🎯↑",
+    "sm_sim_fwd_tail": "🐍↑",
+    "sm_sim_fwd_area": "📐↑",
+    "sm_sim_left_dead": "💀←",
+    "sm_sim_left_food": "🎯←",
+    "sm_sim_left_tail": "🐍←",
+    "sm_sim_left_area": "📐←",
+    "sm_sim_right_dead": "💀→",
+    "sm_sim_right_food": "🎯→",
+    "sm_sim_right_tail": "🐍→",
+    "sm_sim_right_area": "📐→",
+    "sm_fill_ratio": "📊%",
+    "sm_long_snake": "🐍+",
+}
+
+_SMART_WEIGHTS_CACHE: dict[int, list[tuple[np.ndarray, np.ndarray, str]]] = {}
+
+
+def _extract_keras_dense_layers(model: Any) -> list[tuple[np.ndarray, np.ndarray, str]]:
+    cache_key = id(model)
+    cached = _SMART_WEIGHTS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    extracted: list[tuple[np.ndarray, np.ndarray, str]] = []
+    for layer in getattr(model, "layers", []):
+        weights = layer.get_weights() if hasattr(layer, "get_weights") else []
+        if len(weights) >= 2 and getattr(weights[0], "ndim", 0) == 2:
+            w = np.asarray(weights[0], dtype=np.float32)
+            b = np.asarray(weights[1], dtype=np.float32)
+            act_fn = getattr(layer, "activation", None)
+            act_name = getattr(act_fn, "__name__", "linear") if act_fn is not None else "linear"
+            extracted.append((w, b, str(act_name)))
+    if len(_SMART_WEIGHTS_CACHE) > 8:
+        _SMART_WEIGHTS_CACHE.clear()
+    _SMART_WEIGHTS_CACHE[cache_key] = extracted
+    return extracted
+
+
+def _apply_numpy_activation(x: np.ndarray, act_name: str) -> np.ndarray:
+    if act_name == "relu":
+        return np.maximum(x, 0.0)
+    if act_name == "tanh":
+        return np.tanh(x)
+    if act_name == "sigmoid":
+        return 1.0 / (1.0 + np.exp(-np.clip(x, -30.0, 30.0)))
+    if act_name == "softmax":
+        shifted = x - np.max(x)
+        ex = np.exp(shifted)
+        return ex / np.maximum(1e-8, np.sum(ex))
+    return x
+
+
+def build_smart_network_payload(smart_agent: Any, game: Any) -> dict[str, Any]:
+    """Строит реальный граф Keras-модели Zmey-smart чистым NumPy без изменения smart_agent.py."""
+    labels = list(SMART_SIGNAL_LABELS)
+    empty_payload = {
+        "global_signals": {"labels": labels, "values": [0.0] * len(labels)},
+        "ego_map": None,
+        "hidden1": [],
+        "hidden2": [],
+        "output": [0.0] * len(MODEL_ACTION_LABELS),
+        "value": [],
+        "connections": {
+            "global_hidden1": [],
+            "hidden1_hidden2": [],
+            "hidden2_output": [],
+            "hidden1_output": [],
+            "hidden2_value": [],
+        },
+    }
+    if not getattr(smart_agent, "loaded", False) or getattr(smart_agent, "model", None) is None:
+        return empty_payload
+
+    # Не сдвигаем lookahead_counter агента при визуализации графа
+    saved_counter = int(getattr(smart_agent, "lookahead_counter", 0))
+    try:
+        x_in = np.asarray(smart_agent.build_state(game), dtype=np.float32).ravel()
+    finally:
+        smart_agent.lookahead_counter = saved_counter
+
+    dense_layers = _extract_keras_dense_layers(smart_agent.model)
+    if not dense_layers:
+        empty_payload["global_signals"]["values"] = x_in.tolist()
+        return empty_payload
+
+    activations: list[np.ndarray] = [x_in]
+    cur = x_in
+    for w, b, act_name in dense_layers:
+        cur = _apply_numpy_activation(cur @ w + b, act_name).astype(np.float32, copy=False)
+        activations.append(cur)
+
+    output_vals = activations[-1]
+    hidden_count = max(0, len(dense_layers) - 1)
+    h1_vals = activations[1] if hidden_count >= 1 else np.empty(0, dtype=np.float32)
+    h2_vals = activations[2] if hidden_count >= 2 else np.empty(0, dtype=np.float32)
+
+    conns_in_h1: list[dict[str, Any]] = []
+    conns_h1_h2: list[dict[str, Any]] = []
+    conns_h2_out: list[dict[str, Any]] = []
+    conns_h1_out: list[dict[str, Any]] = []
+
+    if hidden_count >= 1:
+        w0 = dense_layers[0][0].T  # (H1, IN)
+        conns_in_h1 = build_connection_payload(x_in, h1_vals, w0, len(x_in), min(16, len(h1_vals)), 56)
+    if hidden_count == 1:
+        w_out = dense_layers[1][0].T  # (OUT, H1)
+        conns_h1_out = build_connection_payload(h1_vals, output_vals, w_out, min(16, len(h1_vals)), len(output_vals), 36)
+    elif hidden_count >= 2:
+        w1 = dense_layers[1][0].T  # (H2, H1)
+        conns_h1_h2 = build_connection_payload(h1_vals, h2_vals, w1, min(14, len(h1_vals)), min(10, len(h2_vals)), 90)
+        w_out = dense_layers[-1][0].T  # (OUT, H2)
+        conns_h2_out = build_connection_payload(h2_vals, output_vals, w_out, min(10, len(h2_vals)), len(output_vals), 30)
+
+    return {
+        "global_signals": {"labels": labels[: len(x_in)], "values": x_in.tolist()},
+        "ego_map": None,
+        "hidden1": h1_vals.tolist(),
+        "hidden2": h2_vals.tolist(),
+        "output": output_vals.tolist(),
+        "value": [],
+        "connections": {
+            "global_hidden1": conns_in_h1,
+            "hidden1_hidden2": conns_h1_h2,
+            "hidden2_output": conns_h2_out,
+            "hidden1_output": conns_h1_out,
+            "hidden2_value": [],
+        },
+    }

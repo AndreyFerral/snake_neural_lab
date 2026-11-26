@@ -305,6 +305,46 @@ const SnakeRenderers = {
     fill_ratio: "Доля заполнения поля змейкой (длина / площадь)",
     food_dist_norm: "Нормированное манхэттенское расстояние до яблока",
     tail_dist_norm: "Нормированное манхэттенское расстояние до хвоста",
+    sm_food_east: "Zmey-smart: еда правее головы (x)",
+    sm_food_west: "Zmey-smart: еда левее головы (x)",
+    sm_food_south: "Zmey-smart: еда ниже головы (y)",
+    sm_food_north: "Zmey-smart: еда выше головы (y)",
+    sm_dir_up: "Zmey-smart: курс вверх",
+    sm_dir_down: "Zmey-smart: курс вниз",
+    sm_dir_left: "Zmey-smart: курс влево",
+    sm_dir_right: "Zmey-smart: курс вправо",
+    sm_wall_east: "Zmey-smart: препятствие справа (абс.)",
+    sm_wall_west: "Zmey-smart: препятствие слева (абс.)",
+    sm_wall_south: "Zmey-smart: препятствие снизу (абс.)",
+    sm_wall_north: "Zmey-smart: препятствие сверху (абс.)",
+    sm_danger_fwd: "Zmey-smart: опасность прямо",
+    sm_danger_left: "Zmey-smart: опасность слева",
+    sm_danger_right: "Zmey-smart: опасность справа",
+    sm_free_fwd: "Zmey-smart: дистанция до преграды прямо",
+    sm_free_left: "Zmey-smart: дистанция до преграды слева",
+    sm_free_right: "Zmey-smart: дистанция до преграды справа",
+    sm_free_back: "Zmey-smart: дистанция до преграды сзади",
+    sm_food_dx: "Zmey-smart: смещение до еды по X",
+    sm_food_dy: "Zmey-smart: смещение до еды по Y",
+    sm_food_fwd_proj: "Zmey-smart: проекция еды по курсу",
+    sm_food_lat_proj: "Zmey-smart: боковая проекция еды",
+    sm_food_manh: "Zmey-smart: манхэттен до еды",
+    sm_snake_len: "Zmey-smart: нормированная длина змеи",
+    sm_wall_margin: "Zmey-smart: запас до ближайшей стены",
+    sm_sim_fwd_dead: "Zmey-smart: симуляция прямо — смерть",
+    sm_sim_fwd_food: "Zmey-smart: симуляция прямо — еда достижима",
+    sm_sim_fwd_tail: "Zmey-smart: симуляция прямо — хвост достижим",
+    sm_sim_fwd_area: "Zmey-smart: симуляция прямо — доля площади",
+    sm_sim_left_dead: "Zmey-smart: симуляция влево — смерть",
+    sm_sim_left_food: "Zmey-smart: симуляция влево — еда достижима",
+    sm_sim_left_tail: "Zmey-smart: симуляция влево — хвост достижим",
+    sm_sim_left_area: "Zmey-smart: симуляция влево — доля площади",
+    sm_sim_right_dead: "Zmey-smart: симуляция вправо — смерть",
+    sm_sim_right_food: "Zmey-smart: симуляция вправо — еда достижима",
+    sm_sim_right_tail: "Zmey-smart: симуляция вправо — хвост достижим",
+    sm_sim_right_area: "Zmey-smart: симуляция вправо — доля площади",
+    sm_fill_ratio: "Zmey-smart: заполненность поля",
+    sm_long_snake: "Zmey-smart: флаг длинной змеи (>= 35%)",
   },
 
   createColumnPositions(centerX, centerY, count, spacing) {
@@ -555,6 +595,31 @@ const SnakeRenderers = {
           ["pocket_merge_forward", "pocket_merge_left", "pocket_merge_right"],
           ["area_ratio_forward", "area_ratio_left", "area_ratio_right"]
         ]
+      },
+      {
+        title: "Еда и курс",
+        rows: [
+          ["sm_food_north", "sm_food_south", "sm_food_west", "sm_food_east"],
+          ["sm_dir_up", "sm_dir_down", "sm_dir_left", "sm_dir_right"],
+          ["sm_food_dx", "sm_food_dy", "sm_food_fwd_proj", "sm_food_lat_proj"]
+        ]
+      },
+      {
+        title: "Преграды и дистанции",
+        rows: [
+          ["sm_wall_north", "sm_wall_south", "sm_wall_west", "sm_wall_east"],
+          ["sm_danger_fwd", "sm_danger_left", "sm_danger_right", "sm_wall_margin"],
+          ["sm_free_fwd", "sm_free_left", "sm_free_right", "sm_free_back"],
+          ["sm_food_manh", "sm_snake_len", "sm_fill_ratio", "sm_long_snake"]
+        ]
+      },
+      {
+        title: "Симуляция (Lookahead)",
+        rows: [
+          ["sm_sim_fwd_dead", "sm_sim_fwd_food", "sm_sim_fwd_tail", "sm_sim_fwd_area"],
+          ["sm_sim_left_dead", "sm_sim_left_food", "sm_sim_left_tail", "sm_sim_left_area"],
+          ["sm_sim_right_dead", "sm_sim_right_food", "sm_sim_right_tail", "sm_sim_right_area"]
+        ]
       }
     ];
 
@@ -592,11 +657,11 @@ const SnakeRenderers = {
     const outputPillHeight = showEgoMapCard ? 36 : 40;
     const outputX = (showEgoMapCard ? rightCardX + rightCardPad : rightCardX) + outputBoxLeftOffset;
     const graphSpan = (outputX - outputBoxLeftOffset) - inputBusX;
-    const hidden1X = inputBusX + graphSpan * 0.34;
-    const hidden2X = inputBusX + graphSpan * 0.68;
-
-    const hidden1Indices = this.pickTopIndices(hidden1, 14);
+    const hidden1Indices = this.pickTopIndices(hidden1, hidden2.length > 0 ? 14 : 16);
     const hidden2Indices = this.pickTopIndices(hidden2, 10);
+    const hasHidden2 = hidden2Indices.length > 0;
+    const hidden1X = inputBusX + graphSpan * (hasHidden2 ? 0.34 : 0.50);
+    const hidden2X = inputBusX + graphSpan * 0.68;
     const validOutputIndices = outputIndices.filter((index) => index < output.length);
     const hidden1Positions = this.createColumnPositions(hidden1X, contentTop + contentHeight / 2, hidden1Indices.length, Math.min(35, contentHeight / Math.max(1, hidden1Indices.length)));
     const hidden2Positions = this.createColumnPositions(hidden2X, contentTop + contentHeight / 2, hidden2Indices.length, Math.min(44, contentHeight / Math.max(1, hidden2Indices.length)));
@@ -766,23 +831,35 @@ const SnakeRenderers = {
       highlightFrom: hFromIn, highlightTo: hToH1,
       routedFromSignals: true,
     });
-    this.drawConnections(ctx, connections.hidden1_hidden2, hidden1Map, hidden2Map, {
-      xOffsetFrom: 13, xOffsetTo: -13, cpX1: 62, cpX2: -62,
-      alphaMult: 4.4, alphaMin: 0.16, alphaMax: 0.78,
-      widthMult: 3.0, widthMin: 1.0, widthMax: 3.2,
-      posRgb: "92, 214, 173", negRgb: "255, 179, 71",
-      highlightFrom: hFromH1, highlightTo: hToH2,
-    });
-    this.drawConnections(ctx, connections.hidden2_output, hidden2Map, outputMap, {
-      xOffsetFrom: 13, xOffsetTo: -16, cpX1: 52, cpX2: -52,
-      alphaMult: 4.6, alphaMin: 0.18, alphaMax: 0.84,
-      widthMult: 3.2, widthMin: 1.1, widthMax: 3.6,
-      posRgb: "92, 214, 173", negRgb: "255, 179, 71",
-      highlightFrom: hFromH2, highlightTo: hToOut,
-    });
+    if (hasHidden2) {
+      this.drawConnections(ctx, connections.hidden1_hidden2, hidden1Map, hidden2Map, {
+        xOffsetFrom: 13, xOffsetTo: -13, cpX1: 62, cpX2: -62,
+        alphaMult: 4.4, alphaMin: 0.16, alphaMax: 0.78,
+        widthMult: 3.0, widthMin: 1.0, widthMax: 3.2,
+        posRgb: "92, 214, 173", negRgb: "255, 179, 71",
+        highlightFrom: hFromH1, highlightTo: hToH2,
+      });
+      this.drawConnections(ctx, connections.hidden2_output, hidden2Map, outputMap, {
+        xOffsetFrom: 13, xOffsetTo: -16, cpX1: 52, cpX2: -52,
+        alphaMult: 4.6, alphaMin: 0.18, alphaMax: 0.84,
+        widthMult: 3.2, widthMin: 1.1, widthMax: 3.6,
+        posRgb: "92, 214, 173", negRgb: "255, 179, 71",
+        highlightFrom: hFromH2, highlightTo: hToOut,
+      });
+    } else {
+      this.drawConnections(ctx, connections.hidden1_output, hidden1Map, outputMap, {
+        xOffsetFrom: 13, xOffsetTo: -16, cpX1: 68, cpX2: -68,
+        alphaMult: 4.6, alphaMin: 0.18, alphaMax: 0.84,
+        widthMult: 3.2, widthMin: 1.1, widthMax: 3.6,
+        posRgb: "92, 214, 173", negRgb: "255, 179, 71",
+        highlightFrom: hFromH1, highlightTo: hToOut,
+      });
+    }
 
     this.drawIndexedLayer(ctx, hidden1Indices, hidden1Positions, hidden1, 12.5, "H1", hoverState);
-    this.drawIndexedLayer(ctx, hidden2Indices, hidden2Positions, hidden2, 13.5, "H2", hoverState);
+    if (hasHidden2) {
+      this.drawIndexedLayer(ctx, hidden2Indices, hidden2Positions, hidden2, 13.5, "H2", hoverState);
+    }
 
     if (showEgoMapCard && validOutputIndices.length > 0) {
       this.roundedRect(ctx, rightCardX, rightStartY, rightCardWidth, policyCardH, 10);
@@ -862,7 +939,9 @@ const SnakeRenderers = {
     ctx.fillText(headerInput, inputX, titleY);
     ctx.textAlign = "center";
     ctx.fillText(headerH1, hidden1X, titleY);
-    ctx.fillText(headerH2, hidden2X, titleY);
+    if (hasHidden2) {
+      ctx.fillText(headerH2, hidden2X, titleY);
+    }
     ctx.fillText(headerOutput, rightCardX + rightCardWidth / 2, titleY);
     ctx.textAlign = "start";
 
@@ -962,28 +1041,33 @@ const SnakeRenderers = {
       });
     } else if (hoverState.layer === "H1" || hoverState.layer === "H2") {
       lines.push(`${hoverState.layer}-${hoverState.index}: активация = ${Number(hoverState.value).toFixed(3)}`);
-      const nextList = hoverState.layer === "H1" ? connections.hidden1_hidden2 : connections.hidden2_output;
-      const targetPrefix = hoverState.layer === "H1" ? "H2-" : "";
+      const directToOut = hoverState.layer === "H1" && !(connections.hidden1_hidden2 || []).length && (connections.hidden1_output || []).length > 0;
+      const nextList = hoverState.layer === "H1"
+        ? (directToOut ? connections.hidden1_output : connections.hidden1_hidden2)
+        : connections.hidden2_output;
       const topConns = (nextList || [])
         .filter((c) => c.from_index === hoverState.index)
         .sort((a, b) => Math.abs(b.weight) - Math.abs(a.weight))
         .slice(0, 3);
       topConns.forEach((c) => {
         const w = c.weight ?? 0;
-        const targetLabel = hoverState.layer === "H2"
+        const targetLabel = (hoverState.layer === "H2" || directToOut)
           ? (outputLabels[c.to_index] ?? `Out-${c.to_index}`)
-          : `${targetPrefix}${c.to_index}`;
+          : `H2-${c.to_index}`;
         lines.push(`→ ${targetLabel}: w=${w >= 0 ? "+" : ""}${w.toFixed(2)}`);
       });
     } else if (hoverState.layer === "OUT") {
       lines.push(`Выход «${hoverState.label}»: ${Number(hoverState.value).toFixed(3)}`);
-      const topConns = (connections.hidden2_output || [])
+      const fromH2 = (connections.hidden2_output || []).length > 0;
+      const outConns = fromH2 ? connections.hidden2_output : connections.hidden1_output;
+      const srcPrefix = fromH2 ? "H2-" : "H1-";
+      const topConns = (outConns || [])
         .filter((c) => c.to_index === hoverState.index)
         .sort((a, b) => Math.abs(b.weight) - Math.abs(a.weight))
         .slice(0, 3);
       topConns.forEach((c) => {
         const w = c.weight ?? 0;
-        lines.push(`← H2-${c.from_index}: w=${w >= 0 ? "+" : ""}${w.toFixed(2)}`);
+        lines.push(`← ${srcPrefix}${c.from_index}: w=${w >= 0 ? "+" : ""}${w.toFixed(2)}`);
       });
     }
     if (!lines.length) return;
