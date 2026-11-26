@@ -23,7 +23,6 @@ class SnakeLabApp {
     this.resetAgentButton = document.getElementById("resetAgent");
     this.restartBackendButton = document.getElementById("restartBackend");
     this.shutdownBackendButton = document.getElementById("shutdownBackend");
-    this.recordReplaysCheckbox = document.getElementById("recordReplays");
     this.ppoMultiboardControl = document.getElementById("ppoMultiboardControl");
     this.ppoMultiboardCheckbox = document.getElementById("ppoMultiboard");
 
@@ -507,9 +506,6 @@ class SnakeLabApp {
     });
     this.restartBackendButton?.addEventListener("click", () => this.restartBackend());
     this.shutdownBackendButton?.addEventListener("click", () => this.shutdownBackend());
-    this.recordReplaysCheckbox?.addEventListener("change", () => {
-      this.sendCommand("set_record_replays", this.recordReplaysCheckbox.checked);
-    });
     this.ppoMultiboardCheckbox?.addEventListener("change", () => {
       this.sendCommand("set_ppo_multiboard", this.ppoMultiboardCheckbox.checked);
     });
@@ -850,11 +846,6 @@ class SnakeLabApp {
     this.syncSmartModelSelect();
     if (this.boardSizeSelect) { const nextBoardSize = String(this.state.game.size); if (this.boardSizeSelect.value !== nextBoardSize) this.boardSizeSelect.value = nextBoardSize; }
     if (this.speedRange) { const nextSpeed = String(this.state.speed); if (this.speedRange.value !== nextSpeed) this.speedRange.value = nextSpeed; }
-    if (this.recordReplaysCheckbox && typeof this.state.record_replays === "boolean") {
-      if (this.recordReplaysCheckbox.checked !== this.state.record_replays) {
-        this.recordReplaysCheckbox.checked = this.state.record_replays;
-      }
-    }
     const isSmartMode = this.smartContextActive;
     const isPpoMode = !isSmartMode && this.state.agent_kind === "ppo";
     this.setHidden(this.ppoMultiboardControl, !isPpoMode);

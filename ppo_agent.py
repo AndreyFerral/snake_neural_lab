@@ -1165,7 +1165,6 @@ class ParallelPPORunner:
         self.envs: list[Any] = []
         self.episode_rewards: list[float] = []
         self.recent_random_flags: list[Deque[bool]] = []
-        self.replay_histories: list[list[dict[str, Any]]] = []
         self._state_snapshots: list[Deque[tuple[int, dict[str, object]]]] = []
         self.is_replay_env: list[bool] = []
         self._active_replay_entry: list[dict[str, Any] | None] = []
@@ -1216,7 +1215,6 @@ class ParallelPPORunner:
         self.envs = [self.env_factory(bs) for bs in self.slot_boards]
         self.episode_rewards = [0.0 for _ in range(self.num_envs)]
         self.recent_random_flags = [deque(maxlen=12) for _ in range(self.num_envs)]
-        self.replay_histories = [[] for _ in range(self.num_envs)]
         self._state_snapshots = [deque(maxlen=8) for _ in range(self.num_envs)]
         self.is_replay_env = [False for _ in range(self.num_envs)]
         self._active_replay_entry = [None for _ in range(self.num_envs)]
@@ -1362,7 +1360,6 @@ class ParallelPPORunner:
         slot_bs = self.slot_boards[idx]
         self.episode_rewards[idx] = 0.0
         self.recent_random_flags[idx].clear()
-        self.replay_histories[idx].clear()
         self._state_snapshots[idx].clear()
         self._active_replay_entry[idx] = None
         fail_buf = self.failure_buffers_by_board.get(slot_bs, self.failure_replay_buffer)
@@ -1404,7 +1401,7 @@ class ParallelPPORunner:
             ego_maps[idx] = env.get_egocentric_map(map_sz)
         return states, ego_maps
 
-    def step_alive(self, agent: PPOAgent, *, record_replays: bool = False) -> list[dict[str, Any]]:
+    def step_alive(self, agent: PPOAgent) -> list[dict[str, Any]]:
         states, ego_maps = self._fill_batch_obs(agent)
         actions, log_probs, values, probs_np, greedy_actions = agent.select_batch_actions(
             states,
@@ -1470,24 +1467,7 @@ class ParallelPPORunner:
             if not is_replay:
                 if step_num == 1:
                     self.recent_random_flags[idx].clear()
-                    self.replay_histories[idx].clear()
                 self.recent_random_flags[idx].append(bool(was_random))
-                if record_replays:
-                    self.replay_histories[idx].append({
-                        "step": int(env.step_count),
-                        "snake": [[int(c[0]), int(c[1])] for c in env.snake],
-                        "food": [int(env.food[0]), int(env.food[1])],
-                        "direction": int(env.direction),
-                        "action": act,
-                        "q_values": [round(float(v), 3) for v in probs_np[idx]],
-                        "was_random": bool(was_random),
-                        "reward": float(shaped_reward),
-                        "reason": reason,
-                        "penalties": list(all_penalties),
-                        "steps_without_food": int(env.steps_without_food),
-                    })
-                    if len(self.replay_histories[idx]) > 500:
-                        self.replay_histories[idx].pop(0)
 
             if done:
                 slot_bs = self.slot_boards[idx]
@@ -1555,7 +1535,6 @@ class ParallelPPORunner:
                         "reason": reason,
                         "reward": float(self.episode_rewards[idx]),
                         "penalty_reasons": list(all_penalties),
-                        "replay_steps": list(self.replay_histories[idx]) if record_replays else [],
                         "loss": float(agent.last_loss),
                     }
                     completed.append(finished_snapshot)

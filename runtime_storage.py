@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-import errno
-import gzip
 import json
 from pathlib import Path
 import time
 from typing import Any
 
-from backend_config import PERF_LOG_MAX_BYTES, SLOW_API_MS
+from backend_config import PERF_LOG_MAX_BYTES
 
 
 def write_json_atomic(target_path: Path, payload: Any) -> None:
@@ -106,142 +103,3 @@ def log_perf(runtime_dir: Path, perf_log_path: Path, event: str, elapsed_ms: flo
             handle.write(line + "\n")
     except OSError:
         pass
-
-
-class ReplayManager:
-    """Ограниченный фоновый архиватор реплеев (.json.gz) с ротацией."""
-
-    def __init__(self, replays_dir: Path, *, keep_count: int = 10, perf_logger: Any | None = None) -> None:
-        self.replays_dir = replays_dir
-        self.keep_count = keep_count
-        self.perf_logger = perf_logger
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="snake-replay")
-        self._closed = False
-
-    def submit(
-        self,
-        steps: list[dict[str, Any]],
-        score: int,
-        reason: str,
-        prefix: str,
-        board_size: int,
-        episode_counter: int,
-        agent_kind: str,
-    ) -> None:
-        if self._closed or not steps:
-            return
-        steps_copy = list(steps)
-        try:
-            self._executor.submit(
-                self._save_worker,
-                steps_copy,
-                score,
-                reason,
-                prefix,
-                board_size,
-                episode_counter,
-                agent_kind,
-            )
-        except RuntimeError:
-            pass
-
-    def _ensure_readme(self) -> None:
-        readme_path = self.replays_dir / "README.md"
-        if readme_path.exists():
-            return
-        try:
-            readme_content = (
-                "# Папка реплеев / Replays Folder\n\n"
-                "Здесь сохраняются JSON-записи сыгранных игр для последующего анализа.\n\n"
-                "## Как запустить анализатор:\n\n"
-                "Все инструменты лежат в папке `analyzer/` в корне проекта.\n\n"
-                "1. **Запуск комплексного анализа всех реплеев:**\n"
-                "   ```bash\n"
-                "   python analyzer/run_analysis.py\n"
-                "   ```\n\n"
-                "2. **Визуализация шагов конкретного реплея:**\n"
-                "   ```bash\n"
-                "   python analyzer/visualize_steps.py .runtime/replays/<replay_file>.json.gz\n"
-                "   ```\n"
-            )
-            readme_path.write_text(readme_content, encoding="utf-8")
-        except OSError:
-            pass
-
-    def _save_worker(
-        self,
-        steps: list[dict[str, Any]],
-        score: int,
-        reason: str,
-        prefix: str,
-        board_size: int,
-        episode_counter: int,
-        agent_kind: str,
-    ) -> None:
-        started_at = time.perf_counter()
-        replay_data = {
-            "agent_kind": agent_kind,
-            "board_size": board_size,
-            "episode": int(episode_counter),
-            "total_steps": int(steps[-1]["step"]) if steps else 0,
-            "final_score": score,
-            "final_reason": reason,
-            "steps": steps,
-        }
-
-        self.replays_dir.mkdir(parents=True, exist_ok=True)
-        self._ensure_readme()
-
-        try:
-            json_str = json.dumps(replay_data, ensure_ascii=False)
-            compressed_bytes = gzip.compress(json_str.encode("utf-8"), compresslevel=6)
-        except Exception as exc:
-            print(f"Error serializing/compressing replay data: {exc}")
-            compressed_bytes = None
-
-        if compressed_bytes is not None:
-            timestamp = int(time.time())
-            filename = f"replay_score_{score}_ep_{episode_counter}_{prefix}_{timestamp}.json.gz"
-            archive_path = self.replays_dir / filename
-            try:
-                archive_path.write_bytes(compressed_bytes)
-            except Exception as exc:
-                print(f"Error saving archived replay: {exc}")
-
-        self.prune()
-
-        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
-        if elapsed_ms >= SLOW_API_MS and self.perf_logger is not None:
-            self.perf_logger("slow_save_replay", elapsed_ms, steps=len(steps), score=score, reason=reason)
-
-    def prune(self) -> None:
-        if not self.replays_dir.is_dir():
-            return
-        files: list[tuple[float, Path]] = []
-        for path in self.replays_dir.glob("replay_score_*.json.gz"):
-            try:
-                files.append((path.stat().st_mtime, path))
-            except OSError:
-                continue
-        files.sort(key=lambda item: item[0], reverse=True)
-        for _, path in files[self.keep_count :]:
-            try:
-                if path.is_file():
-                    path.unlink()
-            except OSError as exc:
-                if getattr(exc, "errno", None) != errno.ENOENT:
-                    print(f"Error deleting old replay {path.name}: {exc}")
-
-    def clear(self) -> None:
-        if not self.replays_dir.is_dir():
-            return
-        for path in self.replays_dir.glob("*.json*"):
-            try:
-                if path.is_file():
-                    path.unlink()
-            except OSError:
-                pass
-
-    def shutdown(self, *, wait: bool = False) -> None:
-        self._closed = True
-        self._executor.shutdown(wait=wait)

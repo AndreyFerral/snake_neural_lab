@@ -97,7 +97,7 @@ class TestAgents(unittest.TestCase):
 
         runner = ParallelPPORunner(2, 10, env_factory=SnakeEnv)
         for _ in range(9):
-            runner.step_alive(agent, record_replays=False)
+            runner.step_alive(agent)
         self.assertGreaterEqual(agent.total_updates, 1)
         self.assertTrue(np.isfinite(agent.last_loss))
 
@@ -144,7 +144,7 @@ class TestAgents(unittest.TestCase):
         # Large lr + tight target_kl should trigger KL early stopping cleanly
         runner = ParallelPPORunner(2, 10, env_factory=SnakeEnv)
         for _ in range(9):
-            runner.step_alive(agent, record_replays=False)
+            runner.step_alive(agent)
         self.assertGreaterEqual(agent.total_updates, 1)
         self.assertGreaterEqual(agent.kl_early_stops, 1)
         self.assertTrue(np.isfinite(agent.last_approx_kl))
@@ -203,7 +203,7 @@ class TestAgents(unittest.TestCase):
         env0.food = (0, 9)
         env0._clear_observation_cache()
 
-        completed = runner.step_alive(agent, record_replays=False)
+        completed = runner.step_alive(agent)
         honest_indices = [c["index"] for c in completed]
         self.assertIn(0, honest_indices)
         self.assertEqual(len(runner.failure_replay_buffer), 1)
@@ -214,7 +214,7 @@ class TestAgents(unittest.TestCase):
         env3.direction = 1
         env3.food = (0, 9)
         env3._clear_observation_cache()
-        runner.step_alive(agent, record_replays=False)
+        runner.step_alive(agent)
         self.assertTrue(runner.is_replay_env[3])
 
         # Now kill the replay episode on slot 3: it must NOT appear in `completed`
@@ -222,7 +222,7 @@ class TestAgents(unittest.TestCase):
         env3.direction = 1
         env3.food = (0, 9)
         env3._clear_observation_cache()
-        completed_after = runner.step_alive(agent, record_replays=False)
+        completed_after = runner.step_alive(agent)
         self.assertNotIn(3, [c["index"] for c in completed_after])
         self.assertGreaterEqual(runner.failure_replays_completed, 1)
 
@@ -361,7 +361,7 @@ class TestAgents(unittest.TestCase):
         env0.direction = 1
         env0.food = (0, 9)
         env0._clear_observation_cache()
-        runner.step_alive(agent, record_replays=False)
+        runner.step_alive(agent)
         self.assertEqual(len(runner.endgame_failure_buffer), 1)
         entry = runner.endgame_failure_buffer[0]
         entry["fails"] = 5
@@ -372,7 +372,7 @@ class TestAgents(unittest.TestCase):
         env3.direction = 1
         env3.food = (0, 9)
         env3._clear_observation_cache()
-        runner.step_alive(agent, record_replays=False)
+        runner.step_alive(agent)
         self.assertEqual(len(runner.endgame_failure_buffer), 0)
 
     def test_ppo_multiboard_layout_and_runner(self) -> None:
@@ -407,7 +407,7 @@ class TestAgents(unittest.TestCase):
         self.assertEqual([int(env.board_size) for env in runner.envs], list(mb_slots))
         self.assertEqual(set(runner.failure_buffers_by_board.keys()), set(mb_slots))
         for _ in range(7):
-            runner.step_alive(agent, record_replays=False)
+            runner.step_alive(agent)
         self.assertGreaterEqual(agent.total_updates, 1)
         self.assertTrue(np.isfinite(agent.last_loss))
 

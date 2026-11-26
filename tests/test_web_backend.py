@@ -59,7 +59,7 @@ class TestWebBackendAndApi(unittest.TestCase):
                 torch.save(ppo_ckpt, tmp / "snake_ppo.pt")
 
                 (tmp / "active_context.json").write_text(
-                    json.dumps({"agent_kind": "ppo", "mode": "manual", "board_size": 10, "record_replays": False}),
+                    json.dumps({"agent_kind": "ppo", "mode": "manual", "board_size": 10}),
                     encoding="utf-8",
                 )
 
@@ -200,15 +200,10 @@ class TestWebBackendAndApi(unittest.TestCase):
                     raw_json = (tmp / "snake_model_stats.json").read_text(encoding="utf-8")
                     json.loads(raw_json, parse_constant=_reject_nonfinite_json)
 
-                    replays_dir = tmp / "replays"
-                    replays_dir.mkdir(exist_ok=True)
-                    dummy_replay = replays_dir / "replay_score_10_ep_1_live_1.json.gz"
-                    dummy_replay.write_bytes(b"test")
                     backend.mode = "smart"
                     res_smart = backend.handle_command({"type": "reset_agent"})
                     self.assertTrue(res_smart["ok"])
                     self.assertIn("state", res_smart)
-                    self.assertTrue(dummy_replay.exists())
                 finally:
                     backend.shutdown(fast=True)
             finally:

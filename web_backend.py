@@ -98,7 +98,6 @@ from dqn_agent import (
 )
 from ppo_agent import PPOAgent, ParallelPPORunner, build_multiboard_layout, format_multiboard_summary
 from runtime_storage import (
-    ReplayManager,
     checkpoint_path_for_agent as _checkpoint_path_for_agent,
     clear_aux_stats_store as _clear_aux_stats_store,
     compact_model_stats,
@@ -256,10 +255,6 @@ class SnakeWebBackend:
         self.decision_stats = make_decision_stats()
         self.recent_step_snapshots: Deque[dict[str, Any]] = deque(maxlen=18)
         self.training_display_index = 0
-        self.current_replay_steps: list[dict[str, Any]] = []
-        self.replays_dir = RUNTIME_DIR / "replays"
-        self.replay_manager = ReplayManager(self.replays_dir, perf_logger=log_perf)
-        self.record_replays = True
         self.ppo_multiboard = True
         self.last_eval_result: dict[str, Any] | None = None
         self._eval_running = False
@@ -317,7 +312,6 @@ class SnakeWebBackend:
                 self.lock.release()
         if payloads is not None:
             self._write_save_payloads(*payloads)
-        self.replay_manager.shutdown(wait=not fast)
         _win_timer_end(self._win_timer_enabled)
         self._win_timer_enabled = False
 
@@ -615,7 +609,6 @@ class SnakeWebBackend:
             agent_ref: DQNAgent | PPOAgent | None = None
             runner_ref: ParallelPPORunner | None = None
             prev_updates = 0
-            record_replays = False
 
             with self.ppo_worker_lock:
                 if (
@@ -630,11 +623,10 @@ class SnakeWebBackend:
                             self._reset_training_runner()
                 runner_ref = self.training_runner
                 agent_ref = self.agent
-                record_replays = bool(self.record_replays)
                 if runner_ref is None or not isinstance(agent_ref, PPOAgent):
                     continue
                 prev_updates = int(agent_ref.total_updates)
-                completed = runner_ref.step_alive(agent_ref, record_replays=record_replays)
+                completed = runner_ref.step_alive(agent_ref)
 
             did_update = isinstance(agent_ref, PPOAgent) and int(agent_ref.total_updates) > prev_updates
             if completed or did_update:
@@ -660,14 +652,6 @@ class SnakeWebBackend:
                                     prev_b = float(agent_ref.best_fill_by_board.get(ep_board, 0.0))
                                     if fill_r > prev_b:
                                         agent_ref.best_fill_by_board[ep_board] = fill_r
-                            replay_steps = item.get("replay_steps")
-                            if record_replays and ep_board == active_board and isinstance(replay_steps, list) and replay_steps:
-                                self._save_replay(
-                                    replay_steps,
-                                    ep_score,
-                                    ep_reason or "unknown",
-                                    prefix=f"ppo_u{int(agent_ref.total_updates)}",
-                                )
                         has_victory = any(item.get("reason") == "victory" for item in completed)
                         if new_best_policy or did_update or has_victory:
                             self._schedule_save(urgent=has_victory)
@@ -883,7 +867,7 @@ class SnakeWebBackend:
 
         prev_updates = int(getattr(self.agent, "total_updates", 0))
         with self.agent_lock:
-            completed = self.training_runner.step_alive(self.agent, record_replays=self.record_replays)
+            completed = self.training_runner.step_alive(self.agent)
         new_best_policy = False
         active_board = int(self.game.board_size)
         for item in completed:
@@ -905,14 +889,6 @@ class SnakeWebBackend:
                         prev_b = float(self.agent.best_fill_by_board.get(ep_board, 0.0))
                         if fill_r > prev_b:
                             self.agent.best_fill_by_board[ep_board] = fill_r
-            replay_steps = item.get("replay_steps")
-            if self.record_replays and ep_board == active_board and isinstance(replay_steps, list) and replay_steps:
-                self._save_replay(
-                    replay_steps,
-                    ep_score,
-                    ep_reason or "unknown",
-                    prefix=f"ppo_u{int(getattr(self.agent, 'total_updates', 0))}",
-                )
 
         if (
             new_best_policy
@@ -1024,25 +1000,6 @@ class SnakeWebBackend:
         pre_step_snapshot["max_steps_without_food"] = int(self.game.max_steps_without_food)
         self.recent_step_snapshots.append(pre_step_snapshot)
 
-        # Record replay step only when recording is enabled
-        if self.record_replays:
-            q_vals = [round(float(v), 2) for v in q_values] if q_values is not None and len(q_values) > 0 else []
-            self.current_replay_steps.append({
-                "step": int(self.game.step_count),
-                "snake": [[int(coord[0]), int(coord[1])] for coord in self.game.snake],
-                "food": [int(self.game.food[0]), int(self.game.food[1])],
-                "direction": int(self.game.direction),
-                "action": int(visible_action),
-                "q_values": q_vals,
-                "was_random": bool(was_random),
-                "reward": float(reward),
-                "reason": str(reason),
-                "penalties": list(self.last_penalty_reasons),
-                "steps_without_food": int(self.game.steps_without_food),
-            })
-            if len(self.current_replay_steps) > 500:
-                self.current_replay_steps.pop(0)
-
         if training_mode and self.agent_kind == "dqn":
             priority_scale = compute_dqn_priority_scale(
                 done,
@@ -1111,10 +1068,6 @@ class SnakeWebBackend:
             max_steps_without_food=self.game.max_steps_without_food,
         ) if training_mode else float(getattr(self.agent, "last_fitness", 0.0))
 
-        # Save replay for individual game
-        self._save_replay(self.current_replay_steps, self.game.score, reason, prefix="live")
-        self.current_replay_steps = []
-        
         if training_mode:
             self.fitness_ema = fitness if self.fitness_ema == 0 else self.fitness_ema * 0.85 + fitness * 0.15
 
@@ -1174,25 +1127,8 @@ class SnakeWebBackend:
         self.last_outcome_reason = "new_game"
         self.last_penalty_reasons = []
         self.recent_step_snapshots.clear()
-        self.current_replay_steps.clear()
         self.last_state = self._current_observation()
         _, self.last_q_values, _, self.last_greedy_action = self._select_current_action(self.last_state, False)
-
-    def _save_replay(self, steps: list[dict[str, Any]], score: int, reason: str, prefix: str) -> None:
-        if not self.record_replays or not steps:
-            return
-        self.replay_manager.submit(
-            steps,
-            score,
-            reason,
-            prefix,
-            self.game.board_size,
-            self.episode_counter,
-            self.agent_kind,
-        )
-
-    def _clear_replays_directory(self) -> None:
-        self.replay_manager.clear()
 
     def _build_recent_step_snapshot(
         self,
@@ -1247,7 +1183,6 @@ class SnakeWebBackend:
             "board_size": int(self.game.board_size),
             "smart_model": self.smart_agent.model_path.name if self.smart_agent.model_path else "",
             "speed": self.speed,
-            "record_replays": self.record_replays,
             "ppo_multiboard": self.ppo_multiboard,
         }
 
@@ -1302,7 +1237,6 @@ class SnakeWebBackend:
         except (TypeError, ValueError):
             pass
 
-        self.record_replays = bool(payload.get("record_replays", True))
         self.ppo_multiboard = bool(payload.get("ppo_multiboard", True))
 
         self.agent = self._create_native_agent(self.agent_kind)
@@ -1349,7 +1283,6 @@ class SnakeWebBackend:
             "last_reason": str(self.last_reason),
             "last_outcome_reason": str(self.last_outcome_reason),
             "last_penalty_reasons": list(self.last_penalty_reasons),
-            "record_replays": bool(self.record_replays),
         }
 
     def _load_agent_state_payload(self, payload: dict[str, Any] | None) -> None:
@@ -2244,7 +2177,6 @@ class SnakeWebBackend:
                 "last_outcome_reason": self.last_outcome_reason,
                 "last_penalty_reasons": list(self.last_penalty_reasons),
                 "persistence_enabled": self.persistence_enabled,
-                "record_replays": self.record_replays,
                 "ppo_multiboard": self.ppo_multiboard,
                 "ppo_multiboard_summary": self._ppo_multiboard_summary(),
                 "game": {
@@ -2550,10 +2482,6 @@ class SnakeWebBackend:
                 ok, message = self._set_device_mode(value)
                 if not ok:
                     return {"ok": False, "error": message}
-            elif command == "set_record_replays":
-                if not isinstance(value, bool):
-                    return {"ok": False, "error": "Value must be a boolean"}
-                self.record_replays = value
             elif command == "set_ppo_multiboard":
                 if not isinstance(value, bool):
                     return {"ok": False, "error": "Value must be a boolean"}
@@ -2597,7 +2525,6 @@ class SnakeWebBackend:
                         self.running = False
                         self._reset_environment_state()
                     else:
-                        self._clear_replays_directory()
                         board_size = self.game.board_size
                         self._delete_active_model_storage()
                         self.game = SnakeEnv(board_size=board_size)
@@ -2631,7 +2558,7 @@ class SnakeWebBackend:
             if command in {
                 "set_agent_kind", "set_mode", "set_smart_model", "set_board_size",
                 "cycle_board_size", "set_speed", "reset_agent",
-                "restart_server", "shutdown_server", "set_record_replays", "set_ppo_multiboard",
+                "restart_server", "shutdown_server", "set_ppo_multiboard",
             }:
                 self._save_active_context()
             self._update_frame_cache()
